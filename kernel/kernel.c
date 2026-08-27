@@ -94,6 +94,7 @@ void kmain(void *multiboot_info) {
     vfs_selftest();
 
     cpu_init();
+    cpu_state_selftest();
 
     process_init();
     syscall_init();

@@ -16,6 +16,16 @@
 - **No host test runner.** Every verification is an in-kernel selftest or a userland test program under headless QEMU, checked by grepping the serial log. Never write or propose host unit tests.
 - **QEMU never exits on its own.** Always wrap it in `timeout`.
 - **Every verification needs a fresh disk image.** `fat16_write_selftest` creates `/NEWDIR`, so a stale image reports `FAILED` on the second and later boots. Always `rm -f build/disk.img build/disk2.img` before `make disk-image`. This has produced false alarms four times in this project's history — twice in the last milestone alone.
+- **Regenerate the disk images BETWEEN the two CPU models, not just
+  before the pair.** The first run creates `/NEWDIR`, so the second
+  reports `fat16_write_selftest FAILED` on an otherwise perfect boot.
+  Every dual-model loop in this plan needs
+  `rm -f build/disk.img build/disk2.img && make disk-image` *inside*
+  the loop.
+- **Do not put `pkill -f qemu-system-x86_64` in the same shell command
+  as anything else** — it matches and kills the invoking shell's own
+  process group, aborting the rest of the command with exit 144. Kill
+  strays in a separate call, or by pid.
 - **Kill stray QEMU processes before a run.** A previous run still holding `build/disk.img` fails the next one with `Failed to get "write" lock`, and the log comes back empty. `pkill -f qemu-system-x86_64` first if in doubt.
 - **Work happens directly on `main`.** No feature branches (`CLAUDE.md`).
 - **The kernel stays `-mno-sse`.** Only userland gains AVX/MMX. Kernel code must never touch FP registers; `cpu.c`'s inline assembly is the sole exception and it only names the save/restore instructions.
