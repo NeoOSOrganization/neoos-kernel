@@ -25,6 +25,7 @@
 #define SYS_THREAD_EXIT   18
 #define SYS_THREAD_JOIN   19
 #define SYS_THREAD_SELF   20
+#define SYS_RT_SIGACTION  21
 #define SYS_KILL          29
 #define SYS_TKILL         30
 #define SYS_TGKILL        31
@@ -147,6 +148,14 @@ int __sys_thread_join(int tid, int *code) {
 
 int __sys_thread_self(void) {
     return (int)syscall0(SYS_THREAD_SELF);
+}
+
+struct k_sigaction;
+long __sys_rt_sigaction(int sig, const struct k_sigaction *act,
+                        struct k_sigaction *old) {
+    return (long)syscall3(SYS_RT_SIGACTION, sig,
+                          (int64_t)(uint64_t)(uintptr_t)act,
+                          (int64_t)(uint64_t)(uintptr_t)old);
 }
 
 int kill(int pid, int sig)             { return (int)syscall2(SYS_KILL, pid, sig); }

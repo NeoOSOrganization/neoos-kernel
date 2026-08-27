@@ -97,6 +97,29 @@ int paging_unmap_from(uint64_t *pml4, uint64_t virt, int free_frame) {
     return 1;
 }
 
+int user_range_writable(uint64_t addr, uint64_t len) {
+    if (len == 0) { return 1; }
+    // Reject anything that is not a canonical low-half (user) address,
+    // including wraparound.
+    if (addr + len < addr) { return 0; }
+    if (addr + len > USER_ADDR_LIMIT) { return 0; }
+
+    uint64_t cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+    uint64_t *pml4 = (uint64_t *)phys_to_virt(cr3 & PAGE_ADDR_MASK);
+
+    for (uint64_t v = addr & ~0xFFFULL; v < addr + len; v += PMM_FRAME_SIZE) {
+        uint64_t *pdpt = table_entry(pml4, PML4_INDEX(v), 0, 0);
+        uint64_t *pd   = pdpt ? table_entry(pdpt, PDPT_INDEX(v), 0, 0) : 0;
+        uint64_t *pt   = pd   ? table_entry(pd,   PD_INDEX(v),   0, 0) : 0;
+        if (!pt) { return 0; }
+        uint64_t e = pt[PT_INDEX(v)];
+        const uint64_t need = PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
+        if ((e & need) != need) { return 0; }
+    }
+    return 1;
+}
+
 uint64_t paging_translate(uint64_t virt) {
     uint64_t *pdpt = table_entry(p4_table, PML4_INDEX(virt), 0, 0);
     uint64_t *pd   = pdpt ? table_entry(pdpt, PDPT_INDEX(virt), 0, 0) : 0;

@@ -36,6 +36,8 @@
 #define SYS_THREAD_EXIT   18
 #define SYS_THREAD_JOIN   19
 #define SYS_THREAD_SELF   20
+#define SYS_RT_SIGACTION  21
+#define SYS_RT_SIGRETURN  23
 #define SYS_KILL          29
 #define SYS_TKILL         30
 #define SYS_TGKILL        31
@@ -343,6 +345,27 @@ static int64_t syscall_dispatch_inner(int64_t num, int64_t a1, int64_t a2, int64
         }
         case SYS_THREAD_SELF:
             return current_thread()->tid;
+        case SYS_RT_SIGACTION: {
+            int sig = (int)a1;
+            const struct k_sigaction *act = (const struct k_sigaction *)(uintptr_t)a2;
+            struct k_sigaction *old = (struct k_sigaction *)(uintptr_t)a3;
+            if (sig <= 0 || sig >= NSIG) { return -EINVAL; }
+            // SIGKILL and SIGSTOP can be neither caught nor ignored.
+            if (act && (sig == SIGKILL || sig == SIGSTOP)) { return -EINVAL; }
+
+            struct process *p = current_proc();
+            uint64_t fl = spin_lock_irqsave(&p->sig_lock);
+            if (old) { *old = p->actions[sig]; }
+            if (act) {
+                p->actions[sig] = *act;
+                p->actions[sig].mask &= ~SIGSET_UNBLOCKABLE;
+            }
+            spin_unlock_irqrestore(&p->sig_lock, fl);
+            return 0;
+        }
+        case SYS_RT_SIGRETURN:
+            signal_do_sigreturn(frame);
+            return 0; // unreachable
         case SYS_KILL: {
             struct siginfo info;
             siginfo_user(&info, (int)a2, current_proc()->pid);
@@ -371,6 +394,7 @@ static int64_t syscall_dispatch_inner(int64_t num, int64_t a1, int64_t a2, int64
 int64_t syscall_dispatch(int64_t num, int64_t a1, int64_t a2, int64_t a3,
                          int64_t a4, struct syscall_frame *frame) {
     int64_t ret = syscall_dispatch_inner(num, a1, a2, a3, a4, frame);
+    ret = signal_deliver_from_syscall(frame, num, ret);
     struct thread *t = current_thread();
     if (t && t->kill_pending) {
         thread_exit_self(current_proc()->exit_code);

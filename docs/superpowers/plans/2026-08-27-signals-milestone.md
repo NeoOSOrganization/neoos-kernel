@@ -1272,6 +1272,37 @@ in this order: (1) the frame alignment — the handler must see
 `rsp % 16 == 8`; (2) `pretcode` not pointing at `__restore_rt`; (3) the
 `iret_ctx` field order disagreeing with `sigframe.asm`'s pop sequence.
 
+- [ ] **Step 10b: The FP area cannot be a member of the frame**
+
+**Correction found during execution — Task 4 does not work without
+it.** The plan embedded `uint8_t fpstate[512] __attribute__((aligned(16)))`
+in `struct rt_sigframe`. That cannot work: the frame's own address must
+be **8 mod 16** so the handler sees `rsp % 16 == 8` as if reached by
+`call`, which puts every 16-aligned *member* at 8 mod 16 — and `fxsave`
+`#GP`s on a non-16-aligned address. Observed: `#GP` at
+`fxsave (%rax)` with `rax` ending `0xd98`.
+
+Allocate the FP area separately, above the frame, on its own 64-byte
+alignment, and reach it through `uc.uc_mcontext.fpstate` — which is
+what that pointer is for, and what Linux does for the same reason:
+
+```c
+    sp -= SIGFRAME_FPSTATE_SIZE;
+    sp &= ~(uint64_t)(SIGFRAME_FPSTATE_ALIGN - 1);
+    uint64_t fpaddr = sp;
+
+    sp -= sizeof(struct rt_sigframe);
+    sp &= ~0xFULL;
+    sp -= 8;
+    if (!user_range_writable(sp, (fpaddr + SIGFRAME_FPSTATE_SIZE) - sp)) {
+        return 0;
+    }
+```
+
+`rt_sigreturn` must then **validate** `sc->fpstate` before `fxrstor`:
+it is user memory and may have been altered, and a misaligned or
+unmapped value would `#GP` the *kernel*.
+
 - [ ] **Step 11: Commit**
 
 ```bash

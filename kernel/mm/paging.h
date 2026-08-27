@@ -15,6 +15,10 @@
 // high bits and PAGE_NO_EXECUTE, leaving just the frame address.
 #define PAGE_ADDR_MASK   0x000FFFFFFFFFF000ULL
 
+// Top of the canonical lower half. Any user pointer at or above this is
+// invalid by construction, so range checks can reject it cheaply.
+#define USER_ADDR_LIMIT  0x0000800000000000ULL
+
 // Converts a physical address to its always-valid virtual alias in the
 // direct physmap (see paging_init). Valid for any address within the
 // first 4GiB (the physmap's coverage -- see Global Constraints).
@@ -55,6 +59,11 @@ int paging_map_into(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags
 // `free_frame` is set. Returns 1 if a mapping was removed, 0 if the
 // address was not mapped.
 int paging_unmap_from(uint64_t *pml4, uint64_t virt, int free_frame);
+
+// 1 if every page of [addr, addr+len) is present, user-accessible and
+// writable in the CURRENT address space. Signal delivery uses it so a
+// bad user stack becomes a clean kill instead of a kernel fault.
+int user_range_writable(uint64_t addr, uint64_t len);
 
 // Frees every frame belonging to the address space rooted at
 // pml4_phys (user pages, page-table frames, and the PML4 itself),

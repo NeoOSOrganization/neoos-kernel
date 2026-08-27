@@ -109,6 +109,52 @@ struct siginfo {
     } fields;
 };
 
+// Linux's x86-64 signal frame layout, verbatim -- musl's ucontext_t and
+// its SA_SIGINFO handlers read these directly.
+struct sigcontext_64 {
+    uint64_t r8, r9, r10, r11, r12, r13, r14, r15;
+    uint64_t rdi, rsi, rbp, rbx, rdx, rax, rcx, rsp;
+    uint64_t rip, eflags;
+    uint16_t cs, gs, fs, ss;
+    uint64_t err, trapno, oldmask, cr2;
+    uint64_t fpstate;          // user pointer to the FP area
+    uint64_t reserved1[8];
+};
+
+struct ucontext_k {
+    uint64_t             uc_flags;
+    uint64_t             uc_link;
+    stack_t_k            uc_stack;
+    struct sigcontext_64 uc_mcontext;
+    sigset_t_k           uc_sigmask;
+    uint8_t              _sigmask_pad[128 - sizeof(sigset_t_k)];
+};
+
+struct rt_sigframe {
+    uint64_t          pretcode;    // -> sa_restorer
+    struct ucontext_k uc;
+    struct siginfo    info;
+};
+
+// The FXSAVE area is allocated SEPARATELY, above the frame, and reached
+// through uc.uc_mcontext.fpstate. It cannot be a member: the frame's own
+// address must be 8 mod 16 so the handler sees rsp % 16 == 8 as if
+// reached by `call`, which would put every 16-aligned member at 8 mod 16
+// and make fxsave #GP. Linux separates it for the same reason.
+// The extended-state milestone widens this and adds the xstate header.
+#define SIGFRAME_FPSTATE_SIZE  512
+#define SIGFRAME_FPSTATE_ALIGN 64
+
+struct syscall_frame;
+struct registers;
+struct process;
+struct thread;
+
+int64_t signal_deliver_from_syscall(struct syscall_frame *f, int64_t num,
+                                    int64_t retval);
+void    signal_do_sigreturn(struct syscall_frame *f) __attribute__((noreturn));
+void    signal_do_stop(struct thread *t, int sig);
+
 // Default actions
 #define SIGACT_TERM 0
 #define SIGACT_IGN  1

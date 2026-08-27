@@ -13,7 +13,7 @@ C_SOURCES := $(wildcard kernel/*.c) $(wildcard kernel/mm/*.c) $(wildcard kernel/
 # tree can appear to build clean.
 C_HEADERS := $(wildcard kernel/*.h) $(wildcard kernel/mm/*.h) $(wildcard kernel/fs/*.h) $(wildcard kernel/sched/*.h)
 C_OBJECTS := $(patsubst kernel/%.c,$(BUILD_DIR)/%.o,$(C_SOURCES))
-ASM_OBJECTS := $(BUILD_DIR)/boot.o $(BUILD_DIR)/gdt_flush.o $(BUILD_DIR)/isr_stubs.o $(BUILD_DIR)/context_switch.o $(BUILD_DIR)/syscall_entry.o $(BUILD_DIR)/fork_trampoline.o
+ASM_OBJECTS := $(BUILD_DIR)/boot.o $(BUILD_DIR)/gdt_flush.o $(BUILD_DIR)/isr_stubs.o $(BUILD_DIR)/context_switch.o $(BUILD_DIR)/syscall_entry.o $(BUILD_DIR)/fork_trampoline.o $(BUILD_DIR)/sigframe.o
 
 .PHONY: all build iso run clean disk-image
 
@@ -44,6 +44,10 @@ $(BUILD_DIR)/syscall_entry.o: kernel/syscall_entry.asm
 $(BUILD_DIR)/fork_trampoline.o: kernel/fork_trampoline.asm
 	mkdir -p $(BUILD_DIR)
 	$(AS) $(ASFLAGS) kernel/fork_trampoline.asm -o $(BUILD_DIR)/fork_trampoline.o
+
+$(BUILD_DIR)/sigframe.o: kernel/sigframe.asm
+	mkdir -p $(BUILD_DIR)
+	$(AS) $(ASFLAGS) kernel/sigframe.asm -o $(BUILD_DIR)/sigframe.o
 
 $(BUILD_DIR)/%.o: kernel/%.c $(C_HEADERS)
 	mkdir -p $(dir $@)
@@ -134,7 +138,11 @@ $(USERLAND_BUILD)/THRDTEST.ELF: $(USERLAND_DIR)/threadtest.c $(USERLAND_DIR)/use
 	mkdir -p $(USERLAND_BUILD)
 	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/threadtest.c -L$(LIB_BUILD) -lneoos
 
-$(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_BUILD)/PARENT.ELF $(USERLAND_BUILD)/LOOPER.ELF $(USERLAND_BUILD)/YIELDER.ELF $(USERLAND_BUILD)/FAULTER.ELF $(USERLAND_BUILD)/FILEIO.ELF $(USERLAND_BUILD)/SSE_TEST.ELF $(USERLAND_BUILD)/FORKTEST.ELF $(USERLAND_BUILD)/EXECTARG.ELF $(USERLAND_BUILD)/MOUNTTST.ELF $(USERLAND_BUILD)/VFSTEST.ELF $(USERLAND_BUILD)/THRDTEST.ELF
+$(USERLAND_BUILD)/SIGTEST.ELF: $(USERLAND_DIR)/sigtest.c $(USERLAND_DIR)/user.ld $(LIB_BUILD)/crt0.o $(LIB_BUILD)/libneoos.a
+	mkdir -p $(USERLAND_BUILD)
+	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/sigtest.c -L$(LIB_BUILD) -lneoos
+
+$(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_BUILD)/PARENT.ELF $(USERLAND_BUILD)/LOOPER.ELF $(USERLAND_BUILD)/YIELDER.ELF $(USERLAND_BUILD)/FAULTER.ELF $(USERLAND_BUILD)/FILEIO.ELF $(USERLAND_BUILD)/SSE_TEST.ELF $(USERLAND_BUILD)/FORKTEST.ELF $(USERLAND_BUILD)/EXECTARG.ELF $(USERLAND_BUILD)/MOUNTTST.ELF $(USERLAND_BUILD)/VFSTEST.ELF $(USERLAND_BUILD)/THRDTEST.ELF $(USERLAND_BUILD)/SIGTEST.ELF
 	mkdir -p $(DISK_SRC)/DIR
 	printf 'Hello from NeoOS FAT16!\n' > $(DISK_SRC)/HELLO.TXT
 	head -c 8192 /dev/zero | tr '\0' 'N' > $(DISK_SRC)/BIGFILE.TXT
@@ -159,6 +167,7 @@ $(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_B
 	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/MOUNTTST.ELF ::BIN/MOUNTTST.ELF
 	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/VFSTEST.ELF ::BIN/VFSTEST.ELF
 	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/THRDTEST.ELF ::BIN/THRDTEST.ELF
+	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/SIGTEST.ELF ::BIN/SIGTEST.ELF
 
 # 64MB, not 32: FAT32 needs at least 65525 clusters, and mkfs.fat warns
 # that a 32MB image falls below that. Depends on $(DISK_IMG) only so

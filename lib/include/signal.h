@@ -31,7 +31,33 @@
 #define SIGRTMIN 32
 #define SIGRTMAX 64
 
+#define SA_NOCLDSTOP 0x00000001
+#define SA_NOCLDWAIT 0x00000002
+#define SA_SIGINFO   0x00000004
+#define SA_ONSTACK   0x08000000
+#define SA_RESTART   0x10000000
+#define SA_NODEFER   0x40000000
+#define SA_RESETHAND 0x80000000
+
+#define SIG_DFL ((void (*)(int))0)
+#define SIG_IGN ((void (*)(int))1)
+
+#define SIG_BLOCK   0
+#define SIG_UNBLOCK 1
+#define SIG_SETMASK 2
+
 typedef uint64_t sigset_t;
+
+struct sigaction {
+    void   (*sa_handler)(int);
+    unsigned long sa_flags;
+    sigset_t sa_mask;
+};
+
+// Installs a handler. The SA_RESTORER the kernel requires is filled in
+// automatically -- callers never see it.
+int sigaction(int sig, const struct sigaction *act, struct sigaction *old);
+int raise(int sig);
 
 int kill(int pid, int sig);
 int tkill(int tid, int sig);
