@@ -29,8 +29,6 @@ static uint64_t xstate_mask;
 static int      have_avx, have_avx2;
 static enum { SAVE_FXSAVE, SAVE_XSAVE, SAVE_XSAVEOPT } save_mode = SAVE_FXSAVE;
 
-static uint8_t default_fpu_state[FPU_STATE_SIZE] __attribute__((aligned(16)));
-
 static void cpuid(uint32_t leaf, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx) {
     __asm__ volatile ("cpuid"
                        : "=a"(*eax), "=b"(*ebx), "=c"(*ecx), "=d"(*edx)
@@ -262,19 +260,11 @@ void cpu_state_selftest(void) {
     serial_write_string("[cpu] state selftest passed\n");
 }
 
-static void capture_default_fpu_state(void) {
-    __asm__ volatile ("fninit");
-    uint32_t mxcsr_default = 0x1F80;
-    __asm__ volatile ("ldmxcsr %0" :: "m"(mxcsr_default));
-    fpu_save(default_fpu_state);
-}
-
 void cpu_init(void) {
     check_features();
     enable_sse();
     enable_xsave();
     capture_default_state();
-    capture_default_fpu_state();
     serial_write_string("[cpu] SSE enabled, default FPU/SSE state captured\n");
 
     serial_write_string("[cpu] state: size=");
@@ -285,11 +275,4 @@ void cpu_init(void) {
                       : save_mode == SAVE_XSAVE    ? " mode=xsave"
                                                    : " mode=fxsave");
     serial_write_string(have_avx2 ? " avx2\n" : have_avx ? " avx\n" : "\n");
-}
-
-void cpu_default_fpu_state(void *dest) {
-    uint8_t *out = (uint8_t *)dest;
-    for (int i = 0; i < FPU_STATE_SIZE; i++) {
-        out[i] = default_fpu_state[i];
-    }
 }

@@ -49,10 +49,11 @@ struct process *current_proc(void) {
     return t ? t->proc : 0;
 }
 
-// thread->fpu_state is fxsave/fxrstor'd directly out of this
-// allocation, and those #GP on an address that is not 16-byte aligned.
-// heap.c's struct heap_page is 64-byte aligned specifically so every
-// kmalloc slot satisfies that; see the comment there.
+// thread->xstate is xsave/xrstor'd (or fxsave'd) directly out of its own
+// allocation, and those #GP on a misaligned address -- 16 bytes for
+// fxsave, 64 for xsave. heap.c's struct heap_page is 64-byte aligned
+// specifically so every kmalloc slot satisfies both; see the comment
+// there.
 struct thread *thread_alloc(struct process *p) {
     struct thread *t = (struct thread *)kmalloc(sizeof(struct thread));
     if (!t) { return 0; }
@@ -66,7 +67,9 @@ struct thread *thread_alloc(struct process *p) {
     t->proc       = p;
     t->state      = THREAD_READY;
     t->stack_slot = -1;
-    cpu_default_fpu_state(t->fpu_state);
+    t->xstate = kmalloc(cpu_state_size());
+    if (!t->xstate) { kfree(t); return 0; }
+    cpu_state_init(t->xstate);
     signal_init_thread(t);
     if (p) {
         t->proc_next = p->threads;
@@ -206,6 +209,7 @@ int thread_join(int tid, int *out_code) {
             if (out_code) { *out_code = z->exit_code; }
             thread_stack_free(p, z->stack_slot);
             pmm_free(z->kernel_stack_phys, KERNEL_STACK_ORDER);
+            kfree(z->xstate);
             kfree(z);
             return 0;
         }

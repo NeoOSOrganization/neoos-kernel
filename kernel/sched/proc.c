@@ -263,7 +263,7 @@ int exec_task(const char *path, struct syscall_frame *frame) {
     __asm__ volatile ("mov %0, %%cr3" :: "r"(new_pml4_phys) : "memory");
     free_address_space(old_pml4_phys);
 
-    cpu_default_fpu_state(current_thread()->fpu_state);
+    cpu_state_init(current_thread()->xstate);
 
     // The new address space has no stacks at all: reset the slot bitmap
     // and lay down slot 0 for the (now only) thread.
@@ -424,8 +424,8 @@ struct thread *fork_task(struct syscall_frame *frame) {
     child->kernel_stack_top = kstack_top;
     child->kernel_stack_phys = kstack_phys;
     child->stack_slot = current_thread()->stack_slot;
-    for (int i = 0; i < FPU_STATE_SIZE; i++) {
-        child->fpu_state[i] = current_thread()->fpu_state[i];
+    for (uint32_t i = 0; i < cpu_state_size(); i++) {
+        ((uint8_t *)child->xstate)[i] = ((uint8_t *)current_thread()->xstate)[i];
     }
 
     enqueue_ready(child);
@@ -581,6 +581,7 @@ static void proc_reap(struct process *p) {
     while (z) {
         struct thread *next = z->proc_next;
         pmm_free(z->kernel_stack_phys, KERNEL_STACK_ORDER);
+        kfree(z->xstate);
         kfree(z);
         z = next;
     }

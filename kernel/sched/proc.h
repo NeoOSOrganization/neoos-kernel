@@ -96,7 +96,10 @@ struct thread {
     sigset_t_k    saved_blocked;    // sigsuspend / sigreturn
     int           in_sigsuspend;
     stack_t_k     altstack;         // sigaltstack; zeroed = none
-    uint8_t fpu_state[FPU_STATE_SIZE] __attribute__((aligned(16)));
+    // cpu_state_size() bytes, 64-byte aligned. A pointer rather than an
+    // inline array because the size is only known at run time -- see
+    // the extended-state design spec.
+    void *xstate;
     struct thread *proc_next;       // sibling / zombie list link
     struct thread *next;            // ready-queue link
 };

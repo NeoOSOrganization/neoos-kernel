@@ -79,6 +79,7 @@ static void idle_entry(void) {
         while (z) {
             struct thread *next = z->proc_next;
             pmm_free(z->kernel_stack_phys, KERNEL_STACK_ORDER);
+            kfree(z->xstate);
             kfree(z);
             z = next;
         }
@@ -176,9 +177,9 @@ void schedule(void) {
 
     static uint64_t discarded_rsp; // used the first time schedule() is ever called, from kmain
     if (prev) {
-        fpu_save(prev->fpu_state);
+        cpu_state_save(prev->xstate);
     }
-    fpu_restore(next->fpu_state);
+    cpu_state_restore(next->xstate);
     context_switch(prev ? &prev->saved_rsp : &discarded_rsp, &next->saved_rsp);
 
     // Reached only when THIS task is scheduled back in, which may be

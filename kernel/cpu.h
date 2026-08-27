@@ -43,12 +43,9 @@ void cpu_state_init(void *buf);
 
 void cpu_state_selftest(void);
 
-// TEMPORARY: deleted by the per-thread-state and signal-frame tasks,
-// which convert the last callers. Present only so those conversions can
-// be separate, separately-verified changes.
-#define FPU_STATE_SIZE 512
+// TEMPORARY: signal.c is the last caller. Deleted by the signal-frame
+// task, so that conversion can be separate and separately verified.
 static inline void fpu_save(void *b)    { __asm__ volatile ("fxsave (%0)"  :: "r"(b) : "memory"); }
 static inline void fpu_restore(void *b) { __asm__ volatile ("fxrstor (%0)" :: "r"(b) : "memory"); }
-void cpu_default_fpu_state(void *dest);
 
 #endif

@@ -59,6 +59,24 @@ changing `.bss` moves it — Task 3 shrinks `struct thread` by ~500
 bytes, so a shift is expected. **Check the delta is explainable rather
 than ignoring it.**
 
+**One more thing the filter does not remove, found during execution:**
+the *pid* of a process forked at run time (`sigtest`'s `check_segv`
+child) is timing-dependent. It takes whatever `next_id` holds at the
+instant of the fork, and how many threads other processes have created
+by then depends on scheduling — so any change to per-thread work shifts
+it. When the gate reports a single differing line of that shape, verify
+it is only an id by comparing the *multiset* of exit codes, the count
+of `task exited` lines, and the sorted test results:
+
+```bash
+grep -o 'code=0x[0-9a-f]*' "$1" | sort            # exit-code multiset
+grep -c 'task exited' "$1"                        # process count
+grep -E "ALL PASSED|passed$|FAILED" "$1" | sort   # results
+```
+
+All three identical plus one shifted pid is explainable. Any other
+difference is not.
+
 ---
 
 ## File Structure
