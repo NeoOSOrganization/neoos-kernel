@@ -599,6 +599,7 @@ static void proc_reap(struct process *p) {
 // is kept beside it rather than replaced -- see docs/stdlib.md.
 int64_t wait4(int pid, int *status, int options) {
     struct process *self = current_proc();
+    if (!self) { return -ECHILD; }   // a kernel thread has no children
 
     for (;;) {
         int found = 0;
@@ -628,18 +629,21 @@ int64_t wait4(int pid, int *status, int options) {
     }
 }
 
-// NeoOS-native: one pid, bare exit code. A thin wrapper over wait4 so
-// there is one implementation, not two.
+// NeoOS-native: waits for ONE SPECIFIC pid and returns a bare exit
+// code. Deliberately NOT a wrapper over wait4: wait4 filters by
+// parentage, and this call is documented as taking any pid, not just a
+// child. Kernel threads rely on that -- they have no process, so every
+// parentage test would fail. (Found by the leak gate: routing this
+// through wait4 made five spawns run concurrently instead of in turn.)
 int64_t wait_for_pid(int pid) {
     struct process *p = proc_find(pid);
     if (!p) { return -1; }
 
-    for (;;) {
-        int st = 0;
-        int64_t rc = wait4(pid, &st, 0);
-        if (rc < 0) { return rc; }
-        // Same encoding as <sys/wait.h>'s WIFEXITED, spelled out because
-        // the kernel does not include the userland header.
-        return ((st & 0x7f) == 0) ? ((st >> 8) & 0xff) : -(st & 0x7f);
+    while (p->state != PROC_ZOMBIE) {
+        if (waitq_sleep(&p->exit_waiters, 0) == -EINTR) { return -EINTR; }
     }
+
+    int st = encode_status(p);
+    proc_reap(p);
+    return ((st & 0x7f) == 0) ? ((st >> 8) & 0xff) : -(st & 0x7f);
 }

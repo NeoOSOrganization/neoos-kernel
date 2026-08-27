@@ -2470,6 +2470,22 @@ Signal-specific suspects if it grows: `sigqueue` pool entries not
 returned by `signal_take_pending`, and threads that stop and are killed
 while `THREAD_STOPPED` never reaching the zombie list.
 
+- [ ] **Step 2b: `wait_for_pid` must not go through `wait4`**
+
+**Correction found during execution — caught by the leak gate itself.**
+Task 9 made the NeoOS-native `wait_for_pid` a thin wrapper over
+`wait4`, but `wait4` filters candidates by parentage. The leak-gate
+thread is a KERNEL thread with no process, so `current_proc()` is null
+and no child ever matched: all five spawns ran **concurrently** instead
+of in turn, and the measurement was meaningless.
+
+`wait_for_pid` is documented as taking one specific pid, not a child,
+so implement it directly against `p->exit_waiters` and share only
+`proc_reap`/`encode_status` with `wait4`. Also make `wait4` return
+`-ECHILD` when `current_proc()` is null rather than dereferencing it —
+address 0 is mapped by the identity map, so it reads BIOS data instead
+of faulting, which is how this stayed silent.
+
 - [ ] **Step 3: Revert and run the final regression**
 
 Restore `kmain`'s spawns and confirm `git diff --stat kernel/kernel.c`
