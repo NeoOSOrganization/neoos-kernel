@@ -2,7 +2,8 @@
 
 **Date:** 2026-08-27
 **Status:** Approved
-**Scope:** Cross-cutting architecture for the next 15 milestones
+**Scope:** Cross-cutting architecture for the next 17 milestones
+**Amended:** 2026-08-27 — musl libc adopted; see the musl section
 
 ## Purpose
 
@@ -12,15 +13,16 @@ milestone's own spec and plan can be written later without
 re-litigating foundations or discovering that an earlier milestone
 foreclosed a later one.
 
-Fifteen milestones follow from thirteen requested features. The gap is
-foundations: PCI, DMA, a block-device seam, per-CPU data, wait queues,
-zoned physical allocation, and a dynamic linker are all prerequisites
-that do not exist in the tree today.
+Seventeen milestones follow from thirteen requested features. The gap
+is foundations: PCI, DMA, a block-device seam, per-CPU data, wait
+queues, zoned physical allocation, a dynamic linker, and (since the
+musl decision) signals and a syscall-translation shim are all
+prerequisites that did not exist in the tree when this was written.
 
 ## Load-bearing decisions
 
 These four were decided first because every other decision follows
-from them.
+from them; two more were added later, as noted below.
 
 | # | Decision | Chosen |
 |---|---|---|
@@ -31,6 +33,10 @@ from them.
 
 A fifth was added mid-design: **full TLS with a dynamic linker**,
 including `dlopen`, with **eager binding** (`-z now`).
+
+A sixth was added after the threads milestone shipped: **musl is
+NeoOS's C library**, reached through a thin adaptor. See the musl
+section below; it changes three milestones and adds two.
 
 ### On decision 2
 
@@ -71,7 +77,9 @@ kernel/
     audio/  core.c ac97.c hda.c sb16.c
   lock.c    spinlocks, mutexes, rank checker
 lib/
-  ld.so sources, libneoos.so
+  libneoos       NeoOS-native calls only: spawn, wait-by-pid,
+                 mount/umount, later ports and MPI
+  musl/          vendored musl + the translation shim in its arch dir
 ```
 
 No `arch/x86_64/` layer: NeoOS is single-architecture and that
@@ -485,28 +493,106 @@ file, turning "does audio work" into a byte comparison against an
 expected buffer — the only form that fits the no-host-test-runner
 constraint.
 
+## musl libc
+
+Decided 2026-08-27, after milestone 1. NeoOS's C library is **musl**,
+reached through a **thin adaptor layer**. The OS is deliberately not
+reshaped to suit musl: partial compatibility is acceptable and NeoOS
+may diverge from Linux where it chooses to.
+
+### Where the adaptor sits
+
+**Hybrid: Linux-shaped primitives under NeoOS numbering.** The kernel
+adopts Linux *semantics* for the handful of primitives musl is built
+on — `futex`, `mmap`, `stat`, signals, `clock_gettime` — but keeps its
+own syscall numbers and its own native calls alongside. The adaptor is
+then pure number and argument translation in musl's arch directory.
+
+```c
+/* musl: arch/x86_64/syscall_arch.h (patched) */
+static inline long __syscall2(long n, long a, long b) {
+    return __neoos_syscall(neoos_nr[n], a, b);
+}
+
+/* the kernel keeps its own numbering AND its own calls */
+#define SYS_FUTEX      21   /* Linux semantics, NeoOS number */
+#define SYS_MMAP       22
+#define SYS_SPAWN       4   /* NeoOS-native, no Linux analogue */
+```
+
+**The rule that keeps it thin: translation, never emulation.** If the
+shim ever starts emulating a primitive instead of forwarding to one,
+that is the signal to add the primitive to the kernel.
+
+### What musl needs that NeoOS lacks
+
+| musl needs | NeoOS status |
+|---|---|
+| `futex` | nothing; `waitq` (milestone 1) is the substrate |
+| `rt_sigaction`/`rt_sigprocmask`/`rt_sigreturn` | **no signals at all** — needed for `abort()` and pthread cancellation |
+| `fstat`/`statx` | VFS has no `stat`; stdio picks buffering from `st_blksize`, `isatty` from `st_mode` |
+| `writev` | stdio's real write path |
+| `clock_gettime`, `nanosleep` | timer exists, nothing exposed |
+| `ioctl` (TCGETS) | none; also wanted by audio |
+| `mmap`/`munmap`/`mprotect` | dynamic-linking milestone |
+| `arch_prctl(ARCH_SET_FS)` | TLS milestone |
+
+One piece of luck: `errno.h` already uses Linux-compatible values
+(`EPERM` 1, `ESRCH` 3, `EINTR` 4, `EAGAIN` 11, `EDEADLK` 35), so that
+class of mismatch does not exist.
+
+### Effect on planned milestones
+
+- **Dynamic linking** — musl ships its own linker. The work becomes
+  *porting* `ldso/dynlink.c`, not writing one; the eager-vs-lazy
+  binding decision becomes musl's.
+- **Full TLS** — shrinks substantially. musl's `__init_tls`/
+  `__copy_tls` own the DTV and `__tls_get_addr`; the kernel supplies
+  only `arch_prctl(ARCH_SET_FS)` and the auxv.
+- **IPC** — pthread mutexes, condvars and POSIX semaphores are all
+  futex-backed, so those come from musl rather than from `lib/`.
+- **New: signals**, its own milestone, before musl.
+- **New: musl (static)**, before dynamic linking — static musl needs
+  far less than dynamic musl, so it is brought up first. Dynamic
+  linking then ports `ldso` against a libc already known to work,
+  rather than debugging two large unproven pieces failing together.
+
+### Effect on `lib/`
+
+`lib/`'s current surface (`printf`, `opendir`, `thread_create`,
+`string.h`) is superseded by musl. What survives as `libneoos` is only
+what has no POSIX analogue: `spawn`, wait-by-pid, `mount`/`umount`,
+and later ports and MPI. `docs/stdlib.md` documents the NeoOS
+extensions and the deliberate divergences, not a whole libc.
+
 ## Milestone sequence
 
 ```
- 1  Threads          proc/thread split, wait queues, lock ranks
+ 1  Threads          DONE (2026-08-27)
  2  Extended state   XSAVE/XSAVEOPT, AVX, AVX2, MMX
- 3  Dynamic linking  mmap, PT_INTERP, auxv, ld.so, dlopen
- 4  Full TLS         4 models, DTV, __tls_get_addr
- 5  SMP + x2APIC     AP bringup, per-CPU, fine-grained locks, shootdown
- 6  Sched classes    RT / fair / idle, SMT-aware balancing
- 7  Modules          loader + symtab      -> proves: VFS drivers
- 8  PCI/DMA/IRQ      ECAM, MSI, DMA zones -> proves: AHCI/SATA
- 9  Block layer      generic bdev         -> proves: fatfs
-10  exFAT            upcase, bitmap, NoFatChain
-11  IPC              file objects, pipes, semaphores, ports
-12  MPI library      userland, over ports + shared memory
-13  ISA DMA + FDC    8237, 82077
-14  USB              core + xHCI, then EHCI/UHCI/OHCI, HID, storage
-15  Audio            ioctl, PCM core, AC97, HDA, SB16
+ 3  Signals          rt_sigaction/procmask/sigreturn -- musl prerequisite
+ 4  musl (static)    futex, mmap, stat, writev, clock_gettime,
+                     arch_prctl, ioctl + the translation shim
+ 5  Dynamic linking  port musl's ldso, PT_INTERP, auxv, dlopen
+ 6  Full TLS         kernel: arch_prctl + auxv; musl owns the DTV
+ 7  SMP + x2APIC     AP bringup, per-CPU, fine-grained locks, shootdown
+ 8  Sched classes    RT / fair / idle, SMT-aware balancing
+ 9  Modules          loader + symtab      -> proves: VFS drivers
+10  PCI/DMA/IRQ      ECAM, MSI, DMA zones -> proves: AHCI/SATA
+11  Block layer      generic bdev         -> proves: fatfs
+12  exFAT            upcase, bitmap, NoFatChain
+13  IPC              file objects, pipes, ports (sems come from musl)
+14  MPI library      userland, over ports + shared memory
+15  ISA DMA + FDC    8237, 82077
+16  USB              core + xHCI, then EHCI/UHCI/OHCI, HID, storage
+17  Audio            ioctl, PCM core, AC97, HDA, SB16
 ```
 
 Ordering rationale, where it is not obvious:
 
+- **Signals and static musl before dynamic linking** — static musl
+  needs only syscall primitives, so a failing shim is diagnosable
+  without a freshly ported dynamic linker in the picture.
 - **Dynamic linking before modules** — both are ELF relocation
   processing. Doing the userland one first means the kernel module
   loader is the second time that code is written, not the first.

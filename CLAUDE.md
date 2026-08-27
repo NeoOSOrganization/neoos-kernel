@@ -15,19 +15,32 @@ memory management, storage, and onward, one milestone at a time.
 
 ## Standard library convention
 
-NeoOS will have a standard library that user-mode programs link
-against instead of issuing raw syscalls directly (planned as the
-milestone right after process management). Once that library exists:
+NeoOS's C library is **musl**, reached through a thin adaptor layer.
+The OS is deliberately NOT reshaped to suit musl: partial
+compatibility is fine, and NeoOS may diverge from Linux semantics
+where it chooses to. The adaptor absorbs the mismatch.
+
+The adaptor is **translation only, never emulation**: the kernel
+provides Linux-SHAPED primitives (futex, mmap, stat, signals,
+clock_gettime) under NeoOS's own syscall numbers, and the shim in
+musl's arch directory maps musl's Linux numbers onto them. If the shim
+ever starts emulating a primitive rather than forwarding to one, that
+is the signal to add the primitive to the kernel instead.
+
+`lib/` keeps only what has no POSIX analogue — `spawn`, wait-by-pid,
+`mount`/`umount`, and later ports/MPI. Everything musl provides
+(`printf`, `opendir`, pthreads, `string.h`) comes from musl.
 
 **Any kernel feature that becomes usable by an external/user-mode
 application (a new syscall, a new syscall argument, a new capability)
 MUST be accompanied by:**
-1. A corresponding wrapper or update in the standard library.
-2. An update to the standard library's own documentation describing
-   the new or changed function.
+1. Either a musl-visible path (a shim entry mapping the relevant musl
+   syscall onto it) or, for NeoOS-native features, a `lib/` wrapper.
+2. An update to `docs/stdlib.md` describing the new or changed
+   function, or — for anything that deviates from POSIX/Linux
+   behaviour — an explicit note of the divergence.
 
 Do not leave a user-facing kernel feature exposed only via a raw
-syscall number with no library support — that defeats the purpose of
-having the library. Until the standard library milestone lands, this
-doesn't yet apply (early process-management test programs use raw
-syscalls directly), but treat it as binding from that point on.
+syscall number with no library support. `docs/stdlib.md` documents the
+NeoOS extensions and the deliberate divergences, not a whole libc;
+musl documents itself.
