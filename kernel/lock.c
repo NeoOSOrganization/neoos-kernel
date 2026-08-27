@@ -2,15 +2,24 @@
 #include "cpu_local.h"
 #include "serial.h"
 
+// Writes without taking the serial lock: this is reachable from inside
+// a lock acquisition, and the panicking context may already hold it.
+static void panic_puts(const char *s) {
+    for (int i = 0; s[i]; i++) {
+        if (s[i] == '\n') { serial_putc('\r'); }
+        serial_putc(s[i]);
+    }
+}
+
 void lock_panic(const char *msg, const char *a, const char *b) {
     __asm__ volatile ("cli");
-    serial_write_string("[lock] PANIC: ");
-    serial_write_string(msg);
-    serial_write_string(" acquiring=");
-    serial_write_string(a ? a : "(null)");
-    serial_write_string(" holding=");
-    serial_write_string(b ? b : "(none)");
-    serial_write_string("\n");
+    panic_puts("[lock] PANIC: ");
+    panic_puts(msg);
+    panic_puts(" acquiring=");
+    panic_puts(a ? a : "(null)");
+    panic_puts(" holding=");
+    panic_puts(b ? b : "(none)");
+    panic_puts("\n");
     for (;;) { __asm__ volatile ("hlt"); }
 }
 
@@ -26,6 +35,22 @@ int lock_rank_ok(uint8_t rank) {
     struct cpu *c = this_cpu();
     if (c->held_depth == 0) { return 1; }
     return rank > c->held_ranks[c->held_depth - 1];
+}
+
+uint64_t spin_lock_raw(struct spinlock *l) {
+    uint64_t flags;
+    __asm__ volatile ("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
+    while (__atomic_exchange_n(&l->locked, 1u, __ATOMIC_ACQUIRE)) {
+        __asm__ volatile ("pause");
+    }
+    return flags;
+}
+
+void spin_unlock_raw(struct spinlock *l, uint64_t flags) {
+    __atomic_store_n(&l->locked, 0u, __ATOMIC_RELEASE);
+    if (flags & (1ULL << 9)) {
+        __asm__ volatile ("sti");
+    }
 }
 
 uint64_t spin_lock_irqsave(struct spinlock *l) {

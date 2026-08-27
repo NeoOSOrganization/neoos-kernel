@@ -19,8 +19,10 @@ static int64_t console_read(void *buf, uint32_t len) {
 
 static int64_t console_write(const void *buf, uint32_t len) {
     const char *s = (const char *)buf;
+    // One locked serial call for the whole write, so a userland
+    // printf() cannot be split down the middle by a kernel message.
+    serial_write_string_n(s, len);
     for (uint32_t i = 0; i < len; i++) {
-        serial_putc(s[i]);
         vga_putc(s[i]);
     }
     return (int64_t)len;

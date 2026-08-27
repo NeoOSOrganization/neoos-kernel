@@ -105,6 +105,7 @@ void kmain(void *multiboot_info) {
     spawn("/BIN/LOOPER.ELF");
     spawn("/BIN/YIELDER.ELF");
     spawn("/BIN/VFSTEST.ELF");
+    spawn("/BIN/THRDTEST.ELF");
 
     // After the spawns so the selftest's own kernel threads draw ids
     // above the real processes', keeping pids stable across boots.

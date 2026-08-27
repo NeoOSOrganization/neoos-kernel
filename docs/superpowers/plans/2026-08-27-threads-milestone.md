@@ -2477,6 +2477,51 @@ git commit -m "Add threadtest proving shared address space, separate stacks, and
 
 ---
 
+## Corrections found during execution
+
+Recorded so the next milestone's plan does not repeat them.
+
+1. **`mov gs, <selector>` zeroes `IA32_GS_BASE`** (Task 2). It bit in
+   two places: `gdt_flush.asm`, so `cpu_local_init()` must run *after*
+   `gdt_init()`; and both ring-3 trampolines, which needed a `swapgs`
+   after their segment loads. Symptom: `#GP` in `schedule()` with
+   `rax=0xf000ff53f000ff53` (the BIOS data area at physical 0).
+
+2. **The byte-identical log gate was unusable** (Task 2). Two runs of
+   one binary differ by ~57 lines. Replaced with a filter plus a
+   sorted-multiset comparison, then validated: 0 lines of difference
+   between two runs of one binary.
+
+3. **`kmalloc` was not 16-byte aligned** (Task 3). Slots started at
+   `sizeof(struct heap_page)` = 24, so every pointer was 8 mod 16 and
+   `fxrstor` `#GP`'d. Fixed by aligning the header to 64, which also
+   pre-satisfies milestone 2's `XSAVE`.
+
+4. **Two ID off-by-ones shifted every pid** (Task 3). Fixed by giving a
+   process's first thread the pid as its tid (Linux convention) and
+   starting `next_id` at 0 so idle takes the reserved id 0.
+
+5. **`kmalloc` only ever checked the FRONT page of a size class**
+   (Task 9), stranding every slot freed into an older page. Invisible
+   until threads made allocation churn; measured as ~1 frame leaked per
+   spawn/wait cycle, growing linearly. Fixed by scanning the class's
+   page list. Delta afterwards: 3 frames at both 5 and 10 iterations,
+   i.e. flat.
+
+6. **The blocked-sibling check did not block** (Task 9). It waited on a
+   nonexistent pid, but `wait_for_pid` returns -1 immediately for an
+   unknown pid, so the thread only *sometimes* lost the race to print
+   its failure. Rewritten to `thread_join` a thread that never exits.
+
+7. **Serial output interleaved on one CPU** (Task 9, beyond plan
+   scope). A timer interrupt mid-print let another context split a
+   line: `[process] task exited, pid=0x000000000child running...`. The
+   roadmap assigns serial locking to the SMP milestone, but the log is
+   this project's only debugging channel, so it was fixed here. The
+   lock must be **rank-free** (`spin_lock_raw`): serial runs from the
+   first line of `kmain`, long before `cpu_local_init()` installs a GS
+   base, and the rank checker reads per-CPU state through GS.
+
 ## Notes for the implementer
 
 - **The conditional `swapgs` in Task 2 is the highest-risk change in

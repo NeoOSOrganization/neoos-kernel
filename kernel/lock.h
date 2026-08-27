@@ -21,6 +21,10 @@
 #define LOCK_RANK_RUNQUEUE    8
 #define LOCK_RANK_HEAP        9
 #define LOCK_RANK_PMM        10
+// Leaf lock: rank above every other, so it is always legal to take and
+// can be acquired from anywhere -- including while holding any other
+// lock. Whatever holds it must never acquire another lock.
+#define LOCK_RANK_SERIAL    255
 
 #define LOCK_MAX_HELD 8
 
@@ -38,6 +42,13 @@ void     spin_unlock_irqrestore(struct spinlock *l, uint64_t flags);
 // Exists so the selftest can prove the checker detects an inversion
 // without actually triggering the panic.
 int lock_rank_ok(uint8_t rank);
+
+// Rank-free acquire/release. Uses no per-CPU state, so it is safe
+// before cpu_local_init() has installed a GS base -- which serial
+// output needs, since it runs from the very first line of kmain. Only
+// for leaf locks that never nest inside another lock.
+uint64_t spin_lock_raw(struct spinlock *l);
+void     spin_unlock_raw(struct spinlock *l, uint64_t flags);
 
 // Number of spinlocks currently held by this CPU. Used by the mutex
 // code to refuse to sleep with a spinlock held.

@@ -77,13 +77,20 @@ void *kmalloc(size_t size) {
 
     int class_index = size_class_for(size);
     if (class_index >= 0) {
+        // Scan the class's pages for one with a free slot. The original
+        // version checked only the FRONT page and allocated a fresh one
+        // whenever it was full, which permanently stranded every slot
+        // freed back into a non-front page. That was harmless while
+        // kmalloc was used for a handful of long-lived objects, but the
+        // threads milestone allocates a struct thread per thread -- at
+        // 3 slots per page, a process creating 8 threads strands two
+        // pages per run (measured: ~1 frame leaked per spawn/wait
+        // cycle, growing linearly with iteration count).
         struct heap_page *page = class_pages[class_index];
-        // Only the front page is ever checked -- a full front page is
-        // replaced with a fresh one rather than scanning older pages
-        // for a free slot. This can waste memory that was freed back
-        // into a non-front page, matching the design spec's decision
-        // not to build page reclamation/reuse in this milestone.
-        if (!page || !page->free_list) {
+        while (page && !page->free_list) {
+            page = page->next;
+        }
+        if (!page) {
             page = heap_new_page(heap_size_classes[class_index]);
             if (!page) {
                 return 0;
