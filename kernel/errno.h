@@ -12,6 +12,7 @@
 #define EAGAIN  11
 #define EDEADLK 35
 #define ENOMEM  12
+#define ECHILD  10
 #define ENOENT  2
 #define EBADF   9
 #define EBUSY   16

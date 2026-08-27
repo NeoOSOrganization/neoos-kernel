@@ -185,6 +185,7 @@ struct process *spawn(const char *path) {
     }
     p->pml4_phys   = pml4_phys;
     p->parent_pid  = current_proc() ? current_proc()->pid : 0;
+    if (current_proc()) { p->pgid = current_proc()->pgid; p->sid = current_proc()->sid; }
 
     uint64_t user_stack_top;
     if (thread_stack_alloc(p, &user_stack_top) != 0) {
@@ -397,6 +398,8 @@ struct thread *fork_task(struct syscall_frame *frame) {
 
     child_proc->pml4_phys   = child_pml4_phys;
     child_proc->parent_pid  = parent->pid;
+    child_proc->pgid        = parent->pgid;
+    child_proc->sid         = parent->sid;
     child_proc->stack_slots = parent->stack_slots;
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
         child_proc->files[i] = parent->files[i]; // copied by value -- see docs/stdlib.md
@@ -518,6 +521,21 @@ void proc_put(struct process *p) {
 
     p->state = PROC_ZOMBIE;
     waitq_wake_all(&p->exit_waiters);
+
+    // SIGCHLD's default action is ignore, so this changes nothing for a
+    // process with no handler -- but it is what makes wait4(WNOHANG)
+    // polling and sigsuspend-based reaping work.
+    struct process *parent = proc_find(p->parent_pid);
+    if (parent) {
+        struct siginfo info;
+        for (unsigned i = 0; i < sizeof(info); i++) { ((uint8_t *)&info)[i] = 0; }
+        info.si_signo = SIGCHLD;
+        info.si_code  = p->exit_signal ? CLD_KILLED : CLD_EXITED;
+        info.fields.chld.si_pid    = p->pid;
+        info.fields.chld.si_status = p->exit_signal ? p->exit_signal : p->exit_code;
+        signal_send_process(parent, SIGCHLD, &info);
+        waitq_wake_all(&parent->child_waiters);
+    }
 }
 
 // Idempotent. Every thread killed here delivers SIGKILL, whose default
@@ -549,18 +567,16 @@ void process_exit(int code) {
     thread_exit_self(code);
 }
 
-int64_t wait_for_pid(int pid) {
-    struct process *p = proc_find(pid);
-    if (!p) { return -1; }
+// Linux-compatible wait status encoding.
+static int encode_status(struct process *p) {
+    if (p->exit_signal) { return p->exit_signal & 0x7f; }   // signalled
+    return (p->exit_code & 0xff) << 8;                      // exited
+}
+#define STATUS_STOPPED(sig)  (0x7f | ((sig) << 8))
 
-    while (p->state != PROC_ZOMBIE) {
-        if (waitq_sleep(&p->exit_waiters, 0) == -EINTR) { return -EINTR; }
-    }
-
-    int code = p->exit_code;
-
-    // Free every zombie thread's kernel stack and struct, then the
-    // process itself. Safe here: none of them is running.
+// Frees a zombie's threads and struct. Safe only once nothing is
+// running on any of them.
+static void proc_reap(struct process *p) {
     struct thread *z = p->zombies;
     while (z) {
         struct thread *next = z->proc_next;
@@ -577,5 +593,53 @@ int64_t wait_for_pid(int pid) {
     spin_unlock_irqrestore(&proc_lock, f);
 
     kfree(p);
-    return code;
+}
+
+// POSIX-shaped, and what musl's waitpid maps onto. NeoOS's own wait()
+// is kept beside it rather than replaced -- see docs/stdlib.md.
+int64_t wait4(int pid, int *status, int options) {
+    struct process *self = current_proc();
+
+    for (;;) {
+        int found = 0;
+        for (struct process *p = proc_list; p; p = p->next) {
+            if (p->parent_pid != self->pid) { continue; }
+            if (pid > 0  && p->pid  != pid)        { continue; }
+            if (pid == 0 && p->pgid != self->pgid) { continue; }
+            if (pid < -1 && p->pgid != -pid)       { continue; }
+            found = 1;
+
+            if (p->state == PROC_ZOMBIE) {
+                int st = encode_status(p);
+                int reaped = p->pid;
+                if (status) { *status = st; }
+                proc_reap(p);
+                return reaped;
+            }
+            if ((options & WUNTRACED) && p->stopped_count > 0 && !p->stop_reported) {
+                p->stop_reported = 1;
+                if (status) { *status = STATUS_STOPPED(SIGSTOP); }
+                return p->pid;
+            }
+        }
+        if (!found) { return -ECHILD; }
+        if (options & WNOHANG) { return 0; }
+        if (waitq_sleep(&self->child_waiters, 0) == -EINTR) { return -EINTR; }
+    }
+}
+
+// NeoOS-native: one pid, bare exit code. A thin wrapper over wait4 so
+// there is one implementation, not two.
+int64_t wait_for_pid(int pid) {
+    struct process *p = proc_find(pid);
+    if (!p) { return -1; }
+
+    for (;;) {
+        int st = 0;
+        int64_t rc = wait4(pid, &st, 0);
+        if (rc < 0) { return rc; }
+        // Same encoding as <sys/wait.h>'s WIFEXITED, spelled out because
+        // the kernel does not include the userland header.
+        return ((st & 0x7f) == 0) ? ((st >> 8) & 0xff) : -(st & 0x7f);
+    }
 }

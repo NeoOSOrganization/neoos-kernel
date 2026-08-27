@@ -43,6 +43,11 @@
 #define SYS_RT_SIGSUSPEND 25
 #define SYS_SIGALTSTACK   28
 #define SYS_KILL          29
+#define SYS_WAIT4         32
+#define SYS_SETPGID       33
+#define SYS_GETPGID       34
+#define SYS_SETSID        35
+#define SYS_GETSID        36
 #define SYS_TKILL         30
 #define SYS_TGKILL        31
 
@@ -421,6 +426,34 @@ static int64_t syscall_dispatch_inner(int64_t num, int64_t a1, int64_t a2, int64
                 t->altstack = *ss;
             }
             return 0;
+        }
+        case SYS_WAIT4: {
+            int st = 0;
+            int64_t rc = wait4((int)a1, &st, (int)a3);
+            if (rc > 0 && a2) { *(int *)(uintptr_t)a2 = st; }
+            return rc;
+        }
+        case SYS_SETPGID: {
+            int pid  = (int)a1 ? (int)a1 : current_proc()->pid;
+            int pgid = (int)a2 ? (int)a2 : pid;
+            struct process *p = proc_find(pid);
+            if (!p) { return -ESRCH; }
+            p->pgid = pgid;
+            return 0;
+        }
+        case SYS_GETPGID: {
+            struct process *p = (int)a1 ? proc_find((int)a1) : current_proc();
+            return p ? p->pgid : -ESRCH;
+        }
+        case SYS_SETSID: {
+            struct process *p = current_proc();
+            p->sid  = p->pid;
+            p->pgid = p->pid;
+            return p->sid;
+        }
+        case SYS_GETSID: {
+            struct process *p = (int)a1 ? proc_find((int)a1) : current_proc();
+            return p ? p->sid : -ESRCH;
         }
         case SYS_KILL: {
             struct siginfo info;

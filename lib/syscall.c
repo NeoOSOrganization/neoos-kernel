@@ -3,6 +3,7 @@
 #include "fcntl.h"
 #include "dirent.h"
 #include "signal.h"
+#include "sys/wait.h"
 
 #define SYS_EXIT   0
 #define SYS_WRITE  1
@@ -31,6 +32,11 @@
 #define SYS_RT_SIGSUSPEND 25
 #define SYS_SIGALTSTACK   28
 #define SYS_KILL          29
+#define SYS_WAIT4         32
+#define SYS_SETPGID       33
+#define SYS_GETPGID       34
+#define SYS_SETSID        35
+#define SYS_GETSID        36
 #define SYS_TKILL         30
 #define SYS_TGKILL        31
 
@@ -183,3 +189,15 @@ int sigaltstack(const stack_t *ss, stack_t *old) {
 int kill(int pid, int sig)             { return (int)syscall2(SYS_KILL, pid, sig); }
 int tkill(int tid, int sig)            { return (int)syscall2(SYS_TKILL, tid, sig); }
 int tgkill(int tgid, int tid, int sig) { return (int)syscall3(SYS_TGKILL, tgid, tid, sig); }
+
+int wait4(int pid, int *status, int options, void *rusage) {
+    (void)rusage;   // NeoOS keeps no per-process resource accounting
+    return (int)syscall3(SYS_WAIT4, pid,
+                        (int64_t)(uint64_t)(uintptr_t)status, options);
+}
+int waitpid(int pid, int *status, int options) { return wait4(pid, status, options, 0); }
+
+int setpgid(int pid, int pgid) { return (int)syscall2(SYS_SETPGID, pid, pgid); }
+int getpgid(int pid)           { return (int)syscall1(SYS_GETPGID, pid); }
+int setsid(void)               { return (int)syscall0(SYS_SETSID); }
+int getsid(int pid)            { return (int)syscall1(SYS_GETSID, pid); }

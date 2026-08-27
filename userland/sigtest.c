@@ -3,6 +3,7 @@
 #include <signal.h>
 #include <thread.h>
 #include <errno.h>
+#include <sys/wait.h>
 
 static volatile int got;
 static volatile int handler_arg;
@@ -159,6 +160,54 @@ static int check_segv(void) {
     return 1;
 }
 
+static int check_stop_continue(void) {
+    int child = fork();
+    if (child < 0) { printf("[sigtest] FAILED: fork for stop\n"); return 0; }
+    if (child == 0) {
+        for (volatile long i = 0; i < 400000000L; i++) { }
+        exit(5);
+    }
+
+    for (volatile int i = 0; i < 2000000; i++) { }   // let it start
+    kill(child, SIGSTOP);
+
+    int st = 0;
+    int rc = wait4(child, &st, WUNTRACED, 0);
+    if (rc != child || !WIFSTOPPED(st) || WSTOPSIG(st) != SIGSTOP) {
+        printf("[sigtest] FAILED: stop rc=%d st=%d\n", rc, st);
+        return 0;
+    }
+    printf("[sigtest] SIGSTOP + WIFSTOPPED passed\n");
+
+    kill(child, SIGCONT);
+    st = 0;
+    rc = wait4(child, &st, 0, 0);
+    if (rc != child || !WIFEXITED(st) || WEXITSTATUS(st) != 5) {
+        printf("[sigtest] FAILED: continue rc=%d st=%d\n", rc, st);
+        return 0;
+    }
+    printf("[sigtest] SIGCONT + WIFEXITED passed\n");
+    return 1;
+}
+
+static int check_signalled_status(void) {
+    int child = fork();
+    if (child < 0) { printf("[sigtest] FAILED: fork for kill\n"); return 0; }
+    if (child == 0) { for (;;) { yield(); } }
+
+    for (volatile int i = 0; i < 2000000; i++) { }
+    kill(child, SIGKILL);
+
+    int st = 0;
+    int rc = wait4(child, &st, 0, 0);
+    if (rc != child || !WIFSIGNALED(st) || WTERMSIG(st) != SIGKILL) {
+        printf("[sigtest] FAILED: kill rc=%d st=%d\n", rc, st);
+        return 0;
+    }
+    printf("[sigtest] WIFSIGNALED passed\n");
+    return 1;
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
@@ -191,6 +240,8 @@ int main(int argc, char **argv) {
     ok &= check_masking();
     ok &= check_eintr();
     ok &= check_segv();
+    ok &= check_stop_continue();
+    ok &= check_signalled_status();
 
     printf("[sigtest] %s\n", ok ? "ALL PASSED" : "SOME CHECKS FAILED");
     return ok ? 0 : 1;

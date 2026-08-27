@@ -152,6 +152,11 @@ void thread_exit_self(int code) __attribute__((noreturn));
 // Ends the whole process.
 void process_exit(int code) __attribute__((noreturn));
 
+#define WNOHANG    1
+#define WUNTRACED  2
+#define WCONTINUED 8
+
+int64_t wait4(int pid, int *status, int options);
 int64_t wait_for_pid(int pid);
 
 // Starts a thread in the current process at user RIP `entry` with
