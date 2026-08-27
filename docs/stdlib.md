@@ -115,6 +115,78 @@ alongside the library code that exposes it.
   PIDs share one number space, so a tid never equals an unrelated
   process's pid. A process's first thread has `tid == pid`.
 
+## `<signal.h>`
+
+- `int sigaction(int sig, const struct sigaction *act, struct sigaction *old)`
+  — installs a handler. `sa_flags` accepts `SA_RESTART`, `SA_ONSTACK`,
+  `SA_NODEFER`, `SA_RESETHAND`, and `SA_SIGINFO`. Returns 0, or
+  `-EINVAL` for `SIGKILL`/`SIGSTOP`, which can be neither caught nor
+  ignored. The `SA_RESTORER` the kernel requires is filled in
+  automatically — callers never see it.
+- `int raise(int sig)` — sends `sig` to the calling thread.
+- `int kill(int pid, int sig)` — `pid > 0` targets that process,
+  `pid == 0` the caller's process group, `pid < -1` the group `-pid`,
+  and `pid == -1` every process. `sig == 0` is an existence probe.
+- `int tkill(int tid, int sig)` / `int tgkill(int tgid, int tid, int sig)`
+  — send to one specific thread.
+- `int sigprocmask(int how, const sigset_t *set, sigset_t *old)` —
+  `how` is `SIG_BLOCK`/`SIG_UNBLOCK`/`SIG_SETMASK`. Masks are
+  **per-thread**; dispositions are per-process. `SIGKILL` and `SIGSTOP`
+  are silently dropped from any mask, as POSIX requires — not an error.
+- `int sigpending(sigset_t *set)` — signals that are pending **and**
+  blocked. An unblocked pending signal would already have been
+  delivered.
+- `int sigsuspend(const sigset_t *mask)` — atomically installs `mask`,
+  waits for a signal, and restores the previous mask. Always returns
+  `-EINTR`.
+- `int sigaltstack(const stack_t *ss, stack_t *old)` — installs an
+  alternate signal stack, used by handlers registered with
+  `SA_ONSTACK`. Returns `-ENOMEM` for a stack smaller than 2048 bytes.
+  This is what makes a `SIGSEGV` handler survivable after a stack
+  overflow: every thread has an unmapped guard page below its stack, so
+  without an alternate stack the handler re-faults on the same page.
+- `sigemptyset`, `sigfillset`, `sigaddset`, `sigdelset`, `sigismember`
+  — `sigset_t` is a 64-bit mask, one bit per signal.
+- Signal numbers are Linux's: `SIGHUP` 1 through `SIGSYS` 31, with
+  real-time signals `SIGRTMIN` (32) to `SIGRTMAX` (64).
+- **Standard signals do not queue**: repeat deliveries of a blocked
+  signal collapse into one. **Real-time signals queue** with their
+  payloads. One signal is delivered per return to user mode, since a
+  handler blocks its own signal until it returns.
+- A user-mode fault raises a signal rather than killing the machine:
+  divide-by-zero raises `SIGFPE`, a bad memory access `SIGSEGV`, an
+  invalid opcode `SIGILL`.
+
+## `<sys/wait.h>`
+
+- `int wait4(int pid, int *status, int options, void *rusage)` — the
+  POSIX-shaped wait. `pid > 0` waits for that child, `pid == -1` for
+  any, `pid == 0` for any in the caller's group, `pid < -1` for group
+  `-pid`. `options` accepts `WNOHANG` and `WUNTRACED`. Returns the
+  reaped pid, 0 for `WNOHANG` with nothing ready, or `-ECHILD`.
+  `rusage` is accepted and ignored — NeoOS keeps no per-process
+  resource accounting.
+- `int waitpid(int pid, int *status, int options)` — `wait4` with no
+  `rusage`.
+- `WIFEXITED`/`WEXITSTATUS`, `WIFSIGNALED`/`WTERMSIG`,
+  `WIFSTOPPED`/`WSTOPSIG`, `WIFCONTINUED`, `WCOREDUMP` — the status
+  encoding matches Linux exactly.
+- `int setpgid(int pid, int pgid)`, `int getpgid(int pid)`,
+  `int setsid(void)`, `int getsid(int pid)` — process groups and
+  sessions, inherited by `fork` and `spawn`.
+
+### Divergences from POSIX
+
+- **`wait` remains NeoOS-native** (one pid, a bare exit code) and lives
+  **beside** `wait4` rather than being replaced by it. Neither
+  supersedes the other.
+- **No core dumps.** `WCOREDUMP`'s bit is defined but never set.
+- **No `SA_NOCLDWAIT`**, and setting `SIGCHLD` to `SIG_IGN` does not
+  auto-reap children.
+- **`SIGTTIN`/`SIGTTOU` and orphaned-process-group `SIGHUP` are never
+  generated.** NeoOS has no controlling terminal.
+- **`sigqueue` depth is a fixed pool**; exhaustion returns `-EAGAIN`.
+
 ## `<errno.h>`
 
 Every `open`/`read`/`write`/`close`/`lseek`/`mkdir`/`unlink` call
@@ -127,11 +199,13 @@ convention.
   (e.g. creating or deleting a node under `/dev`).
 - `ESRCH` (3) — `thread_join` given a tid that is not a thread of the
   calling process.
-- `EINTR` (4) — a blocking call was interrupted because the calling
-  thread was killed (by another thread's `exit`).
+- `EINTR` (4) — a blocking call was interrupted by a signal. With
+  `SA_RESTART` the call is restarted instead of returning this.
 - `ENOENT` (2) — path/file not found, or nothing mounted at a
   `umount` target.
 - `EBADF` (9) — invalid or closed file descriptor.
+- `ECHILD` (10) — `wait4` called with no matching child.
+- `ENOMEM` (12) — `sigaltstack` given a stack smaller than 2048 bytes.
 - `EAGAIN` (11) — `thread_create` when the process already has its
   maximum of 16 threads, or the kernel is out of memory for one.
 - `EBUSY` (16) — `umount` called while a file on that filesystem is
@@ -151,6 +225,7 @@ convention.
   entries, of which 0/1/2 are the standard streams, so 13 files at
   once, maximum).
 - `EDEADLK` (35) — `thread_join` called on the calling thread itself.
+- `ETIMEDOUT` (110) — a timed wait expired (`rt_sigtimedwait`).
 - `ENOSPC` (28) — disk full (no free cluster), the mount table is
   full, or a FAT16 root directory is full (it has a fixed maximum
   entry count).
