@@ -21,6 +21,15 @@ static void cpuid(uint32_t leaf, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, ui
                        : "a"(leaf));
 }
 
+__attribute__((unused))
+static void cpuid_count(uint32_t leaf, uint32_t sub,
+                        uint32_t *eax, uint32_t *ebx,
+                        uint32_t *ecx, uint32_t *edx) {
+    __asm__ volatile ("cpuid"
+                      : "=a"(*eax), "=b"(*ebx), "=c"(*ecx), "=d"(*edx)
+                      : "a"(leaf), "c"(sub));
+}
+
 static void check_features(void) {
     uint32_t eax, ebx, ecx, edx;
     cpuid(1, &eax, &ebx, &ecx, &edx);
