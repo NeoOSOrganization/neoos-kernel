@@ -77,6 +77,26 @@ void paging_unmap(uint64_t virt) {
     }
 }
 
+// Clears one PTE in an arbitrary address space, optionally freeing the
+// frame it pointed at. Returns 1 if a mapping was actually removed, 0
+// if the address was not mapped. Used to tear down a thread's user
+// stack when the thread exits (see thread_stack_free).
+int paging_unmap_from(uint64_t *pml4, uint64_t virt, int free_frame) {
+    uint64_t *pdpt = table_entry(pml4, PML4_INDEX(virt), 0, 0);
+    uint64_t *pd   = pdpt ? table_entry(pdpt, PDPT_INDEX(virt), 0, 0) : 0;
+    uint64_t *pt   = pd ? table_entry(pd, PD_INDEX(virt), 0, 0) : 0;
+    if (!pt || !(pt[PT_INDEX(virt)] & PAGE_PRESENT)) {
+        return 0;
+    }
+    uint64_t phys = pt[PT_INDEX(virt)] & PAGE_ADDR_MASK;
+    pt[PT_INDEX(virt)] = 0;
+    __asm__ volatile ("invlpg (%0)" :: "r"(virt) : "memory");
+    if (free_frame) {
+        pmm_free(phys, 0);
+    }
+    return 1;
+}
+
 uint64_t paging_translate(uint64_t virt) {
     uint64_t *pdpt = table_entry(p4_table, PML4_INDEX(virt), 0, 0);
     uint64_t *pd   = pdpt ? table_entry(pdpt, PDPT_INDEX(virt), 0, 0) : 0;

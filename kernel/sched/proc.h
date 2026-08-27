@@ -6,6 +6,7 @@
 #include "../lock.h"
 #include "../waitq.h"
 #include "../fs/vfs.h"
+#include "../mm/pmm.h"
 
 // 16 entries indexed DIRECTLY by fd. /dev/CONSOLE is a real vnode
 // opened on 0, 1 and 2 at process creation, so the fd IS the index.
@@ -90,6 +91,26 @@ void thread_enqueue_ready(struct thread *t);
 
 #define USER_STACK_PAGES 4
 #define USER_STACK_TOP 0x0000700000000000ULL
+
+#define MAX_THREADS_PER_PROC 16
+
+// Each thread's user stack is USER_STACK_PAGES pages, followed (at
+// LOWER addresses) by one unmapped guard page, so a stack overflow
+// faults instead of silently writing into the next thread's stack.
+// Slot 0 is the main thread at USER_STACK_TOP, so the single-threaded
+// layout is unchanged -- except that the main thread now gains a guard
+// page it never had.
+#define THREAD_STACK_STRIDE ((uint64_t)(USER_STACK_PAGES + 1) * PMM_FRAME_SIZE)
+
+static inline uint64_t thread_stack_top_for(int slot) {
+    return USER_STACK_TOP - (uint64_t)slot * THREAD_STACK_STRIDE;
+}
+
+// Maps a fresh user stack for a new thread and marks its slot used.
+// Returns the slot index and stores its top in *out_top, or -1 if the
+// process is out of slots or memory.
+int  thread_stack_alloc(struct process *p, uint64_t *out_top);
+void thread_stack_free(struct process *p, int slot);
 
 struct process *spawn(const char *path);
 

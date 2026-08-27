@@ -69,6 +69,47 @@ void process_init(void) {
     serial_write_string("[process] initialized\n");
 }
 
+int thread_stack_alloc(struct process *p, uint64_t *out_top) {
+    int slot = -1;
+    for (int i = 0; i < MAX_THREADS_PER_PROC; i++) {
+        if (!(p->stack_slots & (1u << i))) { slot = i; break; }
+    }
+    if (slot < 0) { return -1; }
+
+    uint64_t top = thread_stack_top_for(slot);
+    uint64_t *pml4 = (uint64_t *)phys_to_virt(p->pml4_phys);
+
+    for (int i = 0; i < USER_STACK_PAGES; i++) {
+        uint64_t frame = pmm_alloc(0);
+        if (!frame) {
+            for (int j = 0; j < i; j++) {
+                uint64_t v = top - (uint64_t)(USER_STACK_PAGES - j) * PMM_FRAME_SIZE;
+                paging_unmap_from(pml4, v, 1);
+            }
+            return -1;
+        }
+        zero_frames(frame, 0);
+        uint64_t vaddr = top - (uint64_t)(USER_STACK_PAGES - i) * PMM_FRAME_SIZE;
+        paging_map_into(pml4, vaddr, frame, PAGE_WRITABLE | PAGE_NO_EXECUTE | PAGE_USER);
+    }
+    // The guard page immediately below this stack is simply never mapped.
+
+    p->stack_slots |= (uint16_t)(1u << slot);
+    *out_top = top;
+    return slot;
+}
+
+void thread_stack_free(struct process *p, int slot) {
+    if (slot < 0) { return; }
+    uint64_t top = thread_stack_top_for(slot);
+    uint64_t *pml4 = (uint64_t *)phys_to_virt(p->pml4_phys);
+    for (int i = 0; i < USER_STACK_PAGES; i++) {
+        uint64_t v = top - (uint64_t)(USER_STACK_PAGES - i) * PMM_FRAME_SIZE;
+        paging_unmap_from(pml4, v, 1);
+    }
+    p->stack_slots &= (uint16_t)~(1u << slot);
+}
+
 // Builds a complete, freshly-loaded user address space from the ELF
 // image at `path`: a new PML4 with the shared kernel entries, the
 // loaded ELF segments, and a fresh user stack. On success, returns 1
@@ -111,16 +152,10 @@ static int build_user_address_space(const char *path, uint64_t *out_pml4_phys, u
     }
     kfree(image);
 
-    for (int i = 0; i < USER_STACK_PAGES; i++) {
-        uint64_t frame = pmm_alloc(0);
-        if (!frame) {
-            free_address_space(pml4_phys);
-            return 0;
-        }
-        zero_frames(frame, 0);
-        uint64_t vaddr = USER_STACK_TOP - (uint64_t)(USER_STACK_PAGES - i) * PMM_FRAME_SIZE;
-        paging_map_into(pml4, vaddr, frame, PAGE_WRITABLE | PAGE_NO_EXECUTE | PAGE_USER);
-    }
+    // The user stack is NOT mapped here: spawn() and exec_task() call
+    // thread_stack_alloc() once the process exists, so slot 0 gets its
+    // stack -- and its guard page -- from the same path every other
+    // thread uses.
 
     *out_pml4_phys = pml4_phys;
     *out_entry = entry;
@@ -141,7 +176,13 @@ struct process *spawn(const char *path) {
     }
     p->pml4_phys   = pml4_phys;
     p->parent_pid  = current_proc() ? current_proc()->pid : 0;
-    p->stack_slots = 1; // slot 0 is the main thread's stack
+
+    uint64_t user_stack_top;
+    if (thread_stack_alloc(p, &user_stack_top) != 0) {
+        serial_write_string("[process] spawn FAILED: user stack\n");
+        free_address_space(pml4_phys);
+        return 0;
+    }
 
     struct thread *t = thread_alloc(p);
     if (!t) {
@@ -156,7 +197,7 @@ struct process *spawn(const char *path) {
     uint64_t kstack_top = (uint64_t)(uintptr_t)phys_to_virt(kstack_phys) + (PMM_FRAME_SIZE << KERNEL_STACK_ORDER);
 
     uint64_t *sp = (uint64_t *)kstack_top;
-    *(--sp) = USER_STACK_TOP;                     // user_rsp, popped by kernel_thread_trampoline
+    *(--sp) = user_stack_top;                     // user_rsp, popped by kernel_thread_trampoline
     *(--sp) = entry;                              // entry_rip, popped by kernel_thread_trampoline
     *(--sp) = (uint64_t)kernel_thread_trampoline; // context_switch's `ret` lands here
     *(--sp) = 0; // rbp
@@ -213,8 +254,16 @@ int exec_task(const char *path, struct syscall_frame *frame) {
 
     cpu_default_fpu_state(current_thread()->fpu_state);
 
+    // The new address space has no stacks at all: reset the slot bitmap
+    // and lay down slot 0 for the (now only) thread.
+    p->stack_slots = 0;
+    uint64_t user_stack_top;
+    if (thread_stack_alloc(p, &user_stack_top) != 0) {
+        return 0; // caller is left running its old program
+    }
+
     frame->rcx = new_entry;       // user RIP the ordinary sysret epilogue will return to
-    frame->user_rsp = USER_STACK_TOP;
+    frame->user_rsp = user_stack_top;
 
     return 1;
 }

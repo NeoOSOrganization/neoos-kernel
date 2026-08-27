@@ -51,6 +51,11 @@ uint64_t paging_alloc_pml4(void);
 // process's address space before it's ever loaded into CR3.
 int paging_map_into(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags);
 
+// Clears one PTE in an arbitrary address space, freeing the frame when
+// `free_frame` is set. Returns 1 if a mapping was removed, 0 if the
+// address was not mapped.
+int paging_unmap_from(uint64_t *pml4, uint64_t virt, int free_frame);
+
 // Frees every frame belonging to the address space rooted at
 // pml4_phys (user pages, page-table frames, and the PML4 itself),
 // leaving the three shared kernel entries untouched. The caller must
