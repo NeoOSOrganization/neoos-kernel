@@ -12,6 +12,12 @@ struct registers {
     uint64_t vector_number;
     uint64_t error_code;
     uint64_t rip, cs, rflags;
+    // In long mode the CPU pushes SS:RSP at EVERY privilege level, so
+    // these have always been on the stack -- the struct simply stopped
+    // at rflags. Signal delivery from a fault needs the user RSP to
+    // build a frame on. isr.asm needs no change: it never touched them,
+    // and its `add rsp, 16` + iretq already skip the CPU-pushed frame.
+    uint64_t rsp, ss;
 } __attribute__((packed));
 
 void isr_handler(struct registers *regs);
