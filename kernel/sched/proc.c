@@ -519,23 +519,30 @@ void proc_put(struct process *p) {
     waitq_wake_all(&p->exit_waiters);
 }
 
+// Idempotent. Every thread killed here delivers SIGKILL, whose default
+// action re-enters this function -- without the guard the second caller
+// would overwrite exit_code and reprint the exit line, breaking both the
+// reported status and the boot-log gate.
 void process_exit(int code) {
     struct process *p = current_proc();
     struct thread *self = current_thread();
-    p->exiting   = 1;
-    p->exit_code = code;
 
-    serial_write_string("[process] task exited, pid=");
-    serial_write_hex64((uint64_t)p->pid);
-    serial_write_string(" code=");
-    serial_write_hex64((uint64_t)(int64_t)code);
-    serial_write_string("\n");
+    if (!p->exiting) {
+        p->exiting   = 1;
+        p->exit_code = code;
 
-    // Every sibling dies too. The LAST thread to actually leave --
-    // which may be a killed sibling rather than this one -- drops the
-    // refcount to zero and frees the address space.
-    for (struct thread *t = p->threads; t; t = t->proc_next) {
-        if (t != self) { thread_kill(t); }
+        serial_write_string("[process] task exited, pid=");
+        serial_write_hex64((uint64_t)p->pid);
+        serial_write_string(" code=");
+        serial_write_hex64((uint64_t)(int64_t)code);
+        serial_write_string("\n");
+
+        // Every sibling dies too. The LAST thread to actually leave --
+        // which may be a killed sibling rather than this one -- drops
+        // the refcount to zero and frees the address space.
+        for (struct thread *t = p->threads; t; t = t->proc_next) {
+            if (t != self) { thread_kill(t); }
+        }
     }
 
     thread_exit_self(code);

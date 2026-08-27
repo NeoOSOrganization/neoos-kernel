@@ -438,12 +438,7 @@ static int64_t syscall_dispatch_inner(int64_t num, int64_t a1, int64_t a2, int64
 int64_t syscall_dispatch(int64_t num, int64_t a1, int64_t a2, int64_t a3,
                          int64_t a4, struct syscall_frame *frame) {
     int64_t ret = syscall_dispatch_inner(num, a1, a2, a3, a4, frame);
-    ret = signal_deliver_from_syscall(frame, num, ret);
-    struct thread *t = current_thread();
-    if (t && t->kill_pending) {
-        thread_exit_self(current_proc()->exit_code);
-    }
-    return ret;
+    return signal_deliver_from_syscall(frame, num, ret);
 }
 
 void syscall_init(void) {

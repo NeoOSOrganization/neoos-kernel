@@ -5,6 +5,7 @@
 #include "mm/pmm.h"
 #include "mm/heap.h"
 #include "errno.h"
+#include "signal.h"
 #include "serial.h"
 
 void waitq_init(struct waitq *q) { q->head = 0; q->tail = 0; }
@@ -53,7 +54,7 @@ int waitq_sleep(struct waitq *q, struct spinlock *release) {
         __asm__ volatile ("pushfq; pop %0; cli" : "=r"(own_flags) :: "memory");
     }
 
-    if (t->kill_pending) {
+    if (signal_pending_any(t)) {
         if (!release && (own_flags & (1ULL << 9))) { __asm__ volatile ("sti"); }
         return -EINTR;
     }
@@ -68,7 +69,7 @@ int waitq_sleep(struct waitq *q, struct spinlock *release) {
 
     // Resumed: woken normally, or killed while blocked.
     t->blocked_on = 0;
-    int rc = t->kill_pending ? -EINTR : 0;
+    int rc = signal_pending_any(t) ? -EINTR : 0;
 
     if (release) { (void)spin_lock_irqsave(release); }
     else if (own_flags & (1ULL << 9)) { __asm__ volatile ("sti"); }

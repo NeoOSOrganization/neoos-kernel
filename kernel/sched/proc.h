@@ -83,7 +83,6 @@ struct thread {
     uint64_t kernel_stack_top;
     uint64_t kernel_stack_phys;
     int stack_slot;                 // -1 for kernel-only threads
-    int kill_pending;
     int exit_code;
     struct waitq *blocked_on;
 

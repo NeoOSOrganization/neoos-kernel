@@ -160,8 +160,20 @@ int signal_send_process(struct process *p, int sig, struct siginfo *info) {
     return 0;
 }
 
-// Real body arrives with interruptible waits.
-void signal_wake_for_delivery(struct thread *t) { (void)t; }
+// A thread with a deliverable signal must reach a delivery point. If it
+// is blocked in an interruptible sleep, wake it: waitq_sleep sees the
+// pending signal and returns -EINTR.
+void signal_wake_for_delivery(struct thread *t) {
+    if (t->state == THREAD_BLOCKED && signal_next_deliverable(t)) {
+        waitq_remove(t);
+        t->state = THREAD_READY;
+        thread_enqueue_ready(t);
+    }
+}
+
+int signal_pending_any(struct thread *t) {
+    return signal_next_deliverable(t) != 0;
+}
 
 // ---------------------------------------------------------------- selftest
 
@@ -232,13 +244,22 @@ void signal_selftest_start(void) {
     thread_alloc_kernel(signal_selftest_thread);
 }
 
+// Records which signal killed the process, then terminates it.
+// process_exit is idempotent, so a sibling that also takes a fatal
+// signal does not clobber the first one's status.
+void signal_terminate(struct process *p, int sig) {
+    if (!p->exiting) { p->exit_signal = sig; }
+    process_exit(0);
+}
+
 // Real body arrives with THREAD_STOPPED. Until then a stop signal
 // terminates the process, which is the pre-signals behaviour.
 void signal_do_stop(struct thread *t, int sig) {
     (void)sig;
-    t->proc->exit_signal = SIGSTOP;
-    process_exit(0);
+    signal_terminate(t->proc, SIGSTOP);
 }
+
+
 
 // ---------------------------------------------------------------- delivery
 
@@ -359,8 +380,7 @@ static void deliver_one(struct thread *t, int sig, struct siginfo *info,
         case SIGACT_STOP: signal_do_stop(t, sig); return;
         case SIGACT_CONT: return;
         default:
-            p->exit_signal = sig;
-            process_exit(0);        // never returns
+            signal_terminate(p, sig);   // never returns
         }
     }
 
@@ -368,8 +388,7 @@ static void deliver_one(struct thread *t, int sig, struct siginfo *info,
     // injects a trampoline onto the user stack. lib/signal.c fills it in
     // for every sigaction(), and musl supplies its own.
     if (!(ka.flags & SA_RESTORER) || !ka.restorer) {
-        p->exit_signal = SIGSEGV;
-        process_exit(0);
+        signal_terminate(p, SIGSEGV);
     }
 
     sigset_t_k oldmask = t->blocked;
@@ -382,8 +401,7 @@ static void deliver_one(struct thread *t, int sig, struct siginfo *info,
 
     uint64_t sp = build_frame(t, info, sc, oldmask, &ka);
     if (!sp) {                       // unwritable stack: die, do not fault
-        p->exit_signal = SIGSEGV;
-        process_exit(0);
+        signal_terminate(p, SIGSEGV);
     }
 
     t->blocked |= ka.mask;
@@ -466,8 +484,7 @@ void signal_do_sigreturn(struct syscall_frame *f) {
     uint64_t sp = f->user_rsp - 8;
     struct rt_sigframe *fr = (struct rt_sigframe *)(uintptr_t)sp;
     if (!user_range_writable((uint64_t)(uintptr_t)fr, sizeof(*fr))) {
-        t->proc->exit_signal = SIGSEGV;
-        process_exit(0);
+        signal_terminate(t->proc, SIGSEGV);
     }
 
     t->blocked  = fr->uc.uc_sigmask & ~SIGSET_UNBLOCKABLE;

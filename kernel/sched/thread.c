@@ -137,18 +137,16 @@ void thread_exit_self(int code) {
     }
 }
 
-// Marks `t` for termination. A thread blocked in waitq_sleep is
-// removed from its queue and made runnable; it observes kill_pending
-// and returns -EINTR, unwinds its syscall, and exits. A running or
-// ready thread notices on its next syscall return.
+// Terminates `t`. SIGKILL cannot be caught, blocked or ignored, so this
+// is now just a send -- the delivery path does the rest. The threads
+// milestone's kill_pending flag was a one-signal prototype of exactly
+// this, and keeping both would mean two ways to kill a thread and two
+// checks on the syscall return path.
 void thread_kill(struct thread *t) {
     if (t->state == THREAD_ZOMBIE) { return; }
-    t->kill_pending = 1;
-    if (t->state == THREAD_BLOCKED) {
-        waitq_remove(t);
-        t->state = THREAD_READY;
-        enqueue_ready(t);
-    }
+    struct siginfo info;
+    siginfo_user(&info, SIGKILL, 0);
+    signal_send_thread(t, SIGKILL, &info);
 }
 
 struct thread *thread_create(uint64_t entry, uint64_t arg) {

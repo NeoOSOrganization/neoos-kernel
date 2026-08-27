@@ -1626,6 +1626,45 @@ Both cases leak a `forever` thread and a blocked victim on purpose;
 milestone's sibling teardown still works now that it goes through
 `SIGKILL`.
 
+- [ ] **Step 5b: `process_exit` must be idempotent**
+
+**Correction found during execution.** Once `thread_kill` sends
+`SIGKILL`, that signal's default action re-enters `process_exit` on
+every killed sibling — which would overwrite `exit_code` with the
+second caller's value and reprint the `[process] task exited` line,
+breaking both the reported status and the boot-log gate. Guard the
+whole body:
+
+```c
+void process_exit(int code) {
+    struct process *p = current_proc();
+    struct thread *self = current_thread();
+    if (!p->exiting) {
+        p->exiting = 1;
+        p->exit_code = code;
+        /* print, then thread_kill every sibling */
+    }
+    thread_exit_self(code);
+}
+```
+
+and route every fatal-signal path through
+`signal_terminate(p, sig)`, which records `exit_signal` only when the
+process is not already exiting.
+
+- [ ] **Step 5c: The interrupt test needs a handshake, not a delay**
+
+**Correction found during execution.** Waiting a fixed number of spins
+before `tkill` raced: the victim had not always reached its
+`thread_join`, and adding a diagnostic `printf` was enough to change
+the outcome. Have the victim set a flag immediately before blocking and
+spin on that instead.
+
+The remaining window between the flag and the thread actually blocking
+is harmless, and worth understanding: **`waitq_sleep` checks for a
+pending signal before it blocks**, so a signal delivered early is not
+lost.
+
 - [ ] **Step 6: Build, verify, commit**
 
 Expected: the existing sigtest lines plus `EINTR passed` and

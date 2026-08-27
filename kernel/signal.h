@@ -154,6 +154,7 @@ int64_t signal_deliver_from_syscall(struct syscall_frame *f, int64_t num,
                                     int64_t retval);
 void    signal_do_sigreturn(struct syscall_frame *f) __attribute__((noreturn));
 void    signal_do_stop(struct thread *t, int sig);
+void    signal_terminate(struct process *p, int sig) __attribute__((noreturn));
 
 // Default actions
 #define SIGACT_TERM 0
@@ -196,6 +197,7 @@ int signal_tkill(int tgid, int tid, int sig, struct siginfo *info);
 // Makes `t` reach a delivery point. Given a real body in a later task;
 // a no-op until blocking calls become signal-aware.
 void signal_wake_for_delivery(struct thread *t);
+int  signal_pending_any(struct thread *t);
 
 void signal_init_process(struct process *p);
 void signal_init_thread(struct thread *t);
