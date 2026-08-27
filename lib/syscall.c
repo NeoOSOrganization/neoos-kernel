@@ -26,6 +26,9 @@
 #define SYS_THREAD_JOIN   19
 #define SYS_THREAD_SELF   20
 #define SYS_RT_SIGACTION  21
+#define SYS_RT_SIGPROCMASK 22
+#define SYS_RT_SIGPENDING 24
+#define SYS_RT_SIGSUSPEND 25
 #define SYS_KILL          29
 #define SYS_TKILL         30
 #define SYS_TGKILL        31
@@ -156,6 +159,18 @@ long __sys_rt_sigaction(int sig, const struct k_sigaction *act,
     return (long)syscall3(SYS_RT_SIGACTION, sig,
                           (int64_t)(uint64_t)(uintptr_t)act,
                           (int64_t)(uint64_t)(uintptr_t)old);
+}
+
+int sigprocmask(int how, const sigset_t *set, sigset_t *old) {
+    return (int)syscall3(SYS_RT_SIGPROCMASK, how,
+                        (int64_t)(uint64_t)(uintptr_t)set,
+                        (int64_t)(uint64_t)(uintptr_t)old);
+}
+int sigpending(sigset_t *set) {
+    return (int)syscall1(SYS_RT_SIGPENDING, (int64_t)(uint64_t)(uintptr_t)set);
+}
+int sigsuspend(const sigset_t *mask) {
+    return (int)syscall1(SYS_RT_SIGSUSPEND, (int64_t)(uint64_t)(uintptr_t)mask);
 }
 
 int kill(int pid, int sig)             { return (int)syscall2(SYS_KILL, pid, sig); }

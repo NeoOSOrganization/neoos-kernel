@@ -7,6 +7,35 @@ static volatile int handler_arg;
 
 static void handler(int sig) { got = 1; handler_arg = sig; }
 
+static int check_masking(void) {
+    struct sigaction sa;
+    sa.sa_handler = handler; sa.sa_flags = 0; sa.sa_mask = 0;
+    sigaction(SIGUSR2, &sa, 0);
+
+    sigset_t block, old, pend;
+    sigemptyset(&block);
+    sigaddset(&block, SIGUSR2);
+    sigprocmask(SIG_BLOCK, &block, &old);
+
+    got = 0;
+    raise(SIGUSR2);
+    if (got) { printf("[sigtest] FAILED: blocked signal delivered\n"); return 0; }
+
+    sigemptyset(&pend);
+    sigpending(&pend);
+    if (!sigismember(&pend, SIGUSR2)) {
+        printf("[sigtest] FAILED: sigpending missed it\n"); return 0;
+    }
+
+    // Delivery must happen on the sigprocmask syscall's OWN return path:
+    // that is the first delivery point reached after unblocking.
+    sigprocmask(SIG_SETMASK, &old, 0);
+    if (!got) { printf("[sigtest] FAILED: unblock did not deliver\n"); return 0; }
+
+    printf("[sigtest] blocking + sigpending passed\n");
+    return 1;
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
@@ -34,6 +63,10 @@ int main(int argc, char **argv) {
     }
 
     printf("[sigtest] handler + sigreturn passed\n");
-    printf("[sigtest] ALL PASSED\n");
-    return 0;
+
+    int ok = 1;
+    ok &= check_masking();
+
+    printf("[sigtest] %s\n", ok ? "ALL PASSED" : "SOME CHECKS FAILED");
+    return ok ? 0 : 1;
 }

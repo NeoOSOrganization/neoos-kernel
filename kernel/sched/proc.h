@@ -69,6 +69,7 @@ struct process {
     int                exit_signal;     // 0, or the signal that killed it
     int                stopped_count;   // threads parked in THREAD_STOPPED
 
+    struct waitq sig_waiters;       // sigsuspend sleepers
     struct waitq exit_waiters;      // threads blocked in wait_for_pid
     struct waitq join_waiters;      // threads blocked in thread_join
     struct process *next;           // global process list

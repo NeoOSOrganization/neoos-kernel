@@ -37,7 +37,10 @@
 #define SYS_THREAD_JOIN   19
 #define SYS_THREAD_SELF   20
 #define SYS_RT_SIGACTION  21
+#define SYS_RT_SIGPROCMASK 22
 #define SYS_RT_SIGRETURN  23
+#define SYS_RT_SIGPENDING 24
+#define SYS_RT_SIGSUSPEND 25
 #define SYS_KILL          29
 #define SYS_TKILL         30
 #define SYS_TGKILL        31
@@ -362,6 +365,47 @@ static int64_t syscall_dispatch_inner(int64_t num, int64_t a1, int64_t a2, int64
             }
             spin_unlock_irqrestore(&p->sig_lock, fl);
             return 0;
+        }
+        case SYS_RT_SIGPROCMASK: {
+            int how = (int)a1;
+            const sigset_t_k *set = (const sigset_t_k *)(uintptr_t)a2;
+            sigset_t_k *old = (sigset_t_k *)(uintptr_t)a3;
+            struct thread *t = current_thread();
+            if (old) { *old = t->blocked; }
+            if (set) {
+                sigset_t_k v = *set;
+                switch (how) {
+                case SIG_BLOCK:   t->blocked |= v;  break;
+                case SIG_UNBLOCK: t->blocked &= ~v; break;
+                case SIG_SETMASK: t->blocked = v;   break;
+                default: return -EINVAL;
+                }
+                // SIGKILL and SIGSTOP are silently dropped from any mask,
+                // as POSIX requires -- not an error.
+                t->blocked &= ~SIGSET_UNBLOCKABLE;
+            }
+            return 0;
+        }
+        case SYS_RT_SIGPENDING: {
+            sigset_t_k *out = (sigset_t_k *)(uintptr_t)a1;
+            struct thread *t = current_thread();
+            // Pending AND blocked: an unblocked pending signal would
+            // already have been delivered.
+            if (out) { *out = (t->pending | t->proc->pending) & t->blocked; }
+            return 0;
+        }
+        case SYS_RT_SIGSUSPEND: {
+            const sigset_t_k *mask = (const sigset_t_k *)(uintptr_t)a1;
+            struct thread *t = current_thread();
+            t->saved_blocked = t->blocked;
+            t->in_sigsuspend = 1;
+            t->blocked = (*mask) & ~SIGSET_UNBLOCKABLE;
+            while (signal_next_deliverable(t) == 0) {
+                if (waitq_sleep(&t->proc->sig_waiters, 0) == -EINTR) { break; }
+            }
+            // The delivery path restores saved_blocked into the frame it
+            // builds, so sigsuspend always reports interruption.
+            return -EINTR;
         }
         case SYS_RT_SIGRETURN:
             signal_do_sigreturn(frame);

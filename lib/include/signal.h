@@ -59,6 +59,18 @@ struct sigaction {
 int sigaction(int sig, const struct sigaction *act, struct sigaction *old);
 int raise(int sig);
 
+int sigprocmask(int how, const sigset_t *set, sigset_t *old);
+int sigpending(sigset_t *set);
+int sigsuspend(const sigset_t *mask);
+
+static inline int sigemptyset(sigset_t *s) { *s = 0; return 0; }
+static inline int sigfillset(sigset_t *s)  { *s = ~0ULL; return 0; }
+static inline int sigaddset(sigset_t *s, int sig) { *s |= 1ULL << (sig - 1); return 0; }
+static inline int sigdelset(sigset_t *s, int sig) { *s &= ~(1ULL << (sig - 1)); return 0; }
+static inline int sigismember(const sigset_t *s, int sig) {
+    return (*s & (1ULL << (sig - 1))) != 0;
+}
+
 int kill(int pid, int sig);
 int tkill(int tid, int sig);
 int tgkill(int tgid, int tid, int sig);
