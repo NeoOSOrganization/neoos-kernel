@@ -118,10 +118,21 @@ static int signal_is_ignored(struct process *p, int sig) {
            (h == SIG_DFL && signal_default_action(sig) == SIGACT_IGN);
 }
 
+// A stopped thread never reaches a delivery point, so SIGCONT has to
+// act when it is SENT rather than when it would be delivered. A stop
+// and a pending continue also cancel each other, as POSIX requires.
+static void signal_stop_cont_interlock(struct process *p, int sig) {
+    if (sig == SIGCONT) { signal_do_continue(p); }
+    if (sig == SIGSTOP || sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU) {
+        sigset_del(&p->pending, SIGCONT);
+    }
+}
+
 int signal_send_thread(struct thread *t, int sig, struct siginfo *info) {
     if (sig <= 0 || sig >= NSIG) { return -EINVAL; }
     struct process *p = t->proc;
     if (!p) { return -ESRCH; }
+    signal_stop_cont_interlock(p, sig);
     if (signal_is_ignored(p, sig)) { return 0; }
 
     uint64_t f = spin_lock_irqsave(&p->sig_lock);
@@ -138,6 +149,7 @@ int signal_send_thread(struct thread *t, int sig, struct siginfo *info) {
 
 int signal_send_process(struct process *p, int sig, struct siginfo *info) {
     if (sig <= 0 || sig >= NSIG) { return -EINVAL; }
+    signal_stop_cont_interlock(p, sig);
     if (signal_is_ignored(p, sig)) { return 0; }
 
     uint64_t f = spin_lock_irqsave(&p->sig_lock);
@@ -253,14 +265,64 @@ void signal_terminate(struct process *p, int sig) {
     process_exit(0);
 }
 
-// Real body arrives with THREAD_STOPPED. Until then a stop signal
-// terminates the process, which is the pre-signals behaviour.
+// Stop is process-wide: SIGSTOP marks every thread. Threads blocked in
+// an interruptible sleep are woken so they reach a delivery point, where
+// they park here instead of running a handler.
+//
+// The idle thread introduced by the threads milestone is what makes this
+// safe: a process whose every thread stops no longer risks leaving the
+// CPU with nothing runnable.
 void signal_do_stop(struct thread *t, int sig) {
+    struct process *p = t->proc;
     (void)sig;
-    signal_terminate(t->proc, SIGSTOP);
+
+    for (struct thread *o = p->threads; o; o = o->proc_next) {
+        if (o != t && o->state != THREAD_ZOMBIE && o->state != THREAD_STOPPED) {
+            sigset_add(&o->pending, SIGSTOP);
+            signal_wake_for_delivery(o);
+        }
+    }
+
+    uint64_t f = spin_lock_irqsave(&p->sig_lock);
+    p->stopped_count++;
+    // The process counts as stopped only when EVERY thread has parked;
+    // reporting a half-complete group stop to wait4 would be a lie.
+    int all_stopped = 1;
+    for (struct thread *o = p->threads; o; o = o->proc_next) {
+        if (o != t && o->state != THREAD_STOPPED && o->state != THREAD_ZOMBIE) {
+            all_stopped = 0;
+            break;
+        }
+    }
+    if (all_stopped) { p->stop_reported = 0; }
+    spin_unlock_irqrestore(&p->sig_lock, f);
+
+    if (all_stopped) {
+        struct process *parent = proc_find(p->parent_pid);
+        if (parent) { waitq_wake_all(&parent->child_waiters); }
+    }
+
+    __asm__ volatile ("cli");
+    t->state = THREAD_STOPPED;
+    __asm__ volatile ("sti");
+    schedule();
+    // Resumed by SIGCONT.
 }
 
+void signal_do_continue(struct process *p) {
+    uint64_t f = spin_lock_irqsave(&p->sig_lock);
+    sigset_del(&p->pending, SIGSTOP);
+    p->stopped_count = 0;
+    spin_unlock_irqrestore(&p->sig_lock, f);
 
+    for (struct thread *t = p->threads; t; t = t->proc_next) {
+        sigset_del(&t->pending, SIGSTOP);
+        if (t->state == THREAD_STOPPED) {
+            t->state = THREAD_READY;
+            thread_enqueue_ready(t);
+        }
+    }
+}
 
 // ---------------------------------------------------------------- delivery
 

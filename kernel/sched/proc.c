@@ -46,6 +46,7 @@ static struct process *proc_alloc(void) {
     waitq_init(&p->exit_waiters);
     waitq_init(&p->join_waiters);
     waitq_init(&p->sig_waiters);
+    waitq_init(&p->child_waiters);
     signal_init_process(p);
     // A newly created process leads its own group and session until
     // setpgid/setsid say otherwise; fork/spawn inherit these later.
@@ -59,7 +60,7 @@ static struct process *proc_alloc(void) {
     return p;
 }
 
-static struct process *proc_find(int pid) {
+struct process *proc_find(int pid) {
     for (struct process *p = proc_list; p; p = p->next) {
         if (p->pid == pid) { return p; }
     }

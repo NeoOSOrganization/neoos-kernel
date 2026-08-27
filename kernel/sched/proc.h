@@ -30,7 +30,7 @@ struct syscall_frame {
 };
 
 enum thread_state { THREAD_UNUSED, THREAD_READY, THREAD_RUNNING,
-                    THREAD_BLOCKED, THREAD_ZOMBIE };
+                    THREAD_BLOCKED, THREAD_STOPPED, THREAD_ZOMBIE };
 
 struct file_descriptor {
     int in_use;
@@ -68,8 +68,10 @@ struct process {
     int                pgid, sid;
     int                exit_signal;     // 0, or the signal that killed it
     int                stopped_count;   // threads parked in THREAD_STOPPED
+    int                stop_reported;   // wait4(WUNTRACED) has seen this stop
 
     struct waitq sig_waiters;       // sigsuspend sleepers
+    struct waitq child_waiters;     // parents blocked in wait4
     struct waitq exit_waiters;      // threads blocked in wait_for_pid
     struct waitq join_waiters;      // threads blocked in thread_join
     struct process *next;           // global process list
@@ -162,6 +164,8 @@ struct thread *thread_create(uint64_t entry, uint64_t arg);
 // its stacks and struct, and stores its exit code. Returns 0, -ESRCH,
 // -EDEADLK for a self-join, or -EINTR.
 int thread_join(int tid, int *out_code);
+
+struct process *proc_find(int pid);
 
 void proc_get(struct process *p);
 void proc_put(struct process *p);

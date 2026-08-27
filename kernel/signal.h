@@ -154,6 +154,7 @@ int64_t signal_deliver_from_syscall(struct syscall_frame *f, int64_t num,
                                     int64_t retval);
 void    signal_do_sigreturn(struct syscall_frame *f) __attribute__((noreturn));
 void    signal_do_stop(struct thread *t, int sig);
+void    signal_do_continue(struct process *p);
 void    signal_raise_fault(struct registers *regs, int sig, int code, uint64_t addr);
 void    signal_deliver_from_interrupt(struct registers *regs);
 void    signal_terminate(struct process *p, int sig) __attribute__((noreturn));
