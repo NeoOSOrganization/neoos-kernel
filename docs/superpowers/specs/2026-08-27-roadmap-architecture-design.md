@@ -569,11 +569,12 @@ extensions and the deliberate divergences, not a whole libc.
 
 ```
  1  Threads          DONE (2026-08-27)
- 2  Signals          POSIX signals, job control, wait4 -- musl
-                     prerequisite; taken BEFORE extended state
- 3  Extended state   XSAVE/XSAVEOPT, AVX, AVX2, MMX -- must widen the
-                     signal frame's FP area, which signals defines as
-                     FXSAVE-shaped
+ 2  Signals          DONE (2026-08-27) -- POSIX signals, job control,
+                     wait4; taken before extended state
+ 3  Extended state   XSAVE/XSAVEOPT, AVX, AVX2, MMX. Widens the signal
+                     frame's FP area, which signals defined as
+                     FXSAVE-shaped. Runtime detection: the userland
+                     baseline stays SSE4.2 so -cpu Nehalem keeps working
  4  musl (static)    futex, mmap, stat, writev, clock_gettime,
                      arch_prctl, ioctl + the translation shim
  5  Dynamic linking  port musl's ldso, PT_INTERP, auxv, dlopen
