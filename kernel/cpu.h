@@ -43,9 +43,4 @@ void cpu_state_init(void *buf);
 
 void cpu_state_selftest(void);
 
-// TEMPORARY: signal.c is the last caller. Deleted by the signal-frame
-// task, so that conversion can be separate and separately verified.
-static inline void fpu_save(void *b)    { __asm__ volatile ("fxsave (%0)"  :: "r"(b) : "memory"); }
-static inline void fpu_restore(void *b) { __asm__ volatile ("fxrstor (%0)" :: "r"(b) : "memory"); }
-
 #endif

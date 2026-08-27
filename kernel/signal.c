@@ -412,8 +412,11 @@ static uint64_t build_frame(struct thread *t, struct siginfo *info,
         sp = alt + t->altstack.ss_size;
     }
 
-    // FP area first, on its own 64-byte alignment.
-    sp -= SIGFRAME_FPSTATE_SIZE;
+    // FP area first, on its own 64-byte alignment. Sized at run time:
+    // 512 with FXSAVE, 832 with x87+SSE+AVX. The +4 is Linux's trailing
+    // FP_XSTATE_MAGIC2.
+    uint32_t fpsize = cpu_state_size();
+    sp -= fpsize + 4;
     sp &= ~(uint64_t)(SIGFRAME_FPSTATE_ALIGN - 1);
     uint64_t fpaddr = sp;
 
@@ -424,11 +427,11 @@ static uint64_t build_frame(struct thread *t, struct siginfo *info,
     sp -= 8;
 
     struct rt_sigframe *fr = (struct rt_sigframe *)(uintptr_t)sp;
-    if (!user_range_writable(sp, (fpaddr + SIGFRAME_FPSTATE_SIZE) - sp)) {
+    if (!user_range_writable(sp, (fpaddr + fpsize + 4) - sp)) {
         return 0;
     }
     for (unsigned i = 0; i < sizeof(*fr); i++) { ((uint8_t *)fr)[i] = 0; }
-    for (unsigned i = 0; i < SIGFRAME_FPSTATE_SIZE; i++) {
+    for (uint32_t i = 0; i < fpsize + 4; i++) {
         ((uint8_t *)(uintptr_t)fpaddr)[i] = 0;
     }
 
@@ -437,7 +440,16 @@ static uint64_t build_frame(struct thread *t, struct siginfo *info,
     fr->uc.uc_sigmask          = oldmask;
     fr->uc.uc_stack            = t->altstack;
     fr->uc.uc_mcontext.fpstate = fpaddr;
-    fpu_save((void *)(uintptr_t)fpaddr);
+    cpu_state_save((void *)(uintptr_t)fpaddr);
+
+    // Linux-shaped software-reserved block, so anything that parses the
+    // frame finds what it expects.
+    struct fpx_sw_bytes *sw = (struct fpx_sw_bytes *)(uintptr_t)(fpaddr + 464);
+    sw->magic1        = FP_XSTATE_MAGIC1;
+    sw->xstate_size   = fpsize;
+    sw->extended_size = fpsize + 4;
+    sw->xfeatures     = cpu_state_xcr0();
+    *(uint32_t *)(uintptr_t)(fpaddr + fpsize) = FP_XSTATE_MAGIC2;
     if (info) { fr->info = *info; }
 
     return sp;
@@ -570,11 +582,25 @@ void signal_do_sigreturn(struct syscall_frame *f) {
     struct sigcontext_64 *sc = &fr->uc.uc_mcontext;
 
     // The frame is user memory and may have been altered; a misaligned
-    // or unmapped fpstate would #GP the KERNEL in fxrstor.
+    // or unmapped fpstate would #GP the KERNEL in xrstor/fxrstor.
     if (sc->fpstate &&
         (sc->fpstate & (SIGFRAME_FPSTATE_ALIGN - 1)) == 0 &&
-        user_range_writable(sc->fpstate, SIGFRAME_FPSTATE_SIZE)) {
-        fpu_restore((void *)(uintptr_t)sc->fpstate);
+        user_range_writable(sc->fpstate, cpu_state_size())) {
+
+        // XRSTOR also faults on a header naming features outside XCR0,
+        // or with nonzero reserved bytes -- both of which a user program
+        // can write into its own frame between handler entry and
+        // sigreturn. Mask the header to what this kernel enabled before
+        // it is ever fed to the CPU; without this any program can #GP
+        // the kernel from a signal handler.
+        if (cpu_state_size() > 512) {
+            struct xstate_header *hdr =
+                (struct xstate_header *)(uintptr_t)(sc->fpstate + 512);
+            hdr->xstate_bv &= cpu_state_xcr0();
+            hdr->xcomp_bv   = 0;          // uncompacted format only
+            for (int i = 0; i < 6; i++) { hdr->reserved[i] = 0; }
+        }
+        cpu_state_restore((void *)(uintptr_t)sc->fpstate);
     }
 
     struct iret_ctx ctx;

@@ -136,14 +136,36 @@ struct rt_sigframe {
     struct siginfo    info;
 };
 
-// The FXSAVE area is allocated SEPARATELY, above the frame, and reached
-// through uc.uc_mcontext.fpstate. It cannot be a member: the frame's own
-// address must be 8 mod 16 so the handler sees rsp % 16 == 8 as if
-// reached by `call`, which would put every 16-aligned member at 8 mod 16
-// and make fxsave #GP. Linux separates it for the same reason.
-// The extended-state milestone widens this and adds the xstate header.
-#define SIGFRAME_FPSTATE_SIZE  512
+// The extended-state area is allocated SEPARATELY, above the frame, and
+// reached through uc.uc_mcontext.fpstate. It cannot be a member: the
+// frame's own address must be 8 mod 16 so the handler sees
+// rsp % 16 == 8 as if reached by `call`, which would put every aligned
+// member at the wrong offset and make xsave #GP. Linux separates it for
+// the same reason. Its SIZE is cpu_state_size(), decided at run time.
 #define SIGFRAME_FPSTATE_ALIGN 64
+
+// Linux's software-reserved block, at offset 464 of the legacy
+// _fpstate. Nothing in NeoOS reads it and musl does not either; it is
+// written because the frame is ABI, and the alternative is discovering
+// later that something which does parse it cannot.
+#define FP_XSTATE_MAGIC1 0x46505853u
+#define FP_XSTATE_MAGIC2 0x46505845u
+
+struct fpx_sw_bytes {
+    uint32_t magic1;
+    uint32_t extended_size;   // legacy 512 + xstate tail + 4 for magic2
+    uint64_t xfeatures;
+    uint32_t xstate_size;
+    uint32_t padding[7];
+};
+
+// Sits at offset 512 of the FP area, immediately after the legacy
+// FXSAVE region.
+struct xstate_header {
+    uint64_t xstate_bv;
+    uint64_t xcomp_bv;
+    uint64_t reserved[6];
+};
 
 struct syscall_frame;
 struct registers;
