@@ -571,12 +571,13 @@ extensions and the deliberate divergences, not a whole libc.
  1  Threads          DONE (2026-08-27)
  2  Signals          DONE (2026-08-27) -- POSIX signals, job control,
                      wait4; taken before extended state
- 3  Extended state   XSAVE/XSAVEOPT, AVX, AVX2, MMX. Widens the signal
-                     frame's FP area, which signals defined as
-                     FXSAVE-shaped. Runtime detection: the userland
-                     baseline stays SSE4.2 so -cpu Nehalem keeps working
- 4  musl (static)    futex, mmap, stat, writev, clock_gettime,
-                     arch_prctl, ioctl + the translation shim
+ 3  Extended state   DONE (2026-08-27) -- XSAVE/XSAVEOPT, AVX, AVX2,
+                     MMX, runtime-detected so -cpu Nehalem still works
+ 4  musl (static)    mmap with per-process VMAs and demand paging,
+                     auxv startup ABI, arch_prctl + FS base, futex,
+                     writev, fstat, ioctl, clock_gettime,
+                     set_tid_address + vendored musl and the __NR_
+                     remap. See 2026-08-28-musl-static-design.md
  5  Dynamic linking  port musl's ldso, PT_INTERP, auxv, dlopen
  6  Full TLS         kernel: arch_prctl + auxv; musl owns the DTV
  7  SMP + x2APIC     AP bringup, per-CPU, fine-grained locks, shootdown
