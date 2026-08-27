@@ -569,8 +569,11 @@ extensions and the deliberate divergences, not a whole libc.
 
 ```
  1  Threads          DONE (2026-08-27)
- 2  Extended state   XSAVE/XSAVEOPT, AVX, AVX2, MMX
- 3  Signals          rt_sigaction/procmask/sigreturn -- musl prerequisite
+ 2  Signals          POSIX signals, job control, wait4 -- musl
+                     prerequisite; taken BEFORE extended state
+ 3  Extended state   XSAVE/XSAVEOPT, AVX, AVX2, MMX -- must widen the
+                     signal frame's FP area, which signals defines as
+                     FXSAVE-shaped
  4  musl (static)    futex, mmap, stat, writev, clock_gettime,
                      arch_prctl, ioctl + the translation shim
  5  Dynamic linking  port musl's ldso, PT_INTERP, auxv, dlopen
