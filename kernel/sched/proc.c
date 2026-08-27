@@ -467,6 +467,7 @@ void proc_put(struct process *p) {
 
 void process_exit(int code) {
     struct process *p = current_proc();
+    struct thread *self = current_thread();
     p->exiting   = 1;
     p->exit_code = code;
 
@@ -475,6 +476,13 @@ void process_exit(int code) {
     serial_write_string(" code=");
     serial_write_hex64((uint64_t)(int64_t)code);
     serial_write_string("\n");
+
+    // Every sibling dies too. The LAST thread to actually leave --
+    // which may be a killed sibling rather than this one -- drops the
+    // refcount to zero and frees the address space.
+    for (struct thread *t = p->threads; t; t = t->proc_next) {
+        if (t != self) { thread_kill(t); }
+    }
 
     thread_exit_self(code);
 }

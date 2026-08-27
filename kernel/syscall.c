@@ -100,7 +100,7 @@ static void copy_user_path(int64_t user_ptr, int64_t user_len, char *out, uint64
 }
 
 // Called only from syscall_entry.asm's `call syscall_dispatch`.
-int64_t syscall_dispatch(int64_t num, int64_t a1, int64_t a2, int64_t a3, int64_t a4, struct syscall_frame *frame) {
+static int64_t syscall_dispatch_inner(int64_t num, int64_t a1, int64_t a2, int64_t a3, int64_t a4, struct syscall_frame *frame) {
     (void)a4;
     (void)frame; // unused until fork()/exec() land
     switch (num) {
@@ -344,6 +344,19 @@ int64_t syscall_dispatch(int64_t num, int64_t a1, int64_t a2, int64_t a3, int64_
             serial_write_string("[syscall] unknown syscall number\n");
             return -1;
     }
+}
+
+// Single exit point for every syscall. A thread killed by a sibling's
+// exit() unwinds to here: whatever it was doing has finished, and it
+// must not return to user mode.
+int64_t syscall_dispatch(int64_t num, int64_t a1, int64_t a2, int64_t a3,
+                         int64_t a4, struct syscall_frame *frame) {
+    int64_t ret = syscall_dispatch_inner(num, a1, a2, a3, a4, frame);
+    struct thread *t = current_thread();
+    if (t && t->kill_pending) {
+        thread_exit_self(current_proc()->exit_code);
+    }
+    return ret;
 }
 
 void syscall_init(void) {

@@ -134,6 +134,7 @@ int64_t wait_for_pid(int pid);
 // Starts a thread in the current process at user RIP `entry` with
 // RDI = `arg`. Returns the new thread, or 0 if the process is exiting,
 // out of stack slots, or out of memory.
+void thread_kill(struct thread *t);
 struct thread *thread_create(uint64_t entry, uint64_t arg);
 
 // Waits for `tid` (a thread of the calling process) to exit, reclaims

@@ -136,6 +136,20 @@ void thread_exit_self(int code) {
     }
 }
 
+// Marks `t` for termination. A thread blocked in waitq_sleep is
+// removed from its queue and made runnable; it observes kill_pending
+// and returns -EINTR, unwinds its syscall, and exits. A running or
+// ready thread notices on its next syscall return.
+void thread_kill(struct thread *t) {
+    if (t->state == THREAD_ZOMBIE) { return; }
+    t->kill_pending = 1;
+    if (t->state == THREAD_BLOCKED) {
+        waitq_remove(t);
+        t->state = THREAD_READY;
+        enqueue_ready(t);
+    }
+}
+
 struct thread *thread_create(uint64_t entry, uint64_t arg) {
     struct process *p = current_proc();
     if (!p || p->exiting) { return 0; }
