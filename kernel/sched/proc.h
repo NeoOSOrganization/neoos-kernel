@@ -8,6 +8,7 @@
 #include "../signal.h"
 #include "../fs/vfs.h"
 #include "../mm/pmm.h"
+#include "../mm/vma.h"
 
 // 16 entries indexed DIRECTLY by fd. /dev/CONSOLE is a real vnode
 // opened on 0, 1 and 2 at process creation, so the fd IS the index.
@@ -50,6 +51,8 @@ struct process {
     // is freed by wait_for_pid's reap.
     uint32_t refcount;
     uint64_t pml4_phys;             // 0 = shares the kernel address space
+    struct vma *vmas;               // sorted by start, non-overlapping
+    uint64_t    mmap_next;          // bump hint for unhinted mmap
     struct file_descriptor files[MAX_OPEN_FILES];
     struct thread *threads;         // live threads, via thread->proc_next
     struct thread *zombies;         // exited, unjoined; freed at reap

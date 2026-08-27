@@ -7,6 +7,7 @@
 #include "lock.h"
 #include "signal.h"
 #include "timer.h"
+#include "mm/vma.h"
 
 #define MSR_EFER   0xC0000080
 #define MSR_STAR   0xC0000081
@@ -47,6 +48,9 @@
 #define SYS_SIGALTSTACK   28
 #define SYS_KILL          29
 #define SYS_WAIT4         32
+#define SYS_MMAP          37
+#define SYS_MUNMAP        38
+#define SYS_MPROTECT      39
 #define SYS_SETPGID       33
 #define SYS_GETPGID       34
 #define SYS_SETSID        35
@@ -479,6 +483,24 @@ static int64_t syscall_dispatch_inner(int64_t num, int64_t a1, int64_t a2, int64
             }
             return 0;
         }
+        case SYS_MMAP: {
+            // mmap takes SIX arguments. syscall_dispatch receives only
+            // a1-a4, but struct syscall_frame begins r9, r8 and
+            // syscall_entry.asm pushes those BEFORE its argument
+            // shuffle -- so args 5 and 6 are frame->r8 and frame->r9,
+            // and the ABI needs no extending.
+            uint64_t addr = a1, len = a2;
+            uint32_t prot = (uint32_t)a3, flags = (uint32_t)a4;
+            int64_t  fd   = (int64_t)frame->r8;
+            // Anonymous only this milestone; the dynamic linker adds
+            // file-backed mappings when it needs them.
+            if (!(flags & MAP_ANONYMOUS) || fd >= 0) { return -ENOSYS; }
+            return vma_mmap(current_proc(), addr, len, prot, flags);
+        }
+        case SYS_MUNMAP:
+            return vma_munmap(current_proc(), a1, a2);
+        case SYS_MPROTECT:
+            return vma_mprotect(current_proc(), a1, a2, (uint32_t)a3);
         case SYS_WAIT4: {
             int st = 0;
             int64_t rc = wait4((int)a1, &st, (int)a3);

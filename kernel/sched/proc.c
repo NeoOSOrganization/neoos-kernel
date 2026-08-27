@@ -43,6 +43,8 @@ static struct process *proc_alloc(void) {
     for (unsigned i = 0; i < sizeof(struct process); i++) { ((uint8_t *)p)[i] = 0; }
     p->pid   = alloc_id();
     p->state = PROC_ALIVE;
+    p->vmas      = 0;
+    p->mmap_next = MMAP_BASE;
     waitq_init(&p->exit_waiters);
     waitq_init(&p->join_waiters);
     waitq_init(&p->sig_waiters);

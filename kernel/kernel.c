@@ -13,6 +13,7 @@
 #include "mm/pmm.h"
 #include "mm/paging.h"
 #include "mm/heap.h"
+#include "mm/vma.h"
 #include "ata.h"
 #include "fs/fatfs.h"
 #include "fs/vfs.h"
@@ -49,6 +50,7 @@ void kmain(void *multiboot_info) {
     // physical address 0.
     cpu_local_init();
     lock_selftest();
+    vma_selftest();
     serial_write_string("[gdt] loaded, tss_selector=0x18\n");
 
     idt_init();
