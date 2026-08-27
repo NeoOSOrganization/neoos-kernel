@@ -118,6 +118,47 @@ static int check_eintr(void) {
     return 1;
 }
 
+static char altstack_mem[16384] __attribute__((aligned(16)));
+
+static void segv_handler(int sig) {
+    (void)sig;
+    // Reached only because SA_ONSTACK moved the frame off the stack that
+    // just overflowed -- without an alternate stack this handler would
+    // re-fault on the same guard page.
+    exit(77);
+}
+
+// Runs in a forked child, since it deliberately dies.
+static int check_segv(void) {
+    int child = fork();
+    if (child < 0) { printf("[sigtest] FAILED: fork for segv\n"); return 0; }
+    if (child == 0) {
+        stack_t ss;
+        ss.ss_sp = altstack_mem;
+        ss.ss_flags = 0;
+        ss.ss_size = sizeof(altstack_mem);
+        if (sigaltstack(&ss, 0) != 0) { exit(1); }
+
+        struct sigaction sa;
+        sa.sa_handler = segv_handler;
+        sa.sa_flags   = SA_ONSTACK;
+        sa.sa_mask    = 0;
+        sigaction(SIGSEGV, &sa, 0);
+
+        volatile int *bad = 0;
+        *bad = 1;              // deliberate null dereference
+        exit(2);               // unreachable
+    }
+
+    int code = wait(child);
+    if (code != 77) {
+        printf("[sigtest] FAILED: segv child exited %d, want 77\n", code);
+        return 0;
+    }
+    printf("[sigtest] SIGSEGV on sigaltstack passed\n");
+    return 1;
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
@@ -149,6 +190,7 @@ int main(int argc, char **argv) {
     int ok = 1;
     ok &= check_masking();
     ok &= check_eintr();
+    ok &= check_segv();
 
     printf("[sigtest] %s\n", ok ? "ALL PASSED" : "SOME CHECKS FAILED");
     return ok ? 0 : 1;

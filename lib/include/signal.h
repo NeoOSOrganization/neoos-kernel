@@ -63,6 +63,11 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *old);
 int sigpending(sigset_t *set);
 int sigsuspend(const sigset_t *mask);
 
+typedef struct { void *ss_sp; int ss_flags; int _pad; unsigned long ss_size; } stack_t;
+#define SS_ONSTACK 1
+#define SS_DISABLE 2
+int sigaltstack(const stack_t *ss, stack_t *old);
+
 static inline int sigemptyset(sigset_t *s) { *s = 0; return 0; }
 static inline int sigfillset(sigset_t *s)  { *s = ~0ULL; return 0; }
 static inline int sigaddset(sigset_t *s, int sig) { *s |= 1ULL << (sig - 1); return 0; }

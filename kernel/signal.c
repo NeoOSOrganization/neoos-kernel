@@ -3,6 +3,7 @@
 #include "serial.h"
 #include "errno.h"
 #include "mm/paging.h"
+#include "isr.h"
 #include "cpu.h"
 
 int signal_default_action(int sig) {
@@ -514,4 +515,68 @@ void signal_do_sigreturn(struct syscall_frame *f) {
     // frame at the top -- so the trampoline's `mov rsp, rdi` cannot
     // clobber anything still needed.
     sigreturn_to_user(&ctx);
+}
+
+static void sc_from_registers(struct sigcontext_64 *sc, struct registers *r) {
+    for (unsigned i = 0; i < sizeof(*sc); i++) { ((uint8_t *)sc)[i] = 0; }
+    sc->r8  = r->r8;  sc->r9  = r->r9;  sc->r10 = r->r10; sc->r11 = r->r11;
+    sc->r12 = r->r12; sc->r13 = r->r13; sc->r14 = r->r14; sc->r15 = r->r15;
+    sc->rdi = r->rdi; sc->rsi = r->rsi; sc->rbp = r->rbp; sc->rbx = r->rbx;
+    sc->rdx = r->rdx; sc->rax = r->rax; sc->rcx = r->rcx;
+    sc->rsp = r->rsp; sc->rip = r->rip; sc->eflags = r->rflags;
+    sc->cs = USER_CS; sc->ss = USER_SS;
+    sc->err = r->error_code; sc->trapno = r->vector_number;
+}
+
+static void sc_to_registers(struct registers *r, struct sigcontext_64 *sc) {
+    r->r8  = sc->r8;  r->r9  = sc->r9;  r->r10 = sc->r10; r->r11 = sc->r11;
+    r->r12 = sc->r12; r->r13 = sc->r13; r->r14 = sc->r14; r->r15 = sc->r15;
+    r->rdi = sc->rdi; r->rsi = sc->rsi; r->rbp = sc->rbp; r->rbx = sc->rbx;
+    r->rdx = sc->rdx; r->rax = sc->rax; r->rcx = sc->rcx;
+    r->rsp = sc->rsp; r->rip = sc->rip; r->rflags = sc->eflags;
+}
+
+// Raises a synchronous fault signal and delivers it immediately: unlike
+// an asynchronous signal there is nowhere to return to, since
+// re-executing the faulting instruction would just fault again.
+void signal_raise_fault(struct registers *regs, int sig, int code, uint64_t addr) {
+    struct thread *t = current_thread();
+    struct process *p = t ? t->proc : 0;
+    if (!p) { return; }   // caller falls back to the kernel dump
+
+    struct siginfo info;
+    for (unsigned i = 0; i < sizeof(info); i++) { ((uint8_t *)&info)[i] = 0; }
+    info.si_signo = sig;
+    info.si_code  = code;
+    info.fields.fault.si_addr = (void *)(uintptr_t)addr;
+
+    // A fault signal that is blocked or ignored cannot be honoured:
+    // POSIX leaves it undefined and every real kernel force-delivers the
+    // default action. Otherwise the process spins re-faulting forever.
+    if (sigset_test(t->blocked, sig) || p->actions[sig].handler == SIG_IGN) {
+        signal_terminate(p, sig);
+    }
+
+    struct sigcontext_64 sc;
+    sc_from_registers(&sc, regs);
+    deliver_one(t, sig, &info, &sc);
+    sc_to_registers(regs, &sc);
+}
+
+// Asynchronous delivery on the way back to ring 3. Without this a signal
+// could never interrupt a compute loop -- only a thread that happened to
+// make a syscall would notice one.
+void signal_deliver_from_interrupt(struct registers *regs) {
+    struct thread *t = current_thread();
+    if (!t || !t->proc) { return; }
+
+    int sig;
+    while ((sig = signal_next_deliverable(t)) != 0) {
+        struct siginfo info;
+        signal_take_pending(t, sig, &info);
+        struct sigcontext_64 sc;
+        sc_from_registers(&sc, regs);
+        deliver_one(t, sig, &info, &sc);
+        sc_to_registers(regs, &sc);
+    }
 }

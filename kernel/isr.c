@@ -6,6 +6,7 @@
 #include "keyboard.h"
 #include "mm/paging.h"
 #include "sched/proc.h"
+#include "signal.h"
 
 static const char *exception_names[32] = {
     "Divide Error", "Debug", "NMI", "Breakpoint", "Overflow",
@@ -65,7 +66,7 @@ static void unhandled_interrupt(uint64_t vector) {
     }
 }
 
-void isr_handler(struct registers *regs) {
+static void isr_handler_inner(struct registers *regs) {
     if (regs->vector_number == 14) {
         // A #PF that was present + write + user can only be a write to a
         // read-only user page, and fork() is the only thing that ever
@@ -86,7 +87,32 @@ void isr_handler(struct registers *regs) {
     }
 
     if (regs->vector_number < 32) {
-        exception_dump_and_halt(regs);
+        // A fault from ring 0 is a kernel bug and must still stop the
+        // machine loudly. A fault from ring 3 kills only its process --
+        // which is what finally lets faulter.c into the standard boot.
+        if ((regs->cs & 3) != 3 || !current_proc()) {
+            exception_dump_and_halt(regs);
+            return;
+        }
+
+        uint64_t cr2 = 0;
+        __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+
+        int sig = SIGSEGV, code = SI_KERNEL;
+        uint64_t addr = 0;
+        switch (regs->vector_number) {
+        case 0:  sig = SIGFPE;  code = FPE_INTDIV;  addr = regs->rip; break;
+        case 6:  sig = SIGILL;  code = ILL_ILLOPC;  addr = regs->rip; break;
+        case 13: sig = SIGSEGV; code = SI_KERNEL;                     break;
+        case 14: sig = SIGSEGV;
+                 code = (regs->error_code & 1) ? SEGV_ACCERR : SEGV_MAPERR;
+                 addr = cr2;
+                 break;
+        case 16: case 19: sig = SIGFPE; code = FPE_FLTINV; addr = regs->rip; break;
+        case 17: sig = SIGBUS;  code = BUS_ADRERR; addr = cr2; break;
+        default: break;
+        }
+        signal_raise_fault(regs, sig, code, addr);
         return;
     }
 
@@ -111,4 +137,21 @@ void isr_handler(struct registers *regs) {
     }
 
     unhandled_interrupt(regs->vector_number);
+}
+
+void isr_handler(struct registers *regs) {
+    isr_handler_inner(regs);
+
+    // Deliver pending signals on the way back to ring 3. Without this a
+    // signal could never interrupt a compute loop -- only a thread that
+    // happened to make a syscall would notice one.
+    //
+    // This runs AFTER the inner handler, never before: a fatal signal
+    // terminates the process without returning, and doing that ahead of
+    // lapic_send_eoi() would leave the EOI unsent. The LAPIC then
+    // withholds every further timer interrupt and preemption deadlocks
+    // system-wide -- the same trap documented at the EOI call itself.
+    if ((regs->cs & 3) == 3) {
+        signal_deliver_from_interrupt(regs);
+    }
 }

@@ -41,6 +41,7 @@
 #define SYS_RT_SIGRETURN  23
 #define SYS_RT_SIGPENDING 24
 #define SYS_RT_SIGSUSPEND 25
+#define SYS_SIGALTSTACK   28
 #define SYS_KILL          29
 #define SYS_TKILL         30
 #define SYS_TGKILL        31
@@ -410,6 +411,17 @@ static int64_t syscall_dispatch_inner(int64_t num, int64_t a1, int64_t a2, int64
         case SYS_RT_SIGRETURN:
             signal_do_sigreturn(frame);
             return 0; // unreachable
+        case SYS_SIGALTSTACK: {
+            const stack_t_k *ss = (const stack_t_k *)(uintptr_t)a1;
+            stack_t_k *old = (stack_t_k *)(uintptr_t)a2;
+            struct thread *t = current_thread();
+            if (old) { *old = t->altstack; }
+            if (ss) {
+                if (ss->ss_size < 2048) { return -ENOMEM; }
+                t->altstack = *ss;
+            }
+            return 0;
+        }
         case SYS_KILL: {
             struct siginfo info;
             siginfo_user(&info, (int)a2, current_proc()->pid);

@@ -1833,6 +1833,48 @@ static int check_segv(void) {
 Run this **last** in `main`, from a forked child so the parent can
 report the outcome via `wait`. Expected exit code 77.
 
+- [ ] **Step 6b: Deliver AFTER the EOI, via a single exit point**
+
+**Correction found during execution.** Placing
+`signal_deliver_from_interrupt` at the top of `isr_handler` is a
+system-wide deadlock: a fatal signal terminates the process without
+returning, so `lapic_send_eoi()` never runs, and the LAPIC then
+withholds every further timer interrupt. This is the same trap already
+documented at the EOI call itself.
+
+Rename the existing body to `isr_handler_inner` and add a wrapper, so
+delivery always follows the EOI:
+
+```c
+void isr_handler(struct registers *regs) {
+    isr_handler_inner(regs);
+    if ((regs->cs & 3) == 3) {
+        signal_deliver_from_interrupt(regs);
+    }
+}
+```
+
+- [ ] **Step 6c: `user_range_writable` must break COW**
+
+**Correction found during execution — the sigaltstack check cannot pass
+without it.** Requiring `PAGE_WRITABLE` rejects copy-on-write pages,
+and after `fork` *every* page of both parent and child is COW
+read-only until first written. The forked child never writes
+`altstack_mem`, so the frame check failed and the process died of the
+default action instead of running its handler.
+
+Writing a COW page is legal, but the kernel cannot simply do it: a CPL0
+write faults with `user=0`, which `paging_handle_cow_fault`'s
+`present+write+user` test rejects, so it would reach
+`exception_dump_and_halt` and take the machine down. Break the sharing
+in the check instead:
+
+```c
+        if (!(e & PAGE_WRITABLE)) {
+            if (!paging_handle_cow_fault(pml4_phys, v)) { return 0; }
+        }
+```
+
 - [ ] **Step 7: Build and verify**
 
 ```bash

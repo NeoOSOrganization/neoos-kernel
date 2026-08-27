@@ -106,16 +106,29 @@ int user_range_writable(uint64_t addr, uint64_t len) {
 
     uint64_t cr3;
     __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
-    uint64_t *pml4 = (uint64_t *)phys_to_virt(cr3 & PAGE_ADDR_MASK);
+    uint64_t pml4_phys = cr3 & PAGE_ADDR_MASK;
+    uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
 
     for (uint64_t v = addr & ~0xFFFULL; v < addr + len; v += PMM_FRAME_SIZE) {
         uint64_t *pdpt = table_entry(pml4, PML4_INDEX(v), 0, 0);
         uint64_t *pd   = pdpt ? table_entry(pdpt, PDPT_INDEX(v), 0, 0) : 0;
         uint64_t *pt   = pd   ? table_entry(pd,   PD_INDEX(v),   0, 0) : 0;
         if (!pt) { return 0; }
+
         uint64_t e = pt[PT_INDEX(v)];
-        const uint64_t need = PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
-        if ((e & need) != need) { return 0; }
+        if ((e & (PAGE_PRESENT | PAGE_USER)) != (PAGE_PRESENT | PAGE_USER)) {
+            return 0;
+        }
+        if (!(e & PAGE_WRITABLE)) {
+            // A present, user, read-only page is a COW page: fork()
+            // clears PAGE_WRITABLE on every page of both parent and
+            // child. Writing it IS legal, but the kernel cannot simply
+            // do so -- a CPL0 write faults with user=0, which
+            // paging_handle_cow_fault's present+write+user test rejects,
+            // so it would reach exception_dump_and_halt and take the
+            // machine down. Break the sharing here instead.
+            if (!paging_handle_cow_fault(pml4_phys, v)) { return 0; }
+        }
     }
     return 1;
 }

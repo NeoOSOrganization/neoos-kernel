@@ -29,6 +29,7 @@
 #define SYS_RT_SIGPROCMASK 22
 #define SYS_RT_SIGPENDING 24
 #define SYS_RT_SIGSUSPEND 25
+#define SYS_SIGALTSTACK   28
 #define SYS_KILL          29
 #define SYS_TKILL         30
 #define SYS_TGKILL        31
@@ -171,6 +172,12 @@ int sigpending(sigset_t *set) {
 }
 int sigsuspend(const sigset_t *mask) {
     return (int)syscall1(SYS_RT_SIGSUSPEND, (int64_t)(uint64_t)(uintptr_t)mask);
+}
+
+int sigaltstack(const stack_t *ss, stack_t *old) {
+    return (int)syscall2(SYS_SIGALTSTACK,
+                        (int64_t)(uint64_t)(uintptr_t)ss,
+                        (int64_t)(uint64_t)(uintptr_t)old);
 }
 
 int kill(int pid, int sig)             { return (int)syscall2(SYS_KILL, pid, sig); }

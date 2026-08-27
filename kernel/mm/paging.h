@@ -61,8 +61,11 @@ int paging_map_into(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags
 int paging_unmap_from(uint64_t *pml4, uint64_t virt, int free_frame);
 
 // 1 if every page of [addr, addr+len) is present, user-accessible and
-// writable in the CURRENT address space. Signal delivery uses it so a
-// bad user stack becomes a clean kill instead of a kernel fault.
+// safe for the KERNEL to write in the current address space. Copy-on-
+// write pages are broken here rather than rejected: writing them is
+// legal, but a CPL0 write would fault with user=0 and never reach the
+// COW handler. Signal delivery uses this so a bad user stack becomes a
+// clean kill instead of a kernel fault.
 int user_range_writable(uint64_t addr, uint64_t len);
 
 // Frees every frame belonging to the address space rooted at
