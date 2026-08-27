@@ -110,6 +110,7 @@ void kmain(void *multiboot_info) {
     spawn("/BIN/THRDTEST.ELF");
     spawn("/BIN/SIGTEST.ELF");
     spawn("/BIN/FAULTER.ELF");
+    spawn("/BIN/AVXTEST.ELF");
 
     // After the spawns so the selftest's own kernel threads draw ids
     // above the real processes', keeping pids stable across boots.

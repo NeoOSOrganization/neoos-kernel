@@ -26,6 +26,12 @@
   as anything else** — it matches and kills the invoking shell's own
   process group, aborting the rest of the command with exit 144. Kill
   strays in a separate call, or by pid.
+- **Never put `pgrep -f qemu-system` or `pkill -f qemu-system` in a
+  command whose own command line contains that string** — the pattern
+  matches the invoking shell, so `pkill` kills the command before it
+  runs anything (exit 144) and `pgrep` reports a phantom "leftover"
+  that is really itself. Match by `comm` instead:
+  `ps ax -o pid,comm | grep -i qemu`.
 - **Kill stray QEMU processes before a run.** A previous run still holding `build/disk.img` fails the next one with `Failed to get "write" lock`, and the log comes back empty. `pkill -f qemu-system-x86_64` first if in doubt.
 - **Work happens directly on `main`.** No feature branches (`CLAUDE.md`).
 - **The kernel stays `-mno-sse`.** Only userland gains AVX/MMX. Kernel code must never touch FP registers; `cpu.c`'s inline assembly is the sole exception and it only names the save/restore instructions.
@@ -885,6 +891,38 @@ others, then `spawn("/BIN/AVXTEST.ELF");` in `kmain`.
 
 The name is 8.3-safe. A longer one would be mangled by `mcopy`, which
 has already cost this project a debugging session.
+
+- [ ] **Step 3b: The test must not yield through a function call**
+
+**Correction found during execution — the kernel was innocent both
+times.** Two separate defects in the test, each of which looked exactly
+like a kernel that drops the AVX component:
+
+1. **`vzeroupper`.** GCC inserts it before a call from AVX code, to
+   avoid AVX-SSE transition penalties, and it zeroes the upper 128 bits
+   of every `ymm` register. Calling `lib`'s `yield()` inside the
+   measurement window therefore destroys the state being measured.
+   Symptom: `ymm` words 0-3 preserved, word 4 onward zero. Yield
+   through an inline `syscall` instead, and confirm with
+   `objdump -d | grep vzeroupper` that none appears between the load
+   and the readback.
+
+2. **`rax` declared input-only on that inline `syscall`.** `syscall`
+   returns its result in `rax`, so GCC hoisted `mov $2,%eax` out of the
+   loop; every iteration after the first ran with the *previous
+   return value* — 0, which is `SYS_EXIT`. Symptom: the process exits
+   silently with the loop counter as its exit code. `rax` must be an
+   output as well as an input:
+
+```c
+    long ret;
+    __asm__ volatile ("syscall" : "=a"(ret) : "a"((long)SYS_YIELD)
+                                : "rcx", "r11", "memory");
+```
+
+**Debug this class of failure with a shrunk reproduction**, not the
+full boot: spawn only `AVXTEST` and drop the yield counts to ~20, which
+turns a 150-second cycle into 30 seconds.
 
 - [ ] **Step 4: Build and verify under both models**
 
