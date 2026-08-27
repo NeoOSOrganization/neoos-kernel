@@ -5,7 +5,7 @@
 #include "lapic.h"
 #include "keyboard.h"
 #include "mm/paging.h"
-#include "process.h"
+#include "sched/proc.h"
 
 static const char *exception_names[32] = {
     "Divide Error", "Debug", "NMI", "Breakpoint", "Overflow",

@@ -16,7 +16,7 @@
 #include "ata.h"
 #include "fs/fatfs.h"
 #include "fs/vfs.h"
-#include "process.h"
+#include "sched/proc.h"
 #include "syscall.h"
 #include "cpu.h"
 #include "lock.h"

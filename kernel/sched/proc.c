@@ -1,129 +1,40 @@
-#include "process.h"
-#include "mm/pmm.h"
-#include "mm/paging.h"
-#include "mm/heap.h"
-#include "tss.h"
-#include "serial.h"
-#include "fs/vfs.h"
-#include "elf.h"
-#include "cpu.h"
-#include "cpu_local.h"
-#include "errno.h"
-#include "waitq.h"
+// kernel/sched/proc.c -- process lifecycle: creation, fork/exec,
+// teardown and reaping. Split out of the former kernel/process.c; the
+// code is unchanged, only relocated.
+
+#include "sched.h"
+#include "../mm/pmm.h"
+#include "../mm/paging.h"
+#include "../mm/heap.h"
+#include "../tss.h"
+#include "../serial.h"
+#include "../fs/vfs.h"
+#include "../elf.h"
+#include "../cpu.h"
+#include "../cpu_local.h"
+#include "../waitq.h"
+#include "../errno.h"
 
 extern void context_switch(uint64_t *old_rsp, uint64_t *new_rsp);
 extern void kernel_thread_entry_trampoline(void);
 extern void kernel_thread_trampoline(void);
 extern void fork_trampoline(void);
-extern uint64_t p4_table[512]; // boot.asm's live PML4
 
-static struct process *proc_list;
-static struct spinlock proc_lock;
-static struct thread *ready_head;
-static struct thread *ready_tail;
+
+struct process *proc_list;
+struct spinlock proc_lock;
+
+
 // Starts at 0 so the idle thread -- created first, by idle_init() --
 // naturally takes id 0, which is reserved for idle threads and is
 // never a valid pid. The first real process therefore gets pid 1.
 static int next_id = 0;
 
-// Wipes a freshly allocated physical block before it becomes a task's
-// stack. pmm_alloc() hands back whatever the previous owner left there,
-// and at boot that "previous owner" is GRUB, whose own code sits in the
-// high end of the memory map it then reports back to us as available --
-// so the first task spawned gets stack frames still full of GRUB's
-// machine code. Beyond the obvious hygiene problem (a process could read
-// it), leaving it there is catastrophic for performance under QEMU's
-// TCG: a guest write to a physical page that still holds translated
-// blocks takes the slow notdirty path, and QEMU only drops the blocks
-// overlapping the bytes actually written -- so a stack whose hot slots
-// never overlap the stale code stays on that path forever, running
-// 150-2000x slower than normal RAM. Zeroing the whole block once
-// evicts every stale block and settles the page for good.
-// (elf_load() and paging.c's alloc_table_frame() already do the same
-// for the frames they hand out.)
-static void zero_frames(uint64_t phys, unsigned order) {
-    uint64_t *p = (uint64_t *)phys_to_virt(phys);
-    uint64_t words = (PMM_FRAME_SIZE << order) / sizeof(uint64_t);
-    for (uint64_t i = 0; i < words; i++) {
-        p[i] = 0;
-    }
-}
-
-static void enqueue_ready(struct thread *t) {
-    t->next = 0;
-    if (ready_tail) {
-        ready_tail->next = t;
-    } else {
-        ready_head = t;
-    }
-    ready_tail = t;
-}
-
-static struct thread *dequeue_ready(void) {
-    struct thread *t = ready_head;
-    if (t) {
-        ready_head = t->next;
-        if (!ready_head) {
-            ready_tail = 0;
-        }
-        t->next = 0;
-    }
-    return t;
-}
-
-void thread_enqueue_ready(struct thread *t) { enqueue_ready(t); }
-
-// Removes `t` from the ready queue wherever it sits. Only used by
-// idle_init, which has to un-enqueue the idle thread that
-// thread_alloc_kernel just queued.
-static void dequeue_specific(struct thread *t) {
-    struct thread **pp = &ready_head;
-    struct thread *prev = 0;
-    while (*pp && *pp != t) { prev = *pp; pp = &(*pp)->next; }
-    if (*pp) {
-        *pp = t->next;
-        if (ready_tail == t) { ready_tail = prev; }
-    }
-    t->next = 0;
-}
-
-struct thread  *current_thread(void) { return this_cpu()->current; }
-struct process *current_proc(void) {
-    struct thread *t = current_thread();
-    return t ? t->proc : 0;
-}
-
-static int alloc_id(void) {
+int alloc_id(void) {
     uint64_t f = spin_lock_irqsave(&proc_lock);
     int id = next_id++;
     spin_unlock_irqrestore(&proc_lock, f);
     return id;
-}
-
-// thread->fpu_state is fxsave/fxrstor'd directly out of this
-// allocation, and those #GP on an address that is not 16-byte aligned.
-// heap.c's struct heap_page is 64-byte aligned specifically so every
-// kmalloc slot satisfies that; see the comment there.
-static struct thread *thread_alloc(struct process *p) {
-    struct thread *t = (struct thread *)kmalloc(sizeof(struct thread));
-    if (!t) { return 0; }
-    for (unsigned i = 0; i < sizeof(struct thread); i++) { ((uint8_t *)t)[i] = 0; }
-    // A process's FIRST thread takes the pid as its tid, matching
-    // Linux (main thread: tid == pid). Later threads draw fresh ids
-    // from the same counter, so a tid never collides with a pid, and a
-    // single-threaded process consumes exactly one id -- which is what
-    // keeps pids stable across this refactor.
-    t->tid        = (p && !p->threads) ? p->pid : alloc_id();
-    t->proc       = p;
-    t->state      = THREAD_READY;
-    t->stack_slot = -1;
-    cpu_default_fpu_state(t->fpu_state);
-    if (p) {
-        t->proc_next = p->threads;
-        p->threads   = t;
-        p->refcount++;
-    }
-    return t;
 }
 
 static struct process *proc_alloc(void) {
@@ -148,41 +59,6 @@ static struct process *proc_find(int pid) {
     return 0;
 }
 
-// Runs whenever no other thread is ready. Having a real idle thread
-// removes schedule()'s old "nothing ready, keep running whatever's
-// current" special case for the blocked/dead-current cases.
-// Kernel threads (proc == 0) have no parent to reap them and cannot
-// free the stack they are running on, so they park here and the idle
-// thread reclaims them. Without this every selftest thread would leak
-// its 16KiB kernel stack for the life of the boot.
-static struct thread *kzombies;
-
-static void idle_entry(void) {
-    for (;;) {
-        uint64_t f = spin_lock_irqsave(&proc_lock);
-        struct thread *z = kzombies;
-        kzombies = 0;
-        spin_unlock_irqrestore(&proc_lock, f);
-        while (z) {
-            struct thread *next = z->proc_next;
-            pmm_free(z->kernel_stack_phys, KERNEL_STACK_ORDER);
-            kfree(z);
-            z = next;
-        }
-        __asm__ volatile ("sti; hlt");
-    }
-}
-
-static void idle_init(void) {
-    struct thread *t = thread_alloc_kernel(idle_entry);
-    // Reserved: idle threads are never a valid pid. thread_alloc()
-    // already handed out id 0 here, since idle_init() runs before any
-    // other allocation -- see next_id's initialiser.
-    t->tid = 0;
-    dequeue_specific(t);   // never on the ready queue; schedule() falls back to it
-    this_cpu()->idle = t;
-}
-
 void process_init(void) {
     spin_init(&proc_lock, LOCK_RANK_PROCTABLE, "proc_list");
     proc_list  = 0;
@@ -191,124 +67,6 @@ void process_init(void) {
     this_cpu()->current = 0;
     idle_init();
     serial_write_string("[process] initialized\n");
-}
-
-struct thread *thread_alloc_kernel(void (*entry)(void)) {
-    struct thread *t = thread_alloc(0);
-    if (!t) {
-        return 0;
-    }
-
-    uint64_t stack_phys = pmm_alloc(KERNEL_STACK_ORDER);
-    zero_frames(stack_phys, KERNEL_STACK_ORDER);
-    uint64_t stack_top = (uint64_t)(uintptr_t)phys_to_virt(stack_phys) + (PMM_FRAME_SIZE << KERNEL_STACK_ORDER);
-
-    uint64_t *sp = (uint64_t *)stack_top;
-    *(--sp) = (uint64_t)entry;                            // popped by kernel_thread_entry_trampoline
-    *(--sp) = (uint64_t)kernel_thread_entry_trampoline;    // context_switch's `ret` lands here
-    *(--sp) = 0; // rbp
-    *(--sp) = 0; // rbx
-    *(--sp) = 0; // r12
-    *(--sp) = 0; // r13
-    *(--sp) = 0; // r14
-    *(--sp) = 0; // r15
-
-    t->saved_rsp = (uint64_t)sp;
-    t->kernel_stack_top = stack_top;
-    t->kernel_stack_phys = stack_phys;
-
-    enqueue_ready(t);
-    return t;
-}
-
-// Restores EFLAGS.IF to whatever it was on entry to schedule(). Split
-// out because schedule() has three exits (no-task, same-task, and the
-// far side of a context switch, possibly milliseconds later in a
-// different task).
-static inline void schedule_restore_if(uint64_t saved_flags) {
-    if (saved_flags & (1ULL << 9)) {
-        __asm__ volatile ("sti");
-    }
-}
-
-void schedule(void) {
-    // schedule() is NOT reentrant, and until this cli it ran with
-    // interrupts enabled. Between `current = next` and the
-    // context_switch() below, `current` already names the incoming
-    // task while execution is still on the OUTGOING task's stack -- so
-    // a timer interrupt landing in that window re-enters schedule()
-    // with prev == the incoming task, and context_switch's
-    // `mov [rdi], rsp` stamps the outgoing task's RSP into the
-    // incoming task's saved_rsp. That task is then resumed on a stack
-    // that isn't its own (observed: pid 6 resumed with an RSP pointing
-    // into pid 5's kernel stack, faulting in syscall_dispatch's
-    // epilogue with a garbage RBP, escalating to a double fault).
-    //
-    // The window was always there, but nothing hit it until fork()
-    // made it easy to have several tasks doing nothing but yield(),
-    // which keeps schedule() executing a large fraction of the time.
-    //
-    // IF is restored rather than unconditionally set because
-    // timer_handler() calls schedule() from an interrupt gate with
-    // IF already 0, and must return to the ISR with it still 0 -- the
-    // iretq there is what re-enables it. `flags` is a local, so it
-    // lives on this task's own kernel stack and is still correct
-    // whenever this task is eventually resumed.
-    uint64_t flags;
-    __asm__ volatile ("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
-
-    struct cpu *c = this_cpu();
-
-    struct thread *next = dequeue_ready();
-    if (!next) {
-        struct thread *cur = c->current;
-        if (cur && cur->state == THREAD_RUNNING) {
-            schedule_restore_if(flags);
-            return; // nothing else ready; keep running whatever's current
-        }
-        next = c->idle; // current is blocked or dead -- park on idle
-    }
-
-    struct thread *prev = c->current;
-    if (prev && prev->state == THREAD_RUNNING && prev != c->idle) {
-        prev->state = THREAD_READY;
-        enqueue_ready(prev);
-    }
-
-    next->state = THREAD_RUNNING;
-    c->current = next;
-    c->tss->rsp0    = next->kernel_stack_top;
-    c->kernel_stack = next->kernel_stack_top;
-
-    // Always establish a definite CR3, even for a kernel-mode-only task
-    // (pml4_phys == 0 -- falls back to the kernel's own never-freed
-    // p4_table). Leaving CR3 unchanged in that case used to be harmless
-    // (an exited process's now-zombie PML4 just leaked, unused-but-
-    // intact memory), but now that task_exit() actually frees a
-    // process's PML4 frame back to the allocator, a stale CR3 left
-    // pointing at it could get silently reused and overwritten by the
-    // very next pmm_alloc() -- corrupting the page table the CPU is
-    // still actively translating through.
-    uint64_t next_cr3 = (next->proc && next->proc->pml4_phys)
-                      ? next->proc->pml4_phys
-                      : (uint64_t)(uintptr_t)p4_table;
-    __asm__ volatile ("mov %0, %%cr3" :: "r"(next_cr3) : "memory");
-
-    if (prev == next) {
-        schedule_restore_if(flags);
-        return;
-    }
-
-    static uint64_t discarded_rsp; // used the first time schedule() is ever called, from kmain
-    if (prev) {
-        fpu_save(prev->fpu_state);
-    }
-    fpu_restore(next->fpu_state);
-    context_switch(prev ? &prev->saved_rsp : &discarded_rsp, &next->saved_rsp);
-
-    // Reached only when THIS task is scheduled back in, which may be
-    // much later; `flags` is the IF state from its own entry above.
-    schedule_restore_if(flags);
 }
 
 // Builds a complete, freshly-loaded user address space from the ELF
@@ -654,38 +412,6 @@ void proc_put(struct process *p) {
 
     p->state = PROC_ZOMBIE;
     waitq_wake_all(&p->exit_waiters);
-}
-
-void thread_exit_self(int code) {
-    struct thread *t = current_thread();
-    struct process *p = t->proc;
-
-    __asm__ volatile ("cli");
-
-    t->exit_code = code;
-    t->state     = THREAD_ZOMBIE;
-
-    if (p) {
-        // Unlink from the live list, then park on the zombie list. We
-        // cannot free our own kernel stack -- we are running on it --
-        // so thread_join or wait_for_pid's reap frees it later.
-        struct thread **pp = &p->threads;
-        while (*pp && *pp != t) { pp = &(*pp)->proc_next; }
-        if (*pp) { *pp = t->proc_next; }
-        t->proc_next = p->zombies;
-        p->zombies   = t;
-
-        proc_put(p);
-    } else {
-        t->proc_next = kzombies;
-        kzombies     = t;
-    }
-
-    __asm__ volatile ("sti");
-    schedule();
-    for (;;) {
-        __asm__ volatile ("hlt"); // unreachable: schedule() never resumes a ZOMBIE
-    }
 }
 
 void process_exit(int code) {

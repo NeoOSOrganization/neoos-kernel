@@ -1,7 +1,7 @@
 #include "syscall.h"
 #include "gdt.h"
 #include "serial.h"
-#include "process.h"
+#include "sched/proc.h"
 #include "fs/vfs.h"
 #include "errno.h"
 #include "lock.h"

@@ -1,6 +1,6 @@
 #include "waitq.h"
 #include "lock.h"
-#include "process.h"
+#include "sched/proc.h"
 #include "cpu_local.h"
 #include "mm/pmm.h"
 #include "mm/heap.h"

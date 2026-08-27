@@ -2,7 +2,7 @@
 #include "pit.h"
 #include "lapic.h"
 #include "serial.h"
-#include "process.h"
+#include "sched/proc.h"
 
 #define TICKS_PER_LOG 100 // 100Hz timer -> log once per second
 #define TIMESLICE_TICKS 5  // 100Hz timer, 5 ticks = 50ms per time slice

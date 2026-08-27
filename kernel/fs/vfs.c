@@ -4,7 +4,7 @@
 #include "devfs.h"
 #include "../errno.h"
 #include "../serial.h"
-#include "../process.h"
+#include "../sched/proc.h"
 
 static struct vfs_mount mounts[MAX_MOUNTS];
 static struct vnode vnodes[MAX_VNODES];

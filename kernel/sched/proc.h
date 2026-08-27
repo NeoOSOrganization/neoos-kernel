@@ -2,10 +2,10 @@
 #define NEOOS_PROCESS_H
 
 #include <stdint.h>
-#include "cpu.h"
-#include "lock.h"
-#include "waitq.h"
-#include "fs/vfs.h"
+#include "../cpu.h"
+#include "../lock.h"
+#include "../waitq.h"
+#include "../fs/vfs.h"
 
 // 16 entries indexed DIRECTLY by fd. /dev/CONSOLE is a real vnode
 // opened on 0, 1 and 2 at process creation, so the fd IS the index.
