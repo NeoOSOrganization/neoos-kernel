@@ -31,6 +31,10 @@
 #define SYS_MOUNT  14
 #define SYS_UMOUNT 15
 #define SYS_GETDENTS 16
+#define SYS_THREAD_CREATE 17
+#define SYS_THREAD_EXIT   18
+#define SYS_THREAD_JOIN   19
+#define SYS_THREAD_SELF   20
 
 // Mirrors lib/include/fcntl.h's O_* values exactly -- the two trees
 // don't share headers, so these must be kept in sync by hand.
@@ -318,6 +322,24 @@ int64_t syscall_dispatch(int64_t num, int64_t a1, int64_t a2, int64_t a3, int64_
             fs_lock_release();
             return written;
         }
+        case SYS_THREAD_CREATE: {
+            struct thread *t = thread_create(a1, a2);
+            return t ? t->tid : -EAGAIN;
+        }
+        case SYS_THREAD_EXIT:
+            thread_exit_self((int)a1);
+            return 0; // unreachable
+        case SYS_THREAD_JOIN: {
+            int code = 0;
+            int rc = thread_join((int)a1, &code);
+            if (rc == 0 && a2) {
+                *(int *)(uintptr_t)a2 = code;
+            }
+            return rc;
+        }
+        case SYS_THREAD_SELF:
+            return current_thread()->tid;
+
         default:
             serial_write_string("[syscall] unknown syscall number\n");
             return -1;

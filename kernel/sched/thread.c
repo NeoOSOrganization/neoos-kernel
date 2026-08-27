@@ -122,6 +122,7 @@ void thread_exit_self(int code) {
         t->proc_next = p->zombies;
         p->zombies   = t;
 
+        waitq_wake_all(&p->join_waiters);
         proc_put(p);
     } else {
         t->proc_next = kzombies;
@@ -132,5 +133,75 @@ void thread_exit_self(int code) {
     schedule();
     for (;;) {
         __asm__ volatile ("hlt"); // unreachable: schedule() never resumes a ZOMBIE
+    }
+}
+
+struct thread *thread_create(uint64_t entry, uint64_t arg) {
+    struct process *p = current_proc();
+    if (!p || p->exiting) { return 0; }
+
+    uint64_t user_stack_top;
+    int slot = thread_stack_alloc(p, &user_stack_top);
+    if (slot < 0) { return 0; }
+
+    struct thread *t = thread_alloc(p);
+    if (!t) { thread_stack_free(p, slot); return 0; }
+    t->stack_slot = slot;
+
+    uint64_t kstack_phys = pmm_alloc(KERNEL_STACK_ORDER);
+    if (!kstack_phys) {
+        thread_stack_free(p, slot);
+        return 0;
+    }
+    zero_frames(kstack_phys, KERNEL_STACK_ORDER);
+    uint64_t kstack_top = (uint64_t)(uintptr_t)phys_to_virt(kstack_phys)
+                        + (PMM_FRAME_SIZE << KERNEL_STACK_ORDER);
+
+    // Same layout spawn() builds, including the arg slot.
+    uint64_t *sp = (uint64_t *)kstack_top;
+    *(--sp) = arg;
+    *(--sp) = user_stack_top;
+    *(--sp) = entry;
+    *(--sp) = (uint64_t)kernel_thread_trampoline;
+    *(--sp) = 0; // rbp
+    *(--sp) = 0; // rbx
+    *(--sp) = 0; // r12
+    *(--sp) = 0; // r13
+    *(--sp) = 0; // r14
+    *(--sp) = 0; // r15
+
+    t->saved_rsp         = (uint64_t)sp;
+    t->kernel_stack_top  = kstack_top;
+    t->kernel_stack_phys = kstack_phys;
+
+    enqueue_ready(t);
+    return t;
+}
+
+int thread_join(int tid, int *out_code) {
+    struct process *p = current_proc();
+    if (!p) { return -ESRCH; }
+    if (tid == current_thread()->tid) { return -EDEADLK; }
+
+    for (;;) {
+        // Already exited? Reclaim it here -- nothing is running on it.
+        struct thread **pp = &p->zombies;
+        while (*pp && (*pp)->tid != tid) { pp = &(*pp)->proc_next; }
+        if (*pp) {
+            struct thread *z = *pp;
+            *pp = z->proc_next;
+            if (out_code) { *out_code = z->exit_code; }
+            thread_stack_free(p, z->stack_slot);
+            pmm_free(z->kernel_stack_phys, KERNEL_STACK_ORDER);
+            kfree(z);
+            return 0;
+        }
+
+        // Still running?
+        struct thread *t = p->threads;
+        while (t && t->tid != tid) { t = t->proc_next; }
+        if (!t) { return -ESRCH; }
+
+        if (waitq_sleep(&p->join_waiters, 0) == -EINTR) { return -EINTR; }
     }
 }

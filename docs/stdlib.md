@@ -8,7 +8,9 @@ alongside the library code that exposes it.
 ## `<unistd.h>`
 
 - `void exit(int code)` — terminates the calling process with the
-  given exit code. Never returns.
+  given exit code, including every other thread in it. Threads blocked
+  in a syscall are interrupted rather than left running. Never returns.
+  Contrast `thread_exit`, which ends only the calling thread.
 - `int64_t write(int fd, const void *buf, uint64_t len)` — writes
   `len` bytes from `buf` to the file (or console, for fd
   `STDOUT_FILENO`/`STDERR_FILENO`) open on `fd`. Returns the number of
@@ -93,6 +95,26 @@ alongside the library code that exposes it.
   entries from a directory fd, returning how many were written, `0` at
   end of directory, or `-EBADF`/`-ENOTDIR`.
 
+## `<thread.h>`
+
+- `int thread_create(thread_t *out, void (*fn)(void *), void *arg)` —
+  starts `fn(arg)` on a new thread sharing this process's address space
+  and file descriptors. Returns 0 and stores the tid in `*out`, or
+  `-EAGAIN` if the process already has 16 threads. Each thread gets its
+  own 16KiB user stack with an unmapped guard page below it, so a stack
+  overflow faults instead of corrupting a neighbouring thread's stack.
+- `void thread_exit(int code)` — ends the calling thread. When it is
+  the last thread of the process, the process ends too. Never returns.
+- `int thread_join(thread_t t, int *exit_code)` — waits for `t` to exit
+  and stores its exit code. Returns 0, `-ESRCH` if no such thread
+  exists in this process, `-EDEADLK` if `t` is the caller, or `-EINTR`
+  if the calling thread was killed while waiting. Joining is the only
+  way to reclaim a thread's stacks before the process exits; unjoined
+  threads are reclaimed when the process is reaped.
+- `thread_t thread_self(void)` — the calling thread's tid. TIDs and
+  PIDs share one number space, so a tid never equals an unrelated
+  process's pid. A process's first thread has `tid == pid`.
+
 ## `<errno.h>`
 
 Every `open`/`read`/`write`/`close`/`lseek`/`mkdir`/`unlink` call
@@ -103,9 +125,15 @@ convention.
 
 - `EPERM` (1) — the operation is not permitted on this filesystem
   (e.g. creating or deleting a node under `/dev`).
+- `ESRCH` (3) — `thread_join` given a tid that is not a thread of the
+  calling process.
+- `EINTR` (4) — a blocking call was interrupted because the calling
+  thread was killed (by another thread's `exit`).
 - `ENOENT` (2) — path/file not found, or nothing mounted at a
   `umount` target.
 - `EBADF` (9) — invalid or closed file descriptor.
+- `EAGAIN` (11) — `thread_create` when the process already has its
+  maximum of 16 threads, or the kernel is out of memory for one.
 - `EBUSY` (16) — `umount` called while a file on that filesystem is
   still open. The mount is left completely intact.
 - `EEXIST` (17) — `mkdir`/`open(O_CREAT)` target already exists, or
@@ -122,6 +150,7 @@ convention.
 - `EMFILE` (24) — the process's file descriptor table is full (16
   entries, of which 0/1/2 are the standard streams, so 13 files at
   once, maximum).
+- `EDEADLK` (35) — `thread_join` called on the calling thread itself.
 - `ENOSPC` (28) — disk full (no free cluster), the mount table is
   full, or a FAT16 root directory is full (it has a fixed maximum
   entry count).

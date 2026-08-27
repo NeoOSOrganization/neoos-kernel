@@ -44,6 +44,7 @@ static struct process *proc_alloc(void) {
     p->pid   = alloc_id();
     p->state = PROC_ALIVE;
     waitq_init(&p->exit_waiters);
+    waitq_init(&p->join_waiters);
 
     uint64_t f = spin_lock_irqsave(&proc_lock);
     p->next   = proc_list;
@@ -197,6 +198,7 @@ struct process *spawn(const char *path) {
     uint64_t kstack_top = (uint64_t)(uintptr_t)phys_to_virt(kstack_phys) + (PMM_FRAME_SIZE << KERNEL_STACK_ORDER);
 
     uint64_t *sp = (uint64_t *)kstack_top;
+    *(--sp) = 0;                                  // arg (unused for a main thread)
     *(--sp) = user_stack_top;                     // user_rsp, popped by kernel_thread_trampoline
     *(--sp) = entry;                              // entry_rip, popped by kernel_thread_trampoline
     *(--sp) = (uint64_t)kernel_thread_trampoline; // context_switch's `ret` lands here

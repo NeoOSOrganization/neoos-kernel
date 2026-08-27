@@ -65,8 +65,11 @@ kernel_thread_entry_trampoline:
 global kernel_thread_trampoline
 
 kernel_thread_trampoline:
-    pop rdi   ; entry_rip, planted by spawn()
-    pop rsi   ; user_rsp, planted by spawn()
+    pop rdi   ; entry_rip, planted by spawn()/thread_create()
+    pop rsi   ; user_rsp,  planted by spawn()/thread_create()
+    pop rdx   ; arg -- becomes the user entry point's SysV first
+              ; argument. spawn() plants 0 here so both callers share
+              ; one stack layout.
 
     cli
     mov ax, 0x33        ; user data selector (RPL3)
@@ -90,4 +93,5 @@ kernel_thread_trampoline:
     push 0x202          ; RFLAGS: reserved bit 1 set, IF (bit 9) set
     push 0x3B           ; CS (user code64, RPL3)
     push rdi            ; RIP (entry point)
+    mov rdi, rdx        ; SysV arg 1 for the entry point
     iretq

@@ -8,6 +8,9 @@
 
 #define EPERM   1
 #define EINTR  4
+#define ESRCH   3
+#define EAGAIN  11
+#define EDEADLK 35
 #define ENOENT  2
 #define EBADF   9
 #define EBUSY   16

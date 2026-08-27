@@ -20,6 +20,10 @@
 #define SYS_MOUNT  14
 #define SYS_UMOUNT 15
 #define SYS_GETDENTS 16
+#define SYS_THREAD_CREATE 17
+#define SYS_THREAD_EXIT   18
+#define SYS_THREAD_JOIN   19
+#define SYS_THREAD_SELF   20
 
 static inline int64_t syscall0(int64_t num) {
     int64_t ret;
@@ -122,4 +126,21 @@ int mkdir(const char *path) {
 int unlink(const char *path) {
     uint64_t len = strlen(path);
     return (int)syscall2(SYS_UNLINK, (int64_t)(uint64_t)path, (int64_t)len);
+}
+
+int __sys_thread_create(unsigned long entry, unsigned long arg) {
+    return (int)syscall2(SYS_THREAD_CREATE, (int64_t)entry, (int64_t)arg);
+}
+
+void __sys_thread_exit(int code) {
+    syscall1(SYS_THREAD_EXIT, code);
+    __builtin_unreachable();
+}
+
+int __sys_thread_join(int tid, int *code) {
+    return (int)syscall2(SYS_THREAD_JOIN, tid, (int64_t)(uint64_t)(uintptr_t)code);
+}
+
+int __sys_thread_self(void) {
+    return (int)syscall0(SYS_THREAD_SELF);
 }

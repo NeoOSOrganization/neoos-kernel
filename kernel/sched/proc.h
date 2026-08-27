@@ -56,6 +56,7 @@ struct process {
     int exit_code;
     enum { PROC_ALIVE, PROC_ZOMBIE } state;
     struct waitq exit_waiters;      // threads blocked in wait_for_pid
+    struct waitq join_waiters;      // threads blocked in thread_join
     struct process *next;           // global process list
 };
 
@@ -129,6 +130,16 @@ void thread_exit_self(int code) __attribute__((noreturn));
 void process_exit(int code) __attribute__((noreturn));
 
 int64_t wait_for_pid(int pid);
+
+// Starts a thread in the current process at user RIP `entry` with
+// RDI = `arg`. Returns the new thread, or 0 if the process is exiting,
+// out of stack slots, or out of memory.
+struct thread *thread_create(uint64_t entry, uint64_t arg);
+
+// Waits for `tid` (a thread of the calling process) to exit, reclaims
+// its stacks and struct, and stores its exit code. Returns 0, -ESRCH,
+// -EDEADLK for a self-join, or -EINTR.
+int thread_join(int tid, int *out_code);
 
 void proc_get(struct process *p);
 void proc_put(struct process *p);
