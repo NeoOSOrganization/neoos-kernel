@@ -1,7 +1,8 @@
 # Static musl Milestone
 
 **Date:** 2026-08-28
-**Status:** Approved
+**Status:** Approved (amended 2026-08-28: pthreads and a real entropy
+source moved in from out-of-scope, at the user's direction)
 **Roadmap position:** Milestone 4 of 17
 (see `2026-08-27-roadmap-architecture-design.md`)
 
@@ -10,7 +11,8 @@
 Bring up **statically linked musl** on NeoOS: build the Linux-shaped
 kernel primitives musl is written against, vendor musl, write the
 syscall-number translation shim, and run a musl program that uses
-`printf`, `malloc` and thread-local storage.
+`printf`, `malloc`, thread-local storage and **pthreads**, backed by a
+**real entropy source**.
 
 This is the milestone the whole musl direction rests on. Once musl
 works statically, the dynamic-linking milestone becomes "port musl's
@@ -42,6 +44,8 @@ large unproven pieces at once.
 | 3 | Shim mechanism | Rewrite musl's `__NR_*` table; no runtime translation |
 | 4 | mmap population | Demand paging, not eager |
 | 5 | `brk` | Deliberately `-ENOSYS` |
+| 6 | pthreads | In scope: `clone` on NeoOS threads, caller-supplied stacks |
+| 7 | Entropy | In scope: pool + CSPRNG, `RDRAND` where present |
 
 ### On decision 3
 
@@ -165,11 +169,9 @@ gate-able refactor rather than something only musl proves.
 own `crt1.o` and reads the same stack. Nothing is shared between them
 except the layout, which is exactly why matching Linux's matters.
 
-### `AT_RANDOM` is not a security boundary
+### `AT_RANDOM`
 
-NeoOS has no entropy source. `AT_RANDOM` is seeded from `RDTSC` so
-musl's stack canary is non-constant. It is **not** cryptographic and
-must not be treated as such.
+Filled from the CSPRNG described under *Entropy*, not from `RDTSC`.
 
 ## FS base and the remaining primitives
 
@@ -202,6 +204,96 @@ back when a syscall is missing — but only if it receives `-ENOSYS`
 rather than a wrong answer. Together with the sentinel remap below,
 that is what keeps an unimplemented syscall a clean failure instead of
 an accidental `spawn`.
+
+## pthreads
+
+musl's `pthread_create` allocates the new thread's stack **and** its
+TLS block itself, with `mmap`, then calls:
+
+```
+clone(CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD
+     |CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID,
+      stack, ptid, ctid, tls)
+```
+
+### `clone` is fork's machinery with a different stack
+
+This is the useful realisation. musl's `arch/x86_64/clone.s` pushes the
+entry point and argument onto the new stack *before* the syscall, then
+in the child simply returns from the syscall with `rax == 0`, pops, and
+calls. So the kernel does not need an entry-point concept at all:
+
+**a clone child is a copy of the caller's syscall frame with
+`user_rsp` set to the supplied stack and `rax` forced to 0** — exactly
+`fork_task`'s register plumbing, but sharing the process instead of
+duplicating it.
+
+### What changes in NeoOS threads
+
+- **Caller-supplied user stacks.** `thread_create` allocates from the
+  slot bitmap; musl bypasses that entirely. Threads gain a mode where
+  the stack is supplied and `stack_slot` is `-1`, meaning there is
+  nothing for `thread_join`/reap to unmap.
+- **`CLONE_SETTLS`** sets the child's `fs_base` directly.
+- **`CLONE_PARENT_SETTID`** writes the new tid into the parent's
+  memory before the child runs.
+- **`CLONE_CHILD_CLEARTID`** stores the address; on thread exit the
+  kernel writes 0 there and futex-wakes it. **This is precisely how
+  `pthread_join` blocks and wakes**, so futex and thread exit must be
+  correct before pthreads can work at all.
+- Flag combinations NeoOS does not support are rejected with
+  `-EINVAL` rather than silently approximated. Requiring
+  `CLONE_VM|CLONE_THREAD` keeps `clone` from quietly becoming a
+  half-working `fork`.
+
+### `exit` versus `exit_group`
+
+Linux's `SYS_exit` ends one thread; `SYS_exit_group` ends the process.
+NeoOS's `SYS_EXIT` is process-wide. No new syscalls are needed — the
+remap points musl's `__NR_exit` at NeoOS's existing `SYS_THREAD_EXIT`
+(18) and `__NR_exit_group` at `SYS_EXIT` (0). Getting this backwards
+makes any thread's return kill the whole process.
+
+`set_robust_list` returns `-ENOSYS`; musl tolerates that.
+
+## Entropy
+
+`AT_RANDOM` backing a stack canary with `RDTSC` is not defensible, so
+this milestone builds a real source.
+
+### Sources
+
+- **`RDRAND`/`RDSEED` where present.** `CPUID.1:ECX[30]` and
+  `CPUID.7:EBX[18]`. Haswell has them; **Nehalem does not**, so the
+  same runtime-detection pattern as AVX applies, and the fallback path
+  is the one the standard boot exercises.
+- **Interrupt timing jitter.** TSC deltas folded into the pool at timer
+  and keyboard interrupts. On a machine with no `RDRAND` this is the
+  only real source, and it is weak early in boot.
+
+### Structure
+
+A `kernel/random.c` holding a pool plus a **ChaCha20** CSPRNG — the
+same shape Linux uses, and about a hundred lines. Raw pool bytes are
+never handed out; the pool rekeys the stream, and the stream produces
+output. Rekeying happens periodically and whenever fresh hardware
+entropy arrives.
+
+### Interfaces
+
+- `getrandom(buf, len, flags)` — the syscall musl uses.
+- `/dev/random` and `/dev/urandom` devfs nodes. devfs already exists,
+  so these cost almost nothing once the pool does; both read from the
+  CSPRNG, and writes mix into the pool.
+- `AT_RANDOM` is filled from it at process creation.
+
+### Honesty about what this is
+
+There is **no entropy estimation and no blocking**: `/dev/random`
+behaves as `/dev/urandom`. Early-boot output on a machine without
+`RDRAND` is seeded mostly from boot-time timing and should not be
+treated as strong. The spec records this rather than implying a
+guarantee the implementation does not make.
 
 ## Vendoring, the remap, and the build
 
@@ -261,6 +353,11 @@ Layered so each failure is attributable:
 - `malloc`/`free` across varied sizes — proving `mmap`, demand paging
   and `munmap`
 - a `__thread` variable — proving the FS base survives context switches
+- `pthread_create`/`pthread_join` across several threads with per-thread
+  `__thread` state — proving `clone`, caller-supplied stacks,
+  `CLONE_SETTLS`, and the `CHILD_CLEARTID` futex wake
+- `getrandom` returning varying bytes, and differing across boots on a
+  machine with `RDRAND`
 - **the existing suite unchanged**, since every current program links
   the rewritten `crt0.o` and so exercises the new stack layout
 - the leak gate at 5 and 10 iterations, since `mmap` adds a new class
@@ -268,14 +365,11 @@ Layered so each failure is attributable:
 
 ## Out of scope
 
-- **pthreads.** Needs `clone` semantics and per-thread TLS blocks;
-  the shim maps `pthread_create` onto NeoOS threads in a later
-  milestone.
 - **Dynamic linking.** musl's `ldso` is the next milestone.
 - **`brk`**, and any second allocator.
 - **File-backed `mmap`.** Anonymous only; the dynamic linker will need
   file-backed and can add it.
-- **A real entropy source.** `AT_RANDOM` is `RDTSC`-seeded and is not a
-  security boundary.
+- **Entropy estimation and a blocking `/dev/random`.** The pool exists
+  and is mixed; it is not accounted.
 - **`vDSO`.** `AT_SYSINFO_EHDR` is absent; musl falls back to real
   syscalls, which is what we want.
