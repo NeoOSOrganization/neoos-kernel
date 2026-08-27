@@ -209,6 +209,17 @@ void signal_init_thread(struct thread *t);
 // thread-directed over process-directed. Returns 0 if none.
 int signal_next_deliverable(struct thread *t);
 
+// Lowest-numbered pending signal that is a member of `want`, ignoring
+// the thread's mask. Used by rt_sigtimedwait, which accepts signals it
+// has deliberately blocked.
+int signal_next_pending_in(struct thread *t, sigset_t_k want);
+
+// Clears `sig` from whichever pending set holds it and pops any queued
+// payload into *out.
+void signal_take_pending(struct thread *t, int sig, struct siginfo *out);
+
+struct k_timespec { int64_t tv_sec; int64_t tv_nsec; };
+
 void signal_selftest(void);
 void signal_selftest_start(void);
 

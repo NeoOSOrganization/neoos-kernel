@@ -208,6 +208,54 @@ static int check_signalled_status(void) {
     return 1;
 }
 
+static volatile int rt_count;
+static void rt_handler(int sig) { (void)sig; rt_count++; }
+
+// The check that distinguishes standard from real-time signals, and the
+// only one that proves the queue is real rather than a second pending
+// bit.
+static int check_rt_queueing(void) {
+    struct sigaction sa;
+    sa.sa_handler = rt_handler; sa.sa_flags = 0; sa.sa_mask = 0;
+    sigaction(SIGUSR1,  &sa, 0);
+    sigaction(SIGRTMIN, &sa, 0);
+
+    sigset_t block, old;
+    sigemptyset(&block);
+    sigaddset(&block, SIGUSR1);
+    sigaddset(&block, SIGRTMIN);
+
+    // Standard signal: two sends while blocked collapse into one.
+    sigprocmask(SIG_BLOCK, &block, &old);
+    rt_count = 0;
+    raise(SIGUSR1);
+    raise(SIGUSR1);
+    sigprocmask(SIG_SETMASK, &old, 0);
+    // One signal is delivered per delivery point: the handler blocks its
+    // own signal until sigreturn, so a queued second copy needs another
+    // return-to-user. yield() supplies them. Linux behaves the same way.
+    for (int i = 0; i < 10; i++) { yield(); }
+    if (rt_count != 1) {
+        printf("[sigtest] FAILED: SIGUSR1 delivered %d times, want 1\n", rt_count);
+        return 0;
+    }
+
+    // Real-time signal: two sends while blocked deliver twice.
+    sigprocmask(SIG_BLOCK, &block, &old);
+    rt_count = 0;
+    raise(SIGRTMIN);
+    raise(SIGRTMIN);
+    sigprocmask(SIG_SETMASK, &old, 0);
+    for (int i = 0; i < 10; i++) { yield(); }
+    if (rt_count != 2) {
+        printf("[sigtest] FAILED: SIGRTMIN delivered %d times, want 2\n", rt_count);
+        return 0;
+    }
+
+    printf("[sigtest] RT queueing vs standard collapsing passed\n");
+    return 1;
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
@@ -242,6 +290,7 @@ int main(int argc, char **argv) {
     ok &= check_segv();
     ok &= check_stop_continue();
     ok &= check_signalled_status();
+    ok &= check_rt_queueing();
 
     printf("[sigtest] %s\n", ok ? "ALL PASSED" : "SOME CHECKS FAILED");
     return ok ? 0 : 1;

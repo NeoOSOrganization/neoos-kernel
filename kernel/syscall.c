@@ -6,6 +6,7 @@
 #include "errno.h"
 #include "lock.h"
 #include "signal.h"
+#include "timer.h"
 
 #define MSR_EFER   0xC0000080
 #define MSR_STAR   0xC0000081
@@ -41,6 +42,8 @@
 #define SYS_RT_SIGRETURN  23
 #define SYS_RT_SIGPENDING 24
 #define SYS_RT_SIGSUSPEND 25
+#define SYS_RT_SIGTIMEDWAIT 26
+#define SYS_RT_SIGQUEUEINFO 27
 #define SYS_SIGALTSTACK   28
 #define SYS_KILL          29
 #define SYS_WAIT4         32
@@ -412,6 +415,55 @@ static int64_t syscall_dispatch_inner(int64_t num, int64_t a1, int64_t a2, int64
             // The delivery path restores saved_blocked into the frame it
             // builds, so sigsuspend always reports interruption.
             return -EINTR;
+        }
+        case SYS_RT_SIGTIMEDWAIT: {
+            const sigset_t_k *set = (const sigset_t_k *)(uintptr_t)a1;
+            struct siginfo *out   = (struct siginfo *)(uintptr_t)a2;
+            const struct k_timespec *ts = (const struct k_timespec *)(uintptr_t)a3;
+            if (!set) { return -EINVAL; }
+            struct thread *t = current_thread();
+
+            // Accept the wanted signals for the duration, so they become
+            // pending rather than being delivered to a handler.
+            sigset_t_k want = (*set) & ~SIGSET_UNBLOCKABLE;
+            sigset_t_k saved = t->blocked;
+            t->blocked |= want;
+
+            uint64_t deadline = 0;
+            if (ts) {
+                uint64_t ticks = (uint64_t)ts->tv_sec * TIMER_HZ
+                               + (uint64_t)ts->tv_nsec / (1000000000UL / TIMER_HZ);
+                deadline = timer_ticks() + (ticks ? ticks : 1);
+            }
+
+            int64_t rc = -EAGAIN;
+            for (;;) {
+                int sig = signal_next_pending_in(t, want);
+                if (sig) {
+                    struct siginfo info;
+                    signal_take_pending(t, sig, &info);
+                    if (out) { *out = info; }
+                    rc = sig;
+                    break;
+                }
+                int wrc = ts ? waitq_sleep_timeout(&t->proc->sig_waiters, 0, deadline)
+                             : waitq_sleep(&t->proc->sig_waiters, 0);
+                if (wrc == -ETIMEDOUT) { rc = -EAGAIN; break; }
+                if (wrc == -EINTR)     { rc = -EINTR;  break; }
+            }
+            t->blocked = saved;
+            return rc;
+        }
+        case SYS_RT_SIGQUEUEINFO: {
+            int pid = (int)a1, sig = (int)a2;
+            const struct siginfo *user = (const struct siginfo *)(uintptr_t)a3;
+            struct siginfo info;
+            siginfo_user(&info, sig, current_proc()->pid);
+            if (user) {
+                info.si_code = SI_QUEUE;
+                info.fields.rt.si_value = user->fields.rt.si_value;
+            }
+            return signal_kill(pid, sig, &info);
         }
         case SYS_RT_SIGRETURN:
             signal_do_sigreturn(frame);

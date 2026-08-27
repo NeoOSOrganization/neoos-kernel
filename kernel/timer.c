@@ -2,6 +2,7 @@
 #include "pit.h"
 #include "lapic.h"
 #include "serial.h"
+#include "waitq.h"
 #include "sched/proc.h"
 
 #define TICKS_PER_LOG 100 // 100Hz timer -> log once per second
@@ -10,6 +11,8 @@
 static volatile uint64_t tick_count = 0;
 static uint32_t timeslice_remaining = TIMESLICE_TICKS;
 
+uint64_t timer_ticks(void) { return tick_count; }
+
 void timer_handler(void) {
     tick_count++;
     if (tick_count % TICKS_PER_LOG == 0) {
@@ -17,6 +20,11 @@ void timer_handler(void) {
         serial_write_hex64(tick_count);
         serial_write_string("\n");
     }
+
+    // Wake anything whose timed sleep has expired. A scan per tick is
+    // cheaper than a heap at NeoOS's thread counts, and much easier to
+    // get right.
+    waitq_timeout_tick();
 
     if (--timeslice_remaining == 0) {
         timeslice_remaining = TIMESLICE_TICKS;

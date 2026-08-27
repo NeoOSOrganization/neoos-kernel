@@ -6,6 +6,7 @@
 #include "mm/heap.h"
 #include "errno.h"
 #include "signal.h"
+#include "timer.h"
 #include "serial.h"
 
 void waitq_init(struct waitq *q) { q->head = 0; q->tail = 0; }
@@ -74,6 +75,70 @@ int waitq_sleep(struct waitq *q, struct spinlock *release) {
     if (release) { (void)spin_lock_irqsave(release); }
     else if (own_flags & (1ULL << 9)) { __asm__ volatile ("sti"); }
     return rc;
+}
+
+// Threads sleeping with a deadline, scanned once per timer tick.
+static struct thread *timeout_list;
+static struct spinlock timeout_lock;
+static int timeout_lock_ready;
+
+static void timeout_add(struct thread *t, uint64_t deadline) {
+    if (!timeout_lock_ready) {
+        spin_init(&timeout_lock, LOCK_RANK_THREAD, "waitq-timeout");
+        timeout_lock_ready = 1;
+    }
+    uint64_t f = spin_lock_irqsave(&timeout_lock);
+    t->sleep_deadline = deadline;
+    t->timeout_next = timeout_list;
+    timeout_list = t;
+    spin_unlock_irqrestore(&timeout_lock, f);
+}
+
+static void timeout_remove(struct thread *t) {
+    if (!timeout_lock_ready) { return; }
+    uint64_t f = spin_lock_irqsave(&timeout_lock);
+    struct thread **pp = &timeout_list;
+    while (*pp && *pp != t) { pp = &(*pp)->timeout_next; }
+    if (*pp) { *pp = t->timeout_next; }
+    t->timeout_next = 0;
+    t->sleep_deadline = 0;
+    spin_unlock_irqrestore(&timeout_lock, f);
+}
+
+void waitq_timeout_tick(void) {
+    if (!timeout_lock_ready || !timeout_list) { return; }
+    uint64_t now = timer_ticks();
+
+    uint64_t f = spin_lock_irqsave(&timeout_lock);
+    struct thread **pp = &timeout_list;
+    while (*pp) {
+        struct thread *t = *pp;
+        if (t->sleep_deadline && now >= t->sleep_deadline) {
+            *pp = t->timeout_next;
+            t->timeout_next = 0;
+            t->sleep_deadline = 0;
+            if (t->state == THREAD_BLOCKED) {
+                waitq_remove(t);
+                t->state = THREAD_READY;
+                thread_enqueue_ready(t);
+            }
+        } else {
+            pp = &t->timeout_next;
+        }
+    }
+    spin_unlock_irqrestore(&timeout_lock, f);
+}
+
+int waitq_sleep_timeout(struct waitq *q, struct spinlock *release,
+                        uint64_t deadline) {
+    struct thread *t = current_thread();
+    if (timer_ticks() >= deadline) { return -ETIMEDOUT; }
+    timeout_add(t, deadline);
+    int rc = waitq_sleep(q, release);
+    int expired = (t->sleep_deadline == 0 && rc == 0);
+    timeout_remove(t);
+    if (rc != 0) { return rc; }
+    return expired ? -ETIMEDOUT : 0;
 }
 
 static void waitq_make_ready(struct thread *t) {

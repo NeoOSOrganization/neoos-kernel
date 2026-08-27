@@ -87,6 +87,8 @@ struct thread {
     int stack_slot;                 // -1 for kernel-only threads
     int exit_code;
     struct waitq *blocked_on;
+    uint64_t      sleep_deadline;   // 0 = none; else a timer_ticks() value
+    struct thread *timeout_next;    // list of threads with a deadline
 
     sigset_t_k    blocked;
     sigset_t_k    pending;         // thread-directed: tkill()

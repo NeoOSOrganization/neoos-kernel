@@ -25,6 +25,15 @@ void waitq_init(struct waitq *q);
 // replaces these internals with a lock handoff WITHOUT changing this
 // signature, so no caller has to change.
 int  waitq_sleep(struct waitq *q, struct spinlock *release);
+
+// Like waitq_sleep, but also returns -ETIMEDOUT once timer_ticks()
+// reaches `deadline`. nanosleep and futex(FUTEX_WAIT) with a timeout
+// need exactly this, so it is paid for once here.
+int  waitq_sleep_timeout(struct waitq *q, struct spinlock *release,
+                         uint64_t deadline);
+
+// Called once per timer tick to wake expired sleepers.
+void waitq_timeout_tick(void);
 void waitq_wake_one(struct waitq *q);
 void waitq_wake_all(struct waitq *q);
 

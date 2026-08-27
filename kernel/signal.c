@@ -47,6 +47,16 @@ void signal_init_thread(struct thread *t) {
     t->altstack.ss_size  = 0;
 }
 
+int signal_next_pending_in(struct thread *t, sigset_t_k want) {
+    struct process *p = t->proc;
+    sigset_t_k ready = (t->pending | (p ? p->pending : 0)) & want;
+    if (!ready) { return 0; }
+    for (int sig = 1; sig < NSIG; sig++) {
+        if (ready & sigmask_of(sig)) { return sig; }
+    }
+    return 0;
+}
+
 int signal_next_deliverable(struct thread *t) {
     struct process *p = t->proc;
     // Thread-directed first, then process-directed; lowest number wins
@@ -68,7 +78,7 @@ static struct sigqueue *sigqueue_free;
 static struct spinlock  sigqueue_lock;
 
 void signal_queue_init(void) {
-    spin_init(&sigqueue_lock, LOCK_RANK_PROCESS, "sigqueue");
+    spin_init(&sigqueue_lock, LOCK_RANK_SIGQUEUE, "sigqueue");
     sigqueue_free = 0;
     for (int i = 0; i < SIGQUEUE_POOL; i++) {
         sigqueue_pool[i].next = sigqueue_free;
@@ -177,6 +187,10 @@ int signal_send_process(struct process *p, int sig, struct siginfo *info) {
 // is blocked in an interruptible sleep, wake it: waitq_sleep sees the
 // pending signal and returns -EINTR.
 void signal_wake_for_delivery(struct thread *t) {
+    // rt_sigtimedwait sleeps on sig_waiters with the signal BLOCKED, so
+    // signal_next_deliverable would not see it. Wake that queue
+    // unconditionally and let the sleeper re-check.
+    if (t->proc) { waitq_wake_all(&t->proc->sig_waiters); }
     if (t->state == THREAD_BLOCKED && signal_next_deliverable(t)) {
         waitq_remove(t);
         t->state = THREAD_READY;
@@ -341,7 +355,7 @@ extern void sigreturn_to_user(struct iret_ctx *ctx) __attribute__((noreturn));
 // Clears `sig` from whichever pending set holds it and pops any queued
 // payload into *out. A standard signal with no queue entry gets a
 // synthesised SI_USER.
-static void signal_take_pending(struct thread *t, int sig, struct siginfo *out) {
+void signal_take_pending(struct thread *t, int sig, struct siginfo *out) {
     struct process *p = t->proc;
     uint64_t f = spin_lock_irqsave(&p->sig_lock);
 

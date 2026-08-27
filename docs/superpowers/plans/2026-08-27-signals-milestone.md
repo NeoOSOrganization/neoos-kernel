@@ -2344,6 +2344,23 @@ static int check_rt_queueing(void) {
 }
 ```
 
+- [ ] **Step 4b: The sigqueue pool needs its own rank**
+
+**Correction found during execution — the rank checker caught it.**
+`sigqueue_alloc` takes the pool lock while a process's `sig_lock` is
+held, and both were `LOCK_RANK_PROCESS`. Equal ranks are an inversion:
+acquisition must be strictly *ascending*. Give the pool an innermost
+rank of its own (`LOCK_RANK_SIGQUEUE 11`) -- it is a leaf that holds
+nothing itself.
+
+- [ ] **Step 4c: Queued signals need one delivery point each**
+
+**Correction to the test, not the kernel.** A handler blocks its own
+signal until `sigreturn`, so a second queued copy cannot be delivered
+during the same return to user mode -- Linux behaves identically. The
+RT test must supply further delivery points (`yield()`) before counting,
+or it reads 1 where 2 is correct.
+
 - [ ] **Step 5: Build, verify, commit**
 
 ```bash

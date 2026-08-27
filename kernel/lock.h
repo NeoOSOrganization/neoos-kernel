@@ -21,6 +21,11 @@
 #define LOCK_RANK_RUNQUEUE    8
 #define LOCK_RANK_HEAP        9
 #define LOCK_RANK_PMM        10
+// The signal-queue pool: a leaf allocator taken while a process's
+// sig_lock (rank 1) is held, and holding nothing itself. It sits
+// innermost rather than beside sig_lock because equal ranks are an
+// inversion -- acquisition must be strictly ascending.
+#define LOCK_RANK_SIGQUEUE   11
 // Leaf lock: rank above every other, so it is always legal to take and
 // can be acquired from anywhere -- including while holding any other
 // lock. Whatever holds it must never acquire another lock.
