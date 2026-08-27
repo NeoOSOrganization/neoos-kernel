@@ -31,6 +31,8 @@
 #define SYS_RT_SIGPENDING 24
 #define SYS_RT_SIGSUSPEND 25
 #define SYS_SIGALTSTACK   28
+#define SYS_MMAP          37
+#define SYS_MUNMAP        38
 #define SYS_KILL          29
 #define SYS_WAIT4         32
 #define SYS_SETPGID       33
@@ -201,3 +203,24 @@ int setpgid(int pid, int pgid) { return (int)syscall2(SYS_SETPGID, pid, pgid); }
 int getpgid(int pid)           { return (int)syscall1(SYS_GETPGID, pid); }
 int setsid(void)               { return (int)syscall0(SYS_SETSID); }
 int getsid(int pid)            { return (int)syscall1(SYS_GETSID, pid); }
+
+long mmap_raw(unsigned long addr, unsigned long len, int prot, int flags) {
+    // Raw NeoOS-native wrappers so the mmap path can be tested before
+    // musl exists. mmap's 5th/6th args (fd, offset) go in r8/r9; passing
+    // fd = -1 requires reaching them, so this uses inline asm rather
+    // than the 4-argument helpers.
+    long ret;
+    register long r10 __asm__("r10") = flags;
+    register long r8  __asm__("r8")  = -1;   /* fd */
+    register long r9  __asm__("r9")  = 0;    /* offset */
+    __asm__ volatile ("syscall"
+                      : "=a"(ret)
+                      : "a"((long)SYS_MMAP), "D"(addr), "S"(len), "d"(prot),
+                        "r"(r10), "r"(r8), "r"(r9)
+                      : "rcx", "r11", "memory");
+    return ret;
+}
+
+int munmap_raw(unsigned long addr, unsigned long len) {
+    return (int)syscall2(SYS_MUNMAP, (int64_t)addr, (int64_t)len);
+}

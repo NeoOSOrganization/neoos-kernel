@@ -5,6 +5,7 @@
 #include "lapic.h"
 #include "keyboard.h"
 #include "mm/paging.h"
+#include "mm/vma.h"
 #include "sched/proc.h"
 #include "signal.h"
 
@@ -81,6 +82,23 @@ static void isr_handler_inner(struct registers *regs) {
             uint64_t cr2;
             __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
             if (paging_handle_cow_fault(p->pml4_phys, cr2)) {
+                return;
+            }
+        }
+    }
+
+    if (regs->vector_number == 14) {
+        // Order matters. COW (above) handles a WRITE to a page that is
+        // present but read-only. This handles the FIRST TOUCH of a
+        // mapping that has no frame yet -- mmap records the region and
+        // maps nothing. A fault matching neither is a genuine SIGSEGV,
+        // which the block below delivers.
+        if (!(regs->error_code & 1) && (regs->cs & 3) == 3) {
+            uint64_t cr2;
+            __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+            struct process *p = current_proc();
+            if (p && p->pml4_phys &&
+                vma_fault(p, cr2, (regs->error_code & 2) != 0)) {
                 return;
             }
         }
