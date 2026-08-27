@@ -245,12 +245,46 @@ convention.
   out via one `write()` call; there is no `FILE*`/streams concept, so
   `printf` always targets the same console `write()` does.
 
-## SSE/SSE2/SSE3/SSE4
+## CPU vector extensions
 
-User-mode programs may freely use SSE, SSE2, SSE3, SSSE3, SSE4.1, and
-SSE4.2 floating-point and vector instructions (including via GCC's
-`<xmmintrin.h>`/`<emmintrin.h>`/`<smmintrin.h>` intrinsic headers) --
-there is no library function to call for this, it's a CPU/build
-capability, not an API. Each process's FPU/SSE register state is
-saved and restored across context switches automatically. MMX and
-AVX/AVX2/AVX-512 are not supported.
+**SSE through SSE4.2 are guaranteed.** The kernel halts at boot if any
+of SSE, SSE2, SSE3, SSSE3, SSE4.1 or SSE4.2 is missing, and every
+program is compiled for them, so they need no runtime check. GCC's
+`<xmmintrin.h>`/`<emmintrin.h>`/`<smmintrin.h>` intrinsics are
+available.
+
+**MMX is available.** Its registers alias the x87 stack, which the
+kernel already preserves, so nothing special is required beyond the
+usual `EMMS` discipline before returning to x87 or SSE code.
+
+**AVX and AVX2 are available only where the CPU has them, and are not
+part of the default compile flags.** NeoOS still runs on pre-AVX CPUs
+(QEMU's `-cpu Nehalem` has no `XSAVE` at all), so a program that wants
+AVX must:
+
+1. be built with `-mavx -mavx2` — see the `AVXTEST.ELF` rule in the
+   `Makefile`; and
+2. **check `CPUID` at run time** before executing a single AVX
+   instruction, and fall back or skip if absent. Executing one on a CPU
+   without it raises `SIGILL`.
+
+`userland/avxtest.c` is the worked example of both.
+
+**All of it is saved and restored per thread automatically.** Each
+thread owns an extended-state area sized from `CPUID.0Dh` — 512 bytes
+where the kernel falls back to `FXSAVE`, 832 with x87+SSE+AVX enabled.
+A signal handler sees its own state, and `sigreturn` restores the
+interrupted one.
+
+Two caveats worth knowing when writing AVX code that must survive a
+context switch:
+
+- **GCC emits `vzeroupper` before a call** from AVX code, which zeroes
+  the upper 128 bits of every `ymm` register. Code that must keep `ymm`
+  state across a `yield()` has to avoid the call, for example by
+  issuing the syscall inline.
+- **`syscall` returns its result in `rax`**, so hand-written inline
+  syscalls must declare `rax` as an output, not just an input.
+
+**AVX-512 is not supported**, and no interface exists to enable it.
+
