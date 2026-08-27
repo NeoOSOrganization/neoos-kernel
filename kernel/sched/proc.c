@@ -67,6 +67,7 @@ static struct process *proc_find(int pid) {
 
 void process_init(void) {
     spin_init(&proc_lock, LOCK_RANK_PROCTABLE, "proc_list");
+    signal_queue_init();
     proc_list  = 0;
     ready_head = 0;
     ready_tail = 0;
@@ -424,6 +425,53 @@ struct thread *fork_task(struct syscall_frame *frame) {
 
     enqueue_ready(child);
     return child;
+}
+
+// pid  > 0   that process
+// pid == 0   every process in the caller's group
+// pid <  -1  every process in group -pid
+// pid == -1  every process the caller may signal
+// sig == 0   existence probe: permission checked, nothing sent
+int signal_kill(int pid, int sig, struct siginfo *info) {
+    if (sig < 0 || sig >= NSIG) { return -EINVAL; }
+
+    if (pid > 0) {
+        struct process *p = proc_find(pid);
+        if (!p || p->state == PROC_ZOMBIE) { return -ESRCH; }
+        return sig ? signal_send_process(p, sig, info) : 0;
+    }
+
+    int target_pgid = (pid == 0) ? current_proc()->pgid : -pid;
+    int found = 0, rc = 0;
+    // proc_lock (rank PROCTABLE=0) is held across sig_lock
+    // (rank PROCESS=1). Ascending, so legal -- never reverse it.
+    uint64_t f = spin_lock_irqsave(&proc_lock);
+    for (struct process *p = proc_list; p; p = p->next) {
+        if (p->state == PROC_ZOMBIE) { continue; }
+        if (pid != -1 && p->pgid != target_pgid) { continue; }
+        found = 1;
+        if (sig) {
+            int r = signal_send_process(p, sig, info);
+            if (r != 0) { rc = r; }
+        }
+    }
+    spin_unlock_irqrestore(&proc_lock, f);
+    return found ? rc : -ESRCH;
+}
+
+int signal_tkill(int tgid, int tid, int sig, struct siginfo *info) {
+    if (sig < 0 || sig >= NSIG) { return -EINVAL; }
+    uint64_t f = spin_lock_irqsave(&proc_lock);
+    for (struct process *p = proc_list; p; p = p->next) {
+        if (tgid > 0 && p->pid != tgid) { continue; }
+        for (struct thread *t = p->threads; t; t = t->proc_next) {
+            if (t->tid != tid) { continue; }
+            spin_unlock_irqrestore(&proc_lock, f);
+            return sig ? signal_send_thread(t, sig, info) : 0;
+        }
+    }
+    spin_unlock_irqrestore(&proc_lock, f);
+    return -ESRCH;
 }
 
 void proc_get(struct process *p) { p->refcount++; }

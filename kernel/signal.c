@@ -1,6 +1,7 @@
 #include "signal.h"
 #include "sched/proc.h"
 #include "serial.h"
+#include "errno.h"
 
 int signal_default_action(int sig) {
     switch (sig) {
@@ -56,6 +57,109 @@ int signal_next_deliverable(struct thread *t) {
     }
     return 0;
 }
+
+// ---------------------------------------------------------------- sending
+
+static struct sigqueue  sigqueue_pool[SIGQUEUE_POOL];
+static struct sigqueue *sigqueue_free;
+static struct spinlock  sigqueue_lock;
+
+void signal_queue_init(void) {
+    spin_init(&sigqueue_lock, LOCK_RANK_PROCESS, "sigqueue");
+    sigqueue_free = 0;
+    for (int i = 0; i < SIGQUEUE_POOL; i++) {
+        sigqueue_pool[i].next = sigqueue_free;
+        sigqueue_free = &sigqueue_pool[i];
+    }
+}
+
+static struct sigqueue *sigqueue_alloc(void) {
+    uint64_t f = spin_lock_irqsave(&sigqueue_lock);
+    struct sigqueue *q = sigqueue_free;
+    if (q) { sigqueue_free = q->next; q->next = 0; }
+    spin_unlock_irqrestore(&sigqueue_lock, f);
+    return q;
+}
+
+void sigqueue_release(struct sigqueue *q) {
+    uint64_t f = spin_lock_irqsave(&sigqueue_lock);
+    q->next = sigqueue_free;
+    sigqueue_free = q;
+    spin_unlock_irqrestore(&sigqueue_lock, f);
+}
+
+void siginfo_user(struct siginfo *out, int sig, int sender_pid) {
+    for (unsigned i = 0; i < sizeof(*out); i++) { ((uint8_t *)out)[i] = 0; }
+    out->si_signo = sig;
+    out->si_code  = SI_USER;
+    out->fields.kill.si_pid = sender_pid;
+}
+
+// Appends `info` in FIFO order. Only RT signals queue.
+static int queue_append(struct sigqueue **head, struct siginfo *info) {
+    struct sigqueue *q = sigqueue_alloc();
+    if (!q) { return -EAGAIN; }
+    q->info = *info;
+    q->next = 0;
+    while (*head) { head = &(*head)->next; }
+    *head = q;
+    return 0;
+}
+
+// An ignored signal is discarded at send time rather than pending
+// forever -- except SIGKILL/SIGSTOP, which cannot be ignored.
+static int signal_is_ignored(struct process *p, int sig) {
+    if (sigmask_of(sig) & SIGSET_UNBLOCKABLE) { return 0; }
+    void (*h)(int) = p->actions[sig].handler;
+    return h == SIG_IGN ||
+           (h == SIG_DFL && signal_default_action(sig) == SIGACT_IGN);
+}
+
+int signal_send_thread(struct thread *t, int sig, struct siginfo *info) {
+    if (sig <= 0 || sig >= NSIG) { return -EINVAL; }
+    struct process *p = t->proc;
+    if (!p) { return -ESRCH; }
+    if (signal_is_ignored(p, sig)) { return 0; }
+
+    uint64_t f = spin_lock_irqsave(&p->sig_lock);
+    if (sig >= SIGRTMIN && info) {
+        int rc = queue_append(&t->queued, info);
+        if (rc != 0) { spin_unlock_irqrestore(&p->sig_lock, f); return rc; }
+    }
+    sigset_add(&t->pending, sig);
+    spin_unlock_irqrestore(&p->sig_lock, f);
+
+    signal_wake_for_delivery(t);
+    return 0;
+}
+
+int signal_send_process(struct process *p, int sig, struct siginfo *info) {
+    if (sig <= 0 || sig >= NSIG) { return -EINVAL; }
+    if (signal_is_ignored(p, sig)) { return 0; }
+
+    uint64_t f = spin_lock_irqsave(&p->sig_lock);
+    if (sig >= SIGRTMIN && info) {
+        int rc = queue_append(&p->queued, info);
+        if (rc != 0) { spin_unlock_irqrestore(&p->sig_lock, f); return rc; }
+    }
+    sigset_add(&p->pending, sig);
+    spin_unlock_irqrestore(&p->sig_lock, f);
+
+    // Deliver to any one thread that does not block it; prefer one that
+    // is already awake so a sleeping thread is not woken unnecessarily.
+    struct thread *target = 0;
+    for (struct thread *t = p->threads; t; t = t->proc_next) {
+        if (!sigset_test(t->blocked, sig)) {
+            target = t;
+            if (t->state != THREAD_BLOCKED) { break; }
+        }
+    }
+    if (target) { signal_wake_for_delivery(target); }
+    return 0;
+}
+
+// Real body arrives with interruptible waits.
+void signal_wake_for_delivery(struct thread *t) { (void)t; }
 
 // ---------------------------------------------------------------- selftest
 

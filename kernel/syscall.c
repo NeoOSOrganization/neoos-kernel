@@ -5,6 +5,7 @@
 #include "fs/vfs.h"
 #include "errno.h"
 #include "lock.h"
+#include "signal.h"
 
 #define MSR_EFER   0xC0000080
 #define MSR_STAR   0xC0000081
@@ -35,6 +36,9 @@
 #define SYS_THREAD_EXIT   18
 #define SYS_THREAD_JOIN   19
 #define SYS_THREAD_SELF   20
+#define SYS_KILL          29
+#define SYS_TKILL         30
+#define SYS_TGKILL        31
 
 // Mirrors lib/include/fcntl.h's O_* values exactly -- the two trees
 // don't share headers, so these must be kept in sync by hand.
@@ -339,6 +343,21 @@ static int64_t syscall_dispatch_inner(int64_t num, int64_t a1, int64_t a2, int64
         }
         case SYS_THREAD_SELF:
             return current_thread()->tid;
+        case SYS_KILL: {
+            struct siginfo info;
+            siginfo_user(&info, (int)a2, current_proc()->pid);
+            return signal_kill((int)a1, (int)a2, &info);
+        }
+        case SYS_TKILL: {
+            struct siginfo info;
+            siginfo_user(&info, (int)a2, current_proc()->pid);
+            return signal_tkill(0, (int)a1, (int)a2, &info);
+        }
+        case SYS_TGKILL: {
+            struct siginfo info;
+            siginfo_user(&info, (int)a3, current_proc()->pid);
+            return signal_tkill((int)a1, (int)a2, (int)a3, &info);
+        }
 
         default:
             serial_write_string("[syscall] unknown syscall number\n");

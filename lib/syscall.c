@@ -2,6 +2,7 @@
 #include "string.h"
 #include "fcntl.h"
 #include "dirent.h"
+#include "signal.h"
 
 #define SYS_EXIT   0
 #define SYS_WRITE  1
@@ -24,6 +25,9 @@
 #define SYS_THREAD_EXIT   18
 #define SYS_THREAD_JOIN   19
 #define SYS_THREAD_SELF   20
+#define SYS_KILL          29
+#define SYS_TKILL         30
+#define SYS_TGKILL        31
 
 static inline int64_t syscall0(int64_t num) {
     int64_t ret;
@@ -144,3 +148,7 @@ int __sys_thread_join(int tid, int *code) {
 int __sys_thread_self(void) {
     return (int)syscall0(SYS_THREAD_SELF);
 }
+
+int kill(int pid, int sig)             { return (int)syscall2(SYS_KILL, pid, sig); }
+int tkill(int tid, int sig)            { return (int)syscall2(SYS_TKILL, tid, sig); }
+int tgkill(int tgid, int tid, int sig) { return (int)syscall3(SYS_TGKILL, tgid, tid, sig); }

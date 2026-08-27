@@ -121,6 +121,36 @@ int signal_default_action(int sig);
 struct process;
 struct thread;
 
+// Standard signals (1-31) are not queued: one pending bit each, repeat
+// sends collapse. RT signals (32-64) queue with their payloads, FIFO
+// per signal number. The pool is fixed because NeoOS has no swap and an
+// unbounded queue is a denial-of-service surface; exhaustion returns
+// -EAGAIN, which POSIX permits.
+#define SIGQUEUE_POOL 64
+
+struct sigqueue {
+    struct sigqueue *next;
+    struct siginfo   info;
+};
+
+void signal_queue_init(void);
+void sigqueue_release(struct sigqueue *q);
+
+// Fills a siginfo for a signal sent by a process.
+void siginfo_user(struct siginfo *out, int sig, int sender_pid);
+
+int signal_send_thread(struct thread *t, int sig, struct siginfo *info);
+int signal_send_process(struct process *p, int sig, struct siginfo *info);
+
+// Group targeting lives with proc_list, so these are implemented in
+// kernel/sched/proc.c.
+int signal_kill(int pid, int sig, struct siginfo *info);
+int signal_tkill(int tgid, int tid, int sig, struct siginfo *info);
+
+// Makes `t` reach a delivery point. Given a real body in a later task;
+// a no-op until blocking calls become signal-aware.
+void signal_wake_for_delivery(struct thread *t);
+
 void signal_init_process(struct process *p);
 void signal_init_thread(struct thread *t);
 
