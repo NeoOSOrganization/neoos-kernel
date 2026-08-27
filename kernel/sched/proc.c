@@ -45,6 +45,11 @@ static struct process *proc_alloc(void) {
     p->state = PROC_ALIVE;
     waitq_init(&p->exit_waiters);
     waitq_init(&p->join_waiters);
+    signal_init_process(p);
+    // A newly created process leads its own group and session until
+    // setpgid/setsid say otherwise; fork/spawn inherit these later.
+    p->pgid = p->pid;
+    p->sid  = p->pid;
 
     uint64_t f = spin_lock_irqsave(&proc_lock);
     p->next   = proc_list;

@@ -67,6 +67,7 @@ struct thread *thread_alloc(struct process *p) {
     t->state      = THREAD_READY;
     t->stack_slot = -1;
     cpu_default_fpu_state(t->fpu_state);
+    signal_init_thread(t);
     if (p) {
         t->proc_next = p->threads;
         p->threads   = t;

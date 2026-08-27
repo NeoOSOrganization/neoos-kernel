@@ -21,6 +21,7 @@
 #include "cpu.h"
 #include "lock.h"
 #include "waitq.h"
+#include "signal.h"
 #include "cpu_local.h"
 
 void kmain(void *multiboot_info) {
@@ -110,6 +111,7 @@ void kmain(void *multiboot_info) {
     // After the spawns so the selftest's own kernel threads draw ids
     // above the real processes', keeping pids stable across boots.
     waitq_selftest_start();
+    signal_selftest_start();
 
     serial_write_string("NeoOS: interrupts enabled, starting scheduler\n");
     __asm__ volatile ("sti");

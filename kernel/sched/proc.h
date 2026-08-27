@@ -5,6 +5,7 @@
 #include "../cpu.h"
 #include "../lock.h"
 #include "../waitq.h"
+#include "../signal.h"
 #include "../fs/vfs.h"
 #include "../mm/pmm.h"
 
@@ -39,6 +40,7 @@ struct file_descriptor {
 };
 
 struct thread;
+struct sigqueue;
 
 struct process {
     int pid, parent_pid;
@@ -55,6 +57,18 @@ struct process {
     int exiting;
     int exit_code;
     enum { PROC_ALIVE, PROC_ZOMBIE } state;
+
+    // Signal dispositions are per-PROCESS; masks and pending sets are
+    // per-thread as well as here. POSIX's model, and the one musl
+    // expects.
+    struct k_sigaction actions[NSIG];
+    struct spinlock    sig_lock;
+    sigset_t_k         pending;         // process-directed: kill()
+    struct sigqueue   *queued;          // RT payloads, process-directed
+    int                pgid, sid;
+    int                exit_signal;     // 0, or the signal that killed it
+    int                stopped_count;   // threads parked in THREAD_STOPPED
+
     struct waitq exit_waiters;      // threads blocked in wait_for_pid
     struct waitq join_waiters;      // threads blocked in thread_join
     struct process *next;           // global process list
@@ -71,6 +85,13 @@ struct thread {
     int kill_pending;
     int exit_code;
     struct waitq *blocked_on;
+
+    sigset_t_k    blocked;
+    sigset_t_k    pending;         // thread-directed: tkill()
+    struct sigqueue *queued;
+    sigset_t_k    saved_blocked;    // sigsuspend / sigreturn
+    int           in_sigsuspend;
+    stack_t_k     altstack;         // sigaltstack; zeroed = none
     uint8_t fpu_state[FPU_STATE_SIZE] __attribute__((aligned(16)));
     struct thread *proc_next;       // sibling / zombie list link
     struct thread *next;            // ready-queue link
