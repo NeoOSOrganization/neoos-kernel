@@ -137,6 +137,43 @@ int user_range_writable(uint64_t addr, uint64_t len) {
     return 1;
 }
 
+// Same walk, but through the address space CURRENTLY IN CR3 rather than
+// the kernel's own p4_table. paging_translate below is no use for a
+// user pointer: user mappings do not exist in p4_table at all.
+// Unlike table_entry, this handles huge pages. It has to: the kernel's
+// own higher-half alias and the physmap are both 2MiB-mapped, so a walk
+// that assumed 4KiB entries throughout would read a 2MiB PD entry as if
+// it pointed at a page table and return a physical address derived from
+// whatever data happened to be in that page.
+#define PAGE_HUGE (1ULL << 7)   // PS, in a PDPT or PD entry
+uint64_t paging_translate_current(uint64_t virt) {
+    uint64_t cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+    uint64_t *pml4 = (uint64_t *)phys_to_virt(cr3 & PAGE_ADDR_MASK);
+
+    uint64_t e = pml4[PML4_INDEX(virt)];
+    if (!(e & PAGE_PRESENT)) { return 0; }
+
+    uint64_t *pdpt = (uint64_t *)phys_to_virt(e & PAGE_ADDR_MASK);
+    e = pdpt[PDPT_INDEX(virt)];
+    if (!(e & PAGE_PRESENT)) { return 0; }
+    if (e & PAGE_HUGE) {   // 1GiB page
+        return (e & PAGE_ADDR_MASK) | (virt & 0x3FFFFFFFULL);
+    }
+
+    uint64_t *pd = (uint64_t *)phys_to_virt(e & PAGE_ADDR_MASK);
+    e = pd[PD_INDEX(virt)];
+    if (!(e & PAGE_PRESENT)) { return 0; }
+    if (e & PAGE_HUGE) {   // 2MiB page
+        return (e & PAGE_ADDR_MASK) | (virt & 0x1FFFFFULL);
+    }
+
+    uint64_t *pt = (uint64_t *)phys_to_virt(e & PAGE_ADDR_MASK);
+    e = pt[PT_INDEX(virt)];
+    if (!(e & PAGE_PRESENT)) { return 0; }
+    return (e & PAGE_ADDR_MASK) | (virt & 0xFFFULL);
+}
+
 uint64_t paging_translate(uint64_t virt) {
     uint64_t *pdpt = table_entry(p4_table, PML4_INDEX(virt), 0, 0);
     uint64_t *pd   = pdpt ? table_entry(pdpt, PDPT_INDEX(virt), 0, 0) : 0;

@@ -11,6 +11,7 @@
 #include "mm/vma.h"
 #include "cpu_local.h"
 #include "smp.h"
+#include "futex.h"
 
 #define MSR_EFER   0xC0000080
 #define MSR_STAR   0xC0000081
@@ -592,6 +593,14 @@ static int64_t sys_tgkill(struct syscall_args *a) {
     return signal_tkill((int)a->a1, (int)a->a2, (int)a->a3, &info);
 }
 
+static int64_t sys_futex(struct syscall_args *a) {
+    // Linux's argument order, unchanged: uaddr, op, val, timeout. The
+    // fifth and sixth (uaddr2, val3) belong to REQUEUE and the BITSET
+    // operations, neither of which is implemented, so they are not read.
+    return futex_op((uint32_t *)(uintptr_t)a->a1, (int)a->a2, (uint32_t)a->a3,
+                    (const struct k_timespec *)(uintptr_t)a->a4);
+}
+
 // The table. Designated initialisers, so the number beside each entry
 // IS the index -- a reordering of these lines cannot renumber a
 // syscall, which a positional array would allow. Entries omitted here
@@ -648,6 +657,7 @@ static const struct syscall_desc syscall_table[SYS_MAX] = {
     [SYS_MPROTECT]        = { sys_mprotect,        "mprotect" },
     [SYS_CPU_COUNT]       = { sys_cpu_count,       "cpu_count" },
     [SYS_GETCPU]          = { sys_getcpu,          "getcpu" },
+    [SYS_FUTEX]           = { sys_futex,           "futex" },
 };
 
 // Asserts what the table's shape is supposed to guarantee. Cheap, and

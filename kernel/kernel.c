@@ -27,6 +27,7 @@
 #include "cpu_local.h"
 #include "tlb.h"
 #include "smp.h"
+#include "futex.h"
 
 void kmain(void *multiboot_info) {
     serial_init();
@@ -140,6 +141,7 @@ void kmain(void *multiboot_info) {
     runqueue_lock_selftest();
     syscall_init();
     syscall_table_selftest();
+    futex_init();
 
     // BEFORE the spawns, and before any kernel thread exists.
     //
@@ -173,11 +175,13 @@ void kmain(void *multiboot_info) {
     spawn("/BIN/AVXTEST.ELF");
     spawn("/BIN/MMAPTEST.ELF");
     spawn("/BIN/SMPTEST.ELF");
+    spawn("/BIN/IPCTEST.ELF");
 
     // After the spawns so the selftest's own kernel threads draw ids
     // above the real processes', keeping pids stable across boots.
     waitq_selftest_start();
     signal_selftest_start();
+    futex_selftest();
     smp_parallel_selftest_start();
     smp_steal_selftest_start();
 

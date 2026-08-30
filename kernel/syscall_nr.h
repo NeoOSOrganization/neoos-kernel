@@ -63,8 +63,12 @@
 // the library presents the POSIX shapes on top. See docs/stdlib.md.
 #define SYS_CPU_COUNT       40
 #define SYS_GETCPU          41
+// Linux's futex, with Linux's operation numbers and semantics. Every
+// higher-level POSIX synchronisation primitive is built on it, so it is
+// the one that had to be Linux-shaped down to the last return value.
+#define SYS_FUTEX           42
 
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX             42
+#define SYS_MAX             43
 
 #endif

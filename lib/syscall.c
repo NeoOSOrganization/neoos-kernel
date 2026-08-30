@@ -4,6 +4,7 @@
 #include "dirent.h"
 #include "signal.h"
 #include "sys/wait.h"
+#include "futex.h"
 
 #define SYS_EXIT   0
 #define SYS_WRITE  1
@@ -43,6 +44,7 @@
 #define SYS_GETSID        36
 #define SYS_TKILL         30
 #define SYS_TGKILL        31
+#define SYS_FUTEX         42
 
 static inline int64_t syscall0(int64_t num) {
     int64_t ret;
@@ -65,6 +67,20 @@ static inline int64_t syscall2(int64_t num, int64_t a1, int64_t a2) {
 static inline int64_t syscall3(int64_t num, int64_t a1, int64_t a2, int64_t a3) {
     int64_t ret;
     __asm__ volatile ("syscall" : "=a"(ret) : "a"(num), "D"(a1), "S"(a2), "d"(a3) : "rcx", "r11", "memory");
+    return ret;
+}
+
+// The fourth argument goes in R10, not RCX: the `syscall` instruction
+// overwrites RCX with the return address. That is the SysV kernel
+// calling convention, and syscall_entry.asm expects it.
+static inline int64_t syscall4(int64_t num, int64_t a1, int64_t a2,
+                               int64_t a3, int64_t a4) {
+    int64_t ret;
+    register int64_t r10 __asm__("r10") = a4;
+    __asm__ volatile ("syscall"
+                      : "=a"(ret)
+                      : "a"(num), "D"(a1), "S"(a2), "d"(a3), "r"(r10)
+                      : "rcx", "r11", "memory");
     return ret;
 }
 
@@ -243,4 +259,29 @@ long mmap_raw(unsigned long addr, unsigned long len, int prot, int flags) {
 
 int munmap_raw(unsigned long addr, unsigned long len) {
     return (int)syscall2(SYS_MUNMAP, (int64_t)addr, (int64_t)len);
+}
+
+// ---------------------------------------------------------------- futex
+//
+// The raw primitive, exposed so <semaphore.h> and <pthread.h> can be
+// built on it -- and so that anything else needing to block on a word
+// of memory does not invent its own mechanism. Arguments and return
+// values are Linux's, unchanged; see docs/stdlib.md.
+long futex(int *uaddr, int op, int val, const struct timespec *timeout) {
+    return (long)syscall4(SYS_FUTEX, (int64_t)(uint64_t)(uintptr_t)uaddr,
+                          op, val, (int64_t)(uint64_t)(uintptr_t)timeout);
+}
+
+int futex_wait(int *uaddr, int expected) {
+    long rc = futex(uaddr, FUTEX_WAIT | FUTEX_PRIVATE_FLAG, expected, 0);
+    return (int)rc;
+}
+
+int futex_wait_timeout(int *uaddr, int expected, const struct timespec *rel) {
+    long rc = futex(uaddr, FUTEX_WAIT | FUTEX_PRIVATE_FLAG, expected, rel);
+    return (int)rc;
+}
+
+int futex_wake(int *uaddr, int count) {
+    return (int)futex(uaddr, FUTEX_WAKE | FUTEX_PRIVATE_FLAG, count, 0);
 }

@@ -44,6 +44,11 @@ int paging_map(uint64_t virt, uint64_t phys, uint64_t flags);
 void paging_unmap(uint64_t virt);
 uint64_t paging_translate(uint64_t virt); // returns the mapped physical address, or 0 if unmapped
 
+// Translates through the address space currently in CR3, so it works
+// for USER pointers -- paging_translate walks the kernel's own p4_table,
+// where user mappings do not exist. Returns 0 if unmapped.
+uint64_t paging_translate_current(uint64_t virt);
+
 // Allocates a fresh, zeroed page-table frame -- suitable as a new
 // PML4 for a process's own address space. Caller must copy in
 // whatever shared kernel entries it needs (see process.c's spawn()).

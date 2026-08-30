@@ -27,5 +27,16 @@
 #define ENFILE  23
 #define EMFILE  24
 #define ENOSPC  28
+#define EFAULT  14
+#define EPIPE   32
+#define ENOBUFS 105
+#define EAFNOSUPPORT 97
+#define EPROTONOSUPPORT 93
+#define EADDRINUSE 98
+#define ECONNREFUSED 111
+#define ENOTCONN 107
+#define EISCONN 106
+#define EMSGSIZE 90
+#define EOVERFLOW 75
 
 #endif

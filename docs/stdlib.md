@@ -332,3 +332,136 @@ sees the same constants.
   and affinity hints, not for indexing per-CPU data without a lock.
 - **No `sched_setaffinity`.** There is no way to pin a thread to a CPU
   yet, so a program cannot make `sched_getcpu` stable.
+
+## Synchronisation: `<futex.h>`, `<semaphore.h>`, `<pthread.h>`
+
+The kernel provides exactly one synchronisation primitive — Linux's
+**futex** — and everything else is built on it in userland. That split
+is deliberate and follows `/CLAUDE.md`'s rule: the kernel supplies a
+Linux-shaped primitive, and the library does translation, not
+emulation. When musl is integrated it brings its own mutexes,
+condition variables and semaphores, and they land on this same futex
+unchanged; the three headers below go away, the syscall does not.
+
+### `<futex.h>`
+
+```c
+long futex(int *uaddr, int op, int val, const struct timespec *timeout);
+int  futex_wait(int *uaddr, int expected);
+int  futex_wait_timeout(int *uaddr, int expected, const struct timespec *rel);
+int  futex_wake(int *uaddr, int count);
+```
+
+`FUTEX_WAIT` sleeps only while `*uaddr == expected`, and the comparison
+happens **inside the kernel, under the same lock a wake must take**.
+That is the whole point of the primitive: a value change published
+between your own read and the call cannot lose the wake. It returns 0
+if woken, `-EAGAIN` if the value had already changed, `-ETIMEDOUT`, or
+`-EINTR`. A return of 0 does not prove your condition holds — futex
+wakeups may be spurious — so every caller re-tests in a loop.
+
+`FUTEX_WAKE` wakes up to `count` waiters and returns how many. Waking a
+futex nobody is waiting on returns 0 and is not an error; every
+uncontended unlock does exactly that.
+
+The uncontended path never enters the kernel at all. A mutex lock is
+one compare-exchange; these calls run only when it fails.
+
+#### Divergences from Linux
+
+- **Only `FUTEX_WAIT` and `FUTEX_WAKE` exist.** `FUTEX_REQUEUE` /
+  `FUTEX_CMP_REQUEUE` are absent, so `pthread_cond_broadcast` wakes
+  every waiter instead of moving them to the mutex's queue — correct,
+  but a thundering herd. The `*_BITSET` operations, `FUTEX_WAKE_OP`,
+  and priority-inheritance futexes (`FUTEX_LOCK_PI` and friends) are
+  absent too. Anything else returns `-ENOSYS`.
+- **`FUTEX_PRIVATE_FLAG` is accepted and ignored.** On Linux it selects
+  a cheaper process-private key. NeoOS keys *every* futex by physical
+  address, which is correct for private and shared alike, so the hint
+  has nothing to change. Process-shared futexes therefore work with no
+  extra flag.
+- **The timeout is relative, always.** Linux's `FUTEX_WAIT` is also
+  relative, so this matches — but `FUTEX_WAIT_BITSET`, which Linux uses
+  for absolute deadlines, does not exist here. NeoOS has no clock
+  syscall to build an absolute deadline from yet.
+- **Timeouts are rounded up to a 10ms tick.** The scheduler clock is
+  the only time source. A 1µs timeout sleeps for one tick.
+- **A futex on a copy-on-write page breaks the sharing.** The kernel
+  resolves the physical address through `user_range_writable`, which
+  un-shares the page. After `fork`, parent and child therefore have
+  *different* futexes at the same address — which is what `MAP_PRIVATE`
+  means, and what Linux does, but it is worth knowing that a plain
+  `FUTEX_WAIT` has a side effect on page sharing.
+
+### `<semaphore.h>`
+
+POSIX unnamed semaphores: `sem_init`, `sem_destroy`, `sem_wait`,
+`sem_trywait`, `sem_post`, `sem_getvalue`. The count is the futex word,
+so an uncontended wait or post is one atomic instruction.
+
+`pshared` is honoured — a semaphore in shared memory works between
+processes, because the futex key is physical.
+
+#### Divergences from POSIX
+
+- **Errors are returned directly as negative values**, per this
+  library's convention throughout: `sem_trywait` returns `-EAGAIN`, not
+  `-1` with `errno` set. musl's wrappers restore the POSIX convention.
+- **`sem_wait` never returns `-EINTR`.** A signal arriving mid-wait
+  resumes the wait. POSIX permits `EINTR`, but a semaphore whose
+  acquisition can fail spuriously pushes a retry loop into every
+  caller, and nothing in NeoOS needs to interrupt one yet.
+- **`sem_timedwait` is spelled `sem_timedwait_relative` and takes a
+  RELATIVE timeout.** POSIX's takes an absolute `CLOCK_REALTIME` time,
+  which NeoOS cannot construct without a clock syscall. The different
+  name is on purpose: the divergence cannot be reached by accident.
+- **Named semaphores (`sem_open`/`sem_close`/`sem_unlink`) do not
+  exist.** They need a filesystem namespace for semaphores.
+
+### `<pthread.h>`
+
+A **subset**: `pthread_create`, `pthread_join`, `pthread_exit`,
+`pthread_self`, `pthread_equal`, the `pthread_mutex_*` family, and the
+`pthread_cond_*` family. What is present has POSIX's names, signatures
+and semantics.
+
+The mutex is Drepper's three-state futex mutex, so lock and unlock cost
+nothing but two atomic instructions when uncontended. The condition
+variable is the sequence-number design: a waiter reads the sequence
+before dropping the mutex and sleeps only while it is unchanged, so a
+signal in that window cannot be lost.
+
+This header exists because "POSIX mutex" means `pthread_mutex_t` to
+every program that wants one, and shipping the mutexes without
+`pthread_create` would be a header that compiles and then fails to
+link.
+
+#### What is absent, and what each omission costs
+
+- **Attributes.** There is no `pthread_attr_t`, `pthread_mutexattr_t`
+  or `pthread_condattr_t`. `pthread_create` and the `*_init` functions
+  take a `const void *attr` that **must be null**; a non-null value
+  returns `-EINVAL` rather than being silently ignored. So: no
+  configurable stack size, no detached threads, no recursive or
+  error-checking mutexes, no process-shared mutexes or condvars.
+- **`pthread_detach`.** Every thread must be joined, or its kernel
+  stack is reclaimed only when the process exits.
+- **Cancellation** (`pthread_cancel`, `pthread_setcancelstate`,
+  cleanup handlers). Nothing can be interrupted asynchronously.
+- **TLS keys** (`pthread_key_create`, `pthread_getspecific`). These
+  need thread-local storage, which needs the FS base in the context
+  switch — a later milestone.
+- **`pthread_once`, rwlocks, barriers, spinlocks.** All buildable on
+  the futex; none built yet.
+- **`pthread_cond_timedwait` is spelled
+  `pthread_cond_timedwait_relative`** and takes a relative timeout, for
+  the same reason as `sem_timedwait_relative`.
+- **At most 16 threads per process**, and `pthread_join`'s `void *`
+  return value is carried in a fixed 16-entry table rather than in
+  thread-local storage — because there is no TLS yet. Both limits
+  disappear with musl.
+- **`pthread_exit` from the last thread does not exit the process
+  cleanly**; it ends that thread, and the process ends when its last
+  thread does. POSIX says `pthread_exit` from `main` keeps the process
+  alive until every thread finishes, which is the same outcome here by
+  a different route.

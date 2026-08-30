@@ -131,7 +131,7 @@ static int timeout_lock_ready;
 
 static void timeout_add(struct thread *t, uint64_t deadline) {
     if (!timeout_lock_ready) {
-        spin_init(&timeout_lock, LOCK_RANK_THREAD, "waitq-timeout");
+        spin_init(&timeout_lock, LOCK_RANK_TIMEOUT, "waitq-timeout");
         timeout_lock_ready = 1;
     }
     uint64_t f = spin_lock_irqsave(&timeout_lock);
