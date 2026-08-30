@@ -229,6 +229,7 @@ BOOT_MARKER  ?= NeoOS: interrupts enabled, starting scheduler
 # class to a regex, and would never match the literal brackets.
 REQUIRED_MARKERS := \
 	"[smp] local timer selftest passed" \
+	"[smp] steal selftest passed" \
 	"[vfstest] ALL PASSED" \
 	"[avxtest] ALL PASSED" \
 	"[mmaptest] ALL PASSED" \

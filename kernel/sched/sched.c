@@ -149,6 +149,58 @@ void enqueue_ready_on(int cpu_index, struct thread *t) {
     smp_send_reschedule(cpu_index);
 }
 
+// Takes one thread from the busiest remote run queue. Called only when
+// this CPU's own queue is empty, so it never makes a CPU busier at
+// another's expense; it only stops a core idling while work is stacked
+// up elsewhere.
+//
+// Two run queue locks are held at once and both are LOCK_RANK_RUNQUEUE
+// -- equal ranks, which the checker forbids for good reason. Safety
+// comes from a consistent global order instead: spin_lock_ordered_pair
+// always acquires in ADDRESS order, and the queue locks live inside
+// cpus[], so address order is CPU-index order. No two stealing CPUs can
+// build a cycle.
+//
+// Any thread may be stolen, kernel or user. That is a deliberate change
+// from the first attempt, which took kernel threads only, on the theory
+// that a user thread's address space, fd table and signal state carried
+// single-CPU assumptions. They did -- but the assumptions were in the
+// scheduler, not in the process code: the SYSCALL MSRs were programmed
+// on the BSP alone, threads were published to run queues before their
+// context was saved, reapers freed stacks that were still in use, and
+// SIGCONT could be lost against a stop in flight. Those are fixed and
+// asserted now, and the per-CPU state a user thread actually needs
+// (CR3, TSS.rsp0, the xstate area, GS) is already reloaded on every
+// switch.
+//
+// An idle CPU discovers new work on its next local timer tick rather
+// than being poked: 10ms of latency in exchange for not sending an IPI
+// on every enqueue.
+static struct thread *steal_work(struct cpu *self) {
+    int online = smp_online_count();
+    if (online < 2) { return 0; }
+
+    // The victim is chosen by count WITHOUT locking. A stale count only
+    // costs a wasted attempt, never a corrupt list -- the real check
+    // happens under the lock below.
+    struct cpu *victim = 0;
+    uint32_t best = 0;
+    for (int i = 0; i < online; i++) {
+        struct cpu *c = &cpus[i];
+        if (c == self) { continue; }
+        uint32_t n = __atomic_load_n(&c->ready_count, __ATOMIC_RELAXED);
+        if (n > best) { best = n; victim = c; }
+    }
+    if (!victim) { return 0; }
+
+    uint64_t f = spin_lock_ordered_pair(&self->ready_lock, &victim->ready_lock);
+    // Re-checked under the lock: the victim may have been drained
+    // between the scan and the acquire.
+    struct thread *t = victim->ready_count > 0 ? ready_pop(victim) : 0;
+    spin_unlock_ordered_pair(&self->ready_lock, &victim->ready_lock, f);
+    return t;
+}
+
 // dequeue_specific() lived here. It existed only to undo an enqueue
 // that should never have happened -- "allocate onto this CPU's queue,
 // then take it back off" -- and it only ever searched this_cpu()'s
@@ -188,6 +240,7 @@ static void idle_entry(void) {
         }
         smp_parallel_selftest_check();
         smp_timer_selftest_check();
+        smp_steal_selftest_check();
 
         // The idle thread schedules for ITSELF rather than relying on
         // being preempted. Every CPU has a local timer now, so this is
@@ -314,6 +367,9 @@ void schedule(void) {
     sched_post_switch();
 
     struct thread *next = dequeue_ready();
+    if (!next) {
+        next = steal_work(c);
+    }
     if (!next) {
         struct thread *cur = c->current;
         if (cur && cur->state == THREAD_RUNNING) {

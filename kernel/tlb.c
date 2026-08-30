@@ -110,6 +110,16 @@ void tlb_shootdown(uint64_t pml4_phys) {
         lock_panic("tlb_shootdown with a lock held", "tlb", 0);
     }
 
+    // The ack wait below MUST run with interrupts enabled (see the
+    // deadlock note at the top of this file), but that is this
+    // function's business, not the caller's. Leaving IF set on the way
+    // out silently hands preemption to a caller that had deliberately
+    // disabled it -- which is how kmain, whose only shootdown is the
+    // selftest, ended up being scheduled away mid-boot and never
+    // printing the "starting scheduler" marker.
+    uint64_t caller_flags;
+    __asm__ volatile ("pushfq; pop %0" : "=r"(caller_flags) :: "memory");
+
     uint64_t f = spin_lock_irqsave(&shootdown_lock);
 
     int self   = (int)(this_cpu() - &cpus[0]);
@@ -152,6 +162,8 @@ void tlb_shootdown(uint64_t pml4_phys) {
             break;
         }
     }
+
+    if (!(caller_flags & (1ULL << 9))) { __asm__ volatile ("cli"); }
 
     tlb_flush_deferred();
 }

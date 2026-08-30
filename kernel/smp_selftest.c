@@ -194,6 +194,62 @@ void smp_parallel_selftest_check(void) {
     serial_write_string("\n");
 }
 
+// ---- work stealing ---------------------------------------------------
+//
+// Every worker is queued on CPU 0 and nothing else ever places one, so
+// any CPU that runs one can only have STOLEN it. That is the whole
+// assertion: work spreading at all is proof the mechanism works.
+//
+// The pass line reports how many CPUs took part, which is the fairness
+// story -- but the test does not FAIL on fewer than all of them. CPU 0
+// draining its own queue quickly is a legitimate outcome of a scheduler
+// that prefers local work, and turning a timing preference into a test
+// failure would make this flaky for no gain.
+
+#define STEAL_THREADS 16
+
+static volatile int     steal_done;
+static volatile uint8_t steal_cpu_seen[MAX_CPUS];
+
+static void steal_worker(void) {
+    steal_cpu_seen[this_cpu() - &cpus[0]] = 1;
+    // A little work, so a stealing CPU has a window in which to observe
+    // a non-empty victim queue rather than everything draining on CPU 0
+    // before any other CPU looks.
+    for (volatile int i = 0; i < 200000; i++) { }
+    steal_cpu_seen[this_cpu() - &cpus[0]] = 1;   // and where it FINISHED
+    __atomic_fetch_add((int *)&steal_done, 1, __ATOMIC_ACQ_REL);
+    thread_exit_self(0);
+}
+
+void smp_steal_selftest_start(void) {
+    steal_done = 0;
+    for (int i = 0; i < MAX_CPUS; i++) { steal_cpu_seen[i] = 0; }
+    for (int i = 0; i < STEAL_THREADS; i++) {
+        if (!thread_alloc_kernel_on(steal_worker, 0)) { return; }
+    }
+}
+
+void smp_steal_selftest_check(void) {
+    if (__atomic_load_n((int *)&steal_done, __ATOMIC_ACQUIRE) != STEAL_THREADS) {
+        return;
+    }
+    static int reported;
+    if (reported) { return; }
+    reported = 1;
+
+    int online = smp_online_count();
+    int seen = 0;
+    for (int i = 0; i < online; i++) { if (steal_cpu_seen[i]) { seen++; } }
+    if (seen < 2) {
+        serial_write_string("[smp] steal selftest FAILED: no cpu ever stole any work\n");
+        return;
+    }
+    serial_write_string("[smp] steal selftest passed, cpus=");
+    serial_write_hex64((uint64_t)seen);
+    serial_write_string("\n");
+}
+
 void panic_stop_selftest(void) {
     // Cannot be tested by triggering it -- a real panic stops the boot --
     // so the mechanism's preconditions are asserted instead.

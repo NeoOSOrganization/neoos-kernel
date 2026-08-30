@@ -20,6 +20,8 @@ void     smp_online_selftest(void);
 void     smp_parallel_selftest_start(void);
 void     smp_parallel_selftest_check(void);
 void     smp_timer_selftest_check(void);
+void     smp_steal_selftest_start(void);
+void     smp_steal_selftest_check(void);
 
 // Application-processor bringup. Call after every subsystem an AP can
 // touch is initialised and locked.

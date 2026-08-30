@@ -1,7 +1,13 @@
 # Work Stealing: Problem Brief
 
-**Status:** blocked, not landed. Written for a fresh session — assume no
-prior context.
+**Status: RESOLVED — see `2026-08-30-work-stealing-resolution.md`.**
+This document is kept as the record of the investigation. Its §6
+suggested approach was followed with one change: §4.1's `prev_pending`
+is not sufficient on its own and, alone, introduces the very regression
+§2 could not isolate. The resolution explains why.
+
+**Original status:** blocked, not landed. Written for a fresh session —
+assume no prior context.
 **Date:** 2026-08-30, at the close of Phase 10.
 **Baseline:** commit `af0345d`. Stable: `make test` green, 6/6 userland
 suites, 4 CPUs online, three consecutive clean runs.

@@ -140,6 +140,24 @@ void kmain(void *multiboot_info) {
     runqueue_lock_selftest();
     syscall_init();
 
+    // BEFORE the spawns, and before any kernel thread exists.
+    //
+    // Bringing the APs up afterwards meant each one came online into a
+    // system that already had a run queue full of work, and -- now that
+    // idle CPUs steal -- immediately started running user processes
+    // while the BSP was still bringing up the NEXT AP and running the
+    // selftests below. tlb_shootdown_selftest in particular asserts an
+    // exact free-frame count across a shootdown, which is only a
+    // meaningful statement while nothing else is allocating. Started
+    // here, every AP parks in an idle loop with an empty queue and the
+    // work arrives afterwards.
+    smp_start_aps();
+    smp_online_selftest();
+    syscall_msr_selftest();   // asserts every AP programmed its own MSRs
+    smp_reschedule_ipi_selftest();
+    tlb_shootdown_selftest();
+    panic_stop_selftest();
+
     struct process *parent_task = spawn("/BIN/PARENT.ELF");
     if (!parent_task) {
         serial_write_string("[process] spawn FAILED for /BIN/PARENT.ELF\n");
@@ -159,14 +177,8 @@ void kmain(void *multiboot_info) {
     // above the real processes', keeping pids stable across boots.
     waitq_selftest_start();
     signal_selftest_start();
-
-    smp_start_aps();
-    smp_online_selftest();
-    syscall_msr_selftest();   // after bringup: asserts every AP programmed its own MSRs
-    smp_reschedule_ipi_selftest();
-    tlb_shootdown_selftest();
-    panic_stop_selftest();
     smp_parallel_selftest_start();
+    smp_steal_selftest_start();
 
     serial_write_string("NeoOS: interrupts enabled, starting scheduler\n");
     __asm__ volatile ("sti");
