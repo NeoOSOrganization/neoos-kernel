@@ -2,6 +2,13 @@
 #include "pmm.h"
 #include "paging.h"
 #include "serial.h"
+#include "../lock.h"
+
+// One lock over the heap's free lists and page arrays. Takes pmm_lock
+// beneath it when it needs more pages -- HEAP (12) then PMM (13) is
+// ascending, which is the order the rank table has always declared.
+// Non-static only so heap_selftest can assert its rank.
+struct spinlock heap_lock;
 
 static const uint32_t heap_size_classes[] = { 16, 32, 64, 128, 256, 512, 1024, 2048 };
 #define HEAP_NUM_CLASSES (sizeof(heap_size_classes) / sizeof(heap_size_classes[0]))
@@ -61,13 +68,15 @@ static struct heap_page *heap_new_page(uint32_t size_class) {
 }
 
 void heap_init(void) {
+    spin_init(&heap_lock, LOCK_RANK_HEAP, "heap");
     for (unsigned i = 0; i < HEAP_NUM_CLASSES; i++) {
         class_pages[i] = 0;
     }
     serial_write_string("[heap] initialized\n");
 }
 
-void *kmalloc(size_t size) {
+// Unlocked. Caller must hold heap_lock.
+static void *kmalloc_locked(size_t size) {
     if (size == 0) {
         return 0;
     }
@@ -126,7 +135,8 @@ void *kmalloc(size_t size) {
     return (void *)((uint8_t *)page + sizeof(struct heap_page));
 }
 
-void kfree(void *ptr) {
+// Unlocked. Caller must hold heap_lock.
+static void kfree_locked(void *ptr) {
     if (!ptr) {
         return;
     }
@@ -141,6 +151,22 @@ void kfree(void *ptr) {
     slot->next = page->free_list;
     page->free_list = slot;
     page->meta++;
+}
+
+// The locked public entry points. Only these take heap_lock; the
+// statics above are called from within an already-locked region, and
+// locking them too would be a same-rank self-deadlock.
+void *kmalloc(size_t size) {
+    uint64_t flags = spin_lock_irqsave(&heap_lock);
+    void *p = kmalloc_locked(size);
+    spin_unlock_irqrestore(&heap_lock, flags);
+    return p;
+}
+
+void kfree(void *ptr) {
+    uint64_t flags = spin_lock_irqsave(&heap_lock);
+    kfree_locked(ptr);
+    spin_unlock_irqrestore(&heap_lock, flags);
 }
 
 void heap_selftest(void) {
@@ -188,6 +214,30 @@ void heap_selftest(void) {
         kfree(ptrs[i]);
     }
     kfree(large);
+
+    if (heap_lock.rank != LOCK_RANK_HEAP) {
+        serial_write_string("[heap] selftest FAILED: lock rank wrong\n");
+        return;
+    }
+    // The heap calls pmm when it needs more pages, so PMM must be
+    // legally acquirable while HEAP is held -- strictly ascending.
+    uint64_t f = spin_lock_irqsave(&heap_lock);
+    int pmm_ok = lock_rank_ok(LOCK_RANK_PMM);
+    spin_unlock_irqrestore(&heap_lock, f);
+    if (!pmm_ok) {
+        serial_write_string("[heap] selftest FAILED: pmm not acquirable under heap\n");
+        return;
+    }
+    void *probe = kmalloc(64);
+    if (lock_held_depth() != 0) {
+        serial_write_string("[heap] selftest FAILED: kmalloc leaked the lock\n");
+        return;
+    }
+    kfree(probe);
+    if (lock_held_depth() != 0) {
+        serial_write_string("[heap] selftest FAILED: kfree leaked the lock\n");
+        return;
+    }
 
     serial_write_string("[heap] selftest passed\n");
 }
