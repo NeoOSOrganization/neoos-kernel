@@ -114,6 +114,16 @@ struct thread *thread_alloc_kernel(void (*entry)(void)) {
     return t;
 }
 
+// Publishes this thread as reapable and then leaves the CPU for good.
+//
+// The publication necessarily happens while the thread is still running
+// on its own kernel stack -- it cannot free that stack itself, which is
+// the whole reason a reaper exists. So the contract is on the reaper's
+// side instead: every site that frees a thread's kernel stack
+// (idle_entry's kzombies drain, proc_reap, thread_join) must call
+// thread_wait_off_cpu() first. On one CPU that was free -- no reaper
+// could run until this thread had switched away -- but on four it is a
+// use-after-free of both the stack and the struct thread.
 void thread_exit_self(int code) {
     struct thread *t = current_thread();
     struct process *p = t->proc;
@@ -225,6 +235,10 @@ int thread_join(int tid, int *out_code) {
             struct thread *z = *pp;
             *pp = z->proc_next;
             if (out_code) { *out_code = z->exit_code; }
+            // Reaching p->zombies does not mean the thread has finished
+            // with its kernel stack: thread_exit_self publishes it there
+            // before calling schedule(). See idle_entry's drain.
+            thread_wait_off_cpu(z);
             thread_stack_free(p, z->stack_slot);
             pmm_free(z->kernel_stack_phys, KERNEL_STACK_ORDER);
             kfree(z->xstate);

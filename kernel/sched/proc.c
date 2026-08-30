@@ -595,6 +595,10 @@ static void proc_reap(struct process *p) {
     struct thread *z = p->zombies;
     while (z) {
         struct thread *next = z->proc_next;
+        // thread_exit_self parks a thread on p->zombies before it
+        // reaches schedule(), so it can still be executing on this
+        // stack. See the same wait in idle_entry's kzombies drain.
+        thread_wait_off_cpu(z);
         pmm_free(z->kernel_stack_phys, KERNEL_STACK_ORDER);
         kfree(z->xstate);
         kfree(z);

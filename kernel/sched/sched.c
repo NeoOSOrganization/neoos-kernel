@@ -184,6 +184,13 @@ static void idle_entry(void) {
         spin_unlock_irqrestore(&proc_lock, f);
         while (z) {
             struct thread *next = z->proc_next;
+            // thread_exit_self publishes a thread to kzombies BEFORE it
+            // reaches schedule(), so it is advertised as reapable while
+            // still executing its own exit path on this very stack.
+            // Safe on one CPU by construction -- no reaper could run
+            // until it had switched away -- and a use-after-free on
+            // four. Wait for it to actually leave.
+            thread_wait_off_cpu(z);
             pmm_free(z->kernel_stack_phys, KERNEL_STACK_ORDER);
             kfree(z->xstate);
             kfree(z);
