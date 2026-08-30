@@ -22,7 +22,11 @@ void vnode_slab_init(void) {
     pool.slab_count = 0;
     pool.total_in_use = 0;
 
-    spin_init(&pool_lock, LOCK_RANK_VNODEHASH, "vnode_slab");
+    // LOCK_RANK_VNODE, not VNODEHASH: vnode_get and vnode_put hold a
+    // bucket lock (VNODEHASH) across their slab alloc/free, and equal
+    // ranks are an inversion. The slab pool is the inner resource here,
+    // so it ranks strictly below the buckets that reach it.
+    spin_init(&pool_lock, LOCK_RANK_VNODE, "vnode_slab");
 
     // Allocate first slab
     struct vnode_slab *slab = (struct vnode_slab *)kmalloc(sizeof(struct vnode_slab));

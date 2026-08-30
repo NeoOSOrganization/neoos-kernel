@@ -9,10 +9,21 @@
 #include "../sched/fd_table.h"
 
 static struct vfs_mount mounts[MAX_MOUNTS];
+
+// The mount table is rarely written and read on every path lookup, so
+// one lock over the whole table is enough. Rank 4: taken before any
+// vnode work, which is what the declared descent
+// MOUNTTABLE -> VNODEHASH -> VNODE means. Non-static so vfs_selftest
+// can assert the ranks.
+struct spinlock mount_lock;
 // vnodes now allocated via slab allocator (vnode_slab.c)
 
 #define VNODE_BUCKETS 16
 static struct vnode *buckets[VNODE_BUCKETS];
+
+// One lock per hash bucket, matching the pattern Phases 3-5 used for the
+// process, thread and fd tables.
+struct spinlock vnode_hash_locks[VNODE_BUCKETS];
 
 static unsigned bucket_of(struct vfs_mount *m, uint64_t inode_id) {
     // Mix the mount pointer in so two volumes' identical inode ids
@@ -52,18 +63,29 @@ void vfs_init(void) {
     for (int i = 0; i < MAX_MOUNTS; i++) {
         mounts[i].in_use = 0;
     }
+    spin_init(&mount_lock, LOCK_RANK_MOUNTTABLE, "mounttable");
     for (int i = 0; i < VNODE_BUCKETS; i++) {
         buckets[i] = 0;
+        spin_init(&vnode_hash_locks[i], LOCK_RANK_VNODEHASH, "vnodehash");
     }
     vnode_slab_init();  // Initialize vnode slab allocator
     serial_write_string("[vfs] initialized\n");
 }
 
+// The bucket lock is held across read_inode, which reaches the disk.
+// That is legal and non-sleeping: the whole FS and ATA path is
+// synchronous PIO whose locks (BLOCKDEV 7, DRIVER 8) rank strictly above
+// VNODEHASH (5). Holding it also closes the race where two CPUs both
+// miss on the same inode and each install a vnode for it, with one
+// silently losing its fds.
 struct vnode *vnode_get(struct vfs_mount *m, uint64_t inode_id) {
     unsigned b = bucket_of(m, inode_id);
+    uint64_t f = spin_lock_irqsave(&vnode_hash_locks[b]);
+
     for (struct vnode *vn = buckets[b]; vn; vn = vn->next) {
         if (vn->mount == m && vn->inode_id == inode_id) {
             vn->refcount++;
+            spin_unlock_irqrestore(&vnode_hash_locks[b], f);
             return vn;
         }
     }
@@ -71,6 +93,7 @@ struct vnode *vnode_get(struct vfs_mount *m, uint64_t inode_id) {
     // Allocate new vnode from slab pool
     struct vnode *slot = vnode_slab_alloc();
     if (!slot) {
+        spin_unlock_irqrestore(&vnode_hash_locks[b], f);
         return 0; // pool exhausted or OOM -- caller reports -ENFILE
     }
 
@@ -82,11 +105,13 @@ struct vnode *vnode_get(struct vfs_mount *m, uint64_t inode_id) {
         slot->refcount = 0;
         slot->mount = 0;
         vnode_slab_free(slot);
+        spin_unlock_irqrestore(&vnode_hash_locks[b], f);
         return 0;
     }
 
     slot->next = buckets[b];
     buckets[b] = slot;
+    spin_unlock_irqrestore(&vnode_hash_locks[b], f);
     return slot;
 }
 
@@ -94,14 +119,21 @@ void vnode_put(struct vnode *vn) {
     if (!vn || vn->refcount == 0) {
         return;
     }
+    // The bucket is chosen from vn->mount, so it must be read -- and the
+    // refcount decremented -- under that same bucket's lock, or two CPUs
+    // dropping the last two references both see refcount > 0 and the
+    // vnode leaks.
+    unsigned b = bucket_of(vn->mount, vn->inode_id);
+    uint64_t f = spin_lock_irqsave(&vnode_hash_locks[b]);
+
     vn->refcount--;
     if (vn->refcount > 0) {
+        spin_unlock_irqrestore(&vnode_hash_locks[b], f);
         return;
     }
 
     vn->mount->ops->sync_inode(vn);
 
-    unsigned b = bucket_of(vn->mount, vn->inode_id);
     struct vnode **link = &buckets[b];
     while (*link && *link != vn) {
         link = &(*link)->next;
@@ -115,6 +147,7 @@ void vnode_put(struct vnode *vn) {
 
     // Return to slab pool
     vnode_slab_free(vn);
+    spin_unlock_irqrestore(&vnode_hash_locks[b], f);
 }
 
 // Returns the mount owning `path` (longest matching mount-point
@@ -161,8 +194,13 @@ static struct vfs_mount *mount_for(const char *path, const char **out_rel) {
 }
 
 int vfs_mount_fs(const char *source, const char *target, const char *fstype) {
+    // Duplicate check and slot claim must be atomic together, or two
+    // CPUs mounting the same target both find it free and both claim a
+    // slot.
+    uint64_t mf = spin_lock_irqsave(&mount_lock);
     for (int i = 0; i < MAX_MOUNTS; i++) {
         if (mounts[i].in_use && str_eq(mounts[i].path, target)) {
+            spin_unlock_irqrestore(&mount_lock, mf);
             return -EEXIST;
         }
     }
@@ -172,8 +210,10 @@ int vfs_mount_fs(const char *source, const char *target, const char *fstype) {
         if (!mounts[i].in_use) { m = &mounts[i]; break; }
     }
     if (!m) {
+        spin_unlock_irqrestore(&mount_lock, mf);
         return -ENOSPC;
     }
+    spin_unlock_irqrestore(&mount_lock, mf);
 
     if (str_eq(fstype, "ramfs")) {
         m->ops = &ramfs_ops;
@@ -213,29 +253,39 @@ int vfs_mount_fs(const char *source, const char *target, const char *fstype) {
 
 int vfs_umount(const char *target) {
     struct vfs_mount *m = 0;
+    uint64_t mf = spin_lock_irqsave(&mount_lock);
     for (int i = 0; i < MAX_MOUNTS; i++) {
         if (mounts[i].in_use && str_eq(mounts[i].path, target)) {
             m = &mounts[i];
             break;
         }
     }
+    spin_unlock_irqrestore(&mount_lock, mf);
     if (!m) {
         return -ENOENT;
     }
 
     // The root vnode's own reference is ours, so anything above 1 --
     // or any OTHER vnode on this mount still held -- means live users.
+    //
+    // Each bucket lock is taken and released around its own chain rather
+    // than held across the whole scan: vnode_put below takes a bucket
+    // lock itself, and holding one here would self-deadlock on it.
     for (int b = 0; b < VNODE_BUCKETS; b++) {
+        uint64_t bf = spin_lock_irqsave(&vnode_hash_locks[b]);
+        int busy = 0;
         for (struct vnode *vn = buckets[b]; vn; vn = vn->next) {
             if (vn->mount != m) {
                 continue;
             }
             if (vn == m->root) {
-                if (vn->refcount > 1) { return -EBUSY; }
+                if (vn->refcount > 1) { busy = 1; break; }
             } else if (vn->refcount > 0) {
-                return -EBUSY;
+                busy = 1; break;
             }
         }
+        spin_unlock_irqrestore(&vnode_hash_locks[b], bf);
+        if (busy) { return -EBUSY; }
     }
 
     vnode_put(m->root);
@@ -503,6 +553,35 @@ void vfs_selftest(void) {
         return;
     }
     vnode_put(f32n);
+
+    if (mount_lock.rank != LOCK_RANK_MOUNTTABLE) {
+        serial_write_string("[vfs] selftest FAILED: mount lock rank wrong\n");
+        return;
+    }
+    // The declared descent is MOUNTTABLE -> VNODEHASH -> VNODE, and below
+    // those the block layer. Each step must be legal from the one above,
+    // or the first path lookup on a second CPU inverts. vnode_slab's
+    // pool lock sits at VNODE and is taken under a bucket lock, which is
+    // what makes the last of these checks load-bearing.
+    uint64_t lf = spin_lock_irqsave(&mount_lock);
+    int hash_ok = lock_rank_ok(LOCK_RANK_VNODEHASH);
+    spin_unlock_irqrestore(&mount_lock, lf);
+    if (!hash_ok) {
+        serial_write_string("[vfs] selftest FAILED: vnodehash not acquirable under mounttable\n");
+        return;
+    }
+    uint64_t lf2 = spin_lock_irqsave(&vnode_hash_locks[0]);
+    int vnode_ok = lock_rank_ok(LOCK_RANK_VNODE);
+    int blk_ok   = lock_rank_ok(LOCK_RANK_BLOCKDEV);
+    spin_unlock_irqrestore(&vnode_hash_locks[0], lf2);
+    if (!vnode_ok) {
+        serial_write_string("[vfs] selftest FAILED: vnode not acquirable under vnodehash\n");
+        return;
+    }
+    if (!blk_ok) {
+        serial_write_string("[vfs] selftest FAILED: blockdev not acquirable under vnodehash\n");
+        return;
+    }
 
     serial_write_string("[vfs] selftest passed\n");
 }
