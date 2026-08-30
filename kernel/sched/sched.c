@@ -23,8 +23,8 @@ extern void fork_trampoline(void);
 // Phase 7: Per-CPU ready queues (removed global ready_head/ready_tail)
 // Each CPU now manages its own ready queue via this_cpu()->ready_head/tail
 
-void enqueue_ready(struct thread *t) {
-    struct cpu *c = this_cpu();
+// Unlocked. Caller must hold c->ready_lock.
+static void ready_push(struct cpu *c, struct thread *t) {
     t->next = 0;
     if (c->ready_tail) {
         c->ready_tail->next = t;
@@ -32,10 +32,11 @@ void enqueue_ready(struct thread *t) {
         c->ready_head = t;
     }
     c->ready_tail = t;
+    c->ready_count++;
 }
 
-struct thread *dequeue_ready(void) {
-    struct cpu *c = this_cpu();
+// Unlocked. Caller must hold c->ready_lock. Returns 0 if empty.
+static struct thread *ready_pop(struct cpu *c) {
     struct thread *t = c->ready_head;
     if (t) {
         c->ready_head = t->next;
@@ -43,7 +44,23 @@ struct thread *dequeue_ready(void) {
             c->ready_tail = 0;
         }
         t->next = 0;
+        c->ready_count--;
     }
+    return t;
+}
+
+void enqueue_ready(struct thread *t) {
+    struct cpu *c = this_cpu();
+    uint64_t f = spin_lock_irqsave(&c->ready_lock);
+    ready_push(c, t);
+    spin_unlock_irqrestore(&c->ready_lock, f);
+}
+
+struct thread *dequeue_ready(void) {
+    struct cpu *c = this_cpu();
+    uint64_t f = spin_lock_irqsave(&c->ready_lock);
+    struct thread *t = ready_pop(c);
+    spin_unlock_irqrestore(&c->ready_lock, f);
     return t;
 }
 
@@ -54,14 +71,17 @@ void thread_enqueue_ready(struct thread *t) { enqueue_ready(t); }
 // thread_alloc_kernel just queued.
 void dequeue_specific(struct thread *t) {
     struct cpu *c = this_cpu();
+    uint64_t f = spin_lock_irqsave(&c->ready_lock);
     struct thread **pp = &c->ready_head;
     struct thread *prev = 0;
     while (*pp && *pp != t) { prev = *pp; pp = &(*pp)->next; }
     if (*pp) {
         *pp = t->next;
         if (c->ready_tail == t) { c->ready_tail = prev; }
+        c->ready_count--;
     }
     t->next = 0;
+    spin_unlock_irqrestore(&c->ready_lock, f);
 }
 
 // Runs whenever no other thread is ready. Having a real idle thread

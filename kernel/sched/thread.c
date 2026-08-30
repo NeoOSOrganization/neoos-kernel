@@ -141,8 +141,14 @@ void thread_exit_self(int code) {
         waitq_wake_all(&p->join_waiters);
         proc_put(p);
     } else {
+        // idle_entry drains this same list under proc_lock. The `cli`
+        // above is enough on one CPU and no protection at all on four:
+        // another CPU's idle thread can be mid-drain right now. Scoped
+        // tightly -- schedule() below panics if any lock is still held.
+        uint64_t zf = spin_lock_irqsave(&proc_lock);
         t->proc_next = kzombies;
         kzombies     = t;
+        spin_unlock_irqrestore(&proc_lock, zf);
     }
 
     __asm__ volatile ("sti");

@@ -33,9 +33,14 @@ struct cpu {
     int               held_depth;
     uint8_t           held_ranks[LOCK_MAX_HELD];
 
-    // Per-CPU ready queue (Phase 7 optimization)
-    struct thread    *ready_head;       // NEW: per-CPU thread queue head
-    struct thread    *ready_tail;       // NEW: per-CPU thread queue tail
+    // Per-CPU ready queue. Phase 7 added the layout; Phase 10 added the
+    // lock that makes it safe to touch from a stealing CPU. Declared
+    // AFTER kernel_stack so the CPU_* byte offsets asserted below are
+    // undisturbed.
+    struct spinlock   ready_lock;
+    struct thread    *ready_head;
+    struct thread    *ready_tail;
+    uint32_t          ready_count;      // list length, for steal victim choice
 };
 
 _Static_assert(offsetof(struct cpu, self)             == CPU_SELF,     "CPU_SELF");

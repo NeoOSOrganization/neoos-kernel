@@ -129,6 +129,7 @@ void kmain(void *multiboot_info) {
     cpu_state_selftest();
 
     process_init();
+    runqueue_lock_selftest();
     syscall_init();
 
     struct process *parent_task = spawn("/BIN/PARENT.ELF");

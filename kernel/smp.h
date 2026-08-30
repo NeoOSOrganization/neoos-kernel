@@ -14,5 +14,6 @@ int      smp_index_for_lapic(uint32_t lapic_id);   // -1 if unknown
 uint32_t smp_lapic_for_index(int index);           // 0xFFFFFFFF if out of range
 
 void     smp_topology_selftest(void);
+void     runqueue_lock_selftest(void);
 
 #endif

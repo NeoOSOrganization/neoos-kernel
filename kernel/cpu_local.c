@@ -22,6 +22,10 @@ void cpu_local_init(void) {
     c->kernel_stack     = 0;
     c->lapic_id         = 0;
     c->held_depth       = 0;
+    c->ready_head       = 0;
+    c->ready_tail       = 0;
+    c->ready_count      = 0;
+    spin_init(&c->ready_lock, LOCK_RANK_RUNQUEUE, "runqueue");
 
     // Must run AFTER gdt_flush: loading a GS SELECTOR (`mov gs, ax`)
     // zeroes IA32_GS_BASE as a side effect, so any base installed
