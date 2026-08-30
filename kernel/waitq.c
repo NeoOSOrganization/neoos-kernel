@@ -2,8 +2,6 @@
 #include "lock.h"
 #include "sched/proc.h"
 #include "cpu_local.h"
-#include "mm/pmm.h"
-#include "mm/heap.h"
 #include "errno.h"
 #include "signal.h"
 #include "timer.h"
@@ -269,10 +267,20 @@ static void selftest_thread(void) {
 
     while (selftest_stage != 2) { schedule(); }
 
-    // The sleeper is a ZOMBIE now and not running, so its stack can be
-    // reclaimed here rather than left to the idle thread's drain.
-    pmm_free(t->kernel_stack_phys, KERNEL_STACK_ORDER);
-    kfree(t);
+    // Deliberately frees NOTHING here. The old code did, on the claim
+    // that the sleeper "is a ZOMBIE now and not running" -- but
+    // selftest_stage is set to 2 BEFORE thread_exit_self, so at this
+    // point the sleeper is still executing its own exit path, and
+    // still on the very kernel stack this used to hand back to the
+    // page allocator. A timer interrupt in that window is enough to
+    // run us here, even on one CPU.
+    //
+    // Worse, idle_entry's kzombies drain frees the same thread again,
+    // so one heap slot landed on the free list twice and a later
+    // kmalloc handed the same memory to two owners. (Diagnosed from a
+    // free_list pointer of 0xfffffffc -- -4, the idle tid for CPU 3.)
+    //
+    // Kernel threads are owned by idle_entry's drain. Leave them to it.
 
     serial_write_string("[waitq] selftest passed\n");
     thread_exit_self(0);
