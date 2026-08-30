@@ -53,7 +53,7 @@ In scope:
    as the closing deliverable.
 
 Out of scope: NUMA awareness, CPU hotplug, priority or fairness changes
-to the scheduling policy, per-CPU slab caches. `MAX_CPUS` is 8.
+to the scheduling policy, per-CPU slab caches. `MAX_CPUS` is 128.
 
 ### 2.1 Decisions taken, with the alternatives rejected
 
@@ -76,7 +76,7 @@ to the scheduling policy, per-CPU slab caches. `MAX_CPUS` is 8.
 `info->cpus[]` with `{acpi_id, lapic_id, enabled}` for every entry whose
 flags have bit 0 (Enabled) or bit 1 (Online Capable) set.
 
-`MAX_CPUS` becomes 8; `MAX_TSS` follows it.
+`MAX_CPUS` becomes 128; `MAX_TSS` follows it.
 
 `cpus[]` is indexed by a **dense NeoOS CPU index**, never by `lapic_id`
 — APIC ids are sparse and can exceed `MAX_CPUS` on real hardware. A
@@ -147,11 +147,22 @@ its idle thread → mark `online` → `sti` → `schedule()`.
 
 ### 4.5 GDT
 
-`gdt_entries` grows to hold one TSS descriptor per CPU (indices
-`3 + 2*i`, since a 64-bit TSS descriptor occupies two slots). All CPUs
-load the same GDT and differ only in the selector passed to `ltr`. A
-per-CPU GDT was considered and rejected as `MAX_CPUS` copies of a table
-identical but for one descriptor.
+`gdt_entries` grows to hold one TSS descriptor per CPU, two 8-byte slots
+each, appended **after** the code/data descriptors rather than wedged at
+index 3 where the single TSS sits today. At 128 CPUs the table is
+`6 + 2*128 = 262` entries (2096 bytes), comfortably inside the GDT's
+16-bit limit field. All CPUs load the same GDT and differ only in the
+selector passed to `ltr`. A per-CPU GDT was considered and rejected as
+`MAX_CPUS` copies of a table identical but for one descriptor.
+
+Moving the TSS descriptor to the end **relocates the user code/data
+selectors**, which are hard-coded in `syscall_entry.asm`, `isr.asm`,
+`sigframe.asm` and the `IA32_STAR` setup. Every one must move with them;
+a missed site triple-faults on the first ring-3 entry rather than
+failing the build.
+
+Note on APIC addressing: 128 CPUs fits within xAPIC's 8-bit APIC ID
+field, so no x2APIC support is required. Going beyond 255 would.
 
 ### 4.6 Placement in `kmain`
 

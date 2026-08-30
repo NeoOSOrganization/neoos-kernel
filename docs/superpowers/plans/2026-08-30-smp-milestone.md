@@ -40,7 +40,7 @@ own.
 - **`schedule()` must be entered holding zero spinlocks.**
 - **A frame is returned to pmm only after every TLB-shootdown
   acknowledgement is in.**
-- `MAX_CPUS` is 8; QEMU runs with `-smp 4`.
+- `MAX_CPUS` is 128; QEMU runs with `-smp 4`.
 - **`cpus[]` is indexed by dense CPU index, never by `lapic_id`.**
 - Any kernel feature reachable from userland needs a musl shim entry or
   `lib/` wrapper plus a `docs/stdlib.md` update (CLAUDE.md).
@@ -239,7 +239,7 @@ void     smp_topology_selftest(void);
 In `kernel/acpi.h`, above `struct acpi_info`:
 
 ```c
-#define ACPI_MAX_CPUS 8
+#define ACPI_MAX_CPUS 128
 
 struct acpi_cpu {
     uint8_t acpi_id;
@@ -1450,7 +1450,7 @@ Last preparation step before an AP can run. Still single-CPU after this.
 
 **Interfaces:**
 - Produces:
-  - `MAX_CPUS` 8, `MAX_TSS` 8
+  - `MAX_CPUS` 128, `MAX_TSS` 128
   - `uint16_t gdt_tss_selector(int cpu_index);`
   - `void gdt_load(int cpu_index);` — loads the shared GDT on the
     calling CPU and `ltr`s that CPU's own TSS selector
@@ -1497,7 +1497,7 @@ Expected: FAIL — build error, `'gdt_tss_selector' undeclared`.
 
 - [ ] **Step 3: Raise the CPU limits**
 
-`kernel/cpu_local.h`: `#define MAX_CPUS 8`
+`kernel/cpu_local.h`: `#define MAX_CPUS 128`
 `kernel/tss.h`: `#define MAX_TSS 8`
 
 Confirm `kernel/tss.c` defines `struct tss_entry tss[MAX_TSS];` and that
@@ -1614,7 +1614,7 @@ the moved ring-3 selectors.
 
 ```bash
 git add kernel/cpu_local.c kernel/cpu_local.h kernel/tss.c kernel/tss.h kernel/gdt.c kernel/gdt.h kernel/syscall.c kernel/smp_selftest.c kernel/smp.h kernel/kernel.c
-git commit -m "Phase 10: one TSS descriptor per CPU, MAX_CPUS 8, cpu_local BSP/AP split"
+git commit -m "Phase 10: one TSS descriptor per CPU, MAX_CPUS 128, cpu_local BSP/AP split"
 ```
 
 ---
