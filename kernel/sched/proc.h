@@ -52,6 +52,11 @@ struct process {
     uint64_t pml4_phys;             // 0 = shares the kernel address space
     struct vma *vmas;               // sorted by start, non-overlapping
     uint64_t    mmap_next;          // bump hint for unhinted mmap
+    // Guards `vmas`, `mmap_next` and this process's page tables. Rank
+    // LOCK_RANK_MM (3) -- low, because a demand-paging fault takes it
+    // and then reads through the filesystem, and because such a fault
+    // can sleep. Must NOT be held across schedule().
+    struct spinlock mm_lock;
     // Indexed DIRECTLY by fd -- /dev/CONSOLE is a real vnode opened on
     // 0, 1 and 2 at process creation, so the fd IS the index. The table
     // belongs to the PROCESS: threads share it. See fd_table.h for the

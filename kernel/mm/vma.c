@@ -68,7 +68,7 @@ static void unmap_range(struct process *p, uint64_t start, uint64_t end) {
     }
 }
 
-int vma_munmap(struct process *p, uint64_t addr, uint64_t len) {
+static int vma_munmap_locked(struct process *p, uint64_t addr, uint64_t len) {
     if (addr & 0xFFF) { return -EINVAL; }
     uint64_t start = addr, end = page_up(addr + len);
     if (end <= start) { return -EINVAL; }
@@ -108,7 +108,7 @@ int vma_munmap(struct process *p, uint64_t addr, uint64_t len) {
     return 0;
 }
 
-int64_t vma_mmap(struct process *p, uint64_t addr, uint64_t len,
+static int64_t vma_mmap_locked(struct process *p, uint64_t addr, uint64_t len,
                  uint32_t prot, uint32_t flags) {
     if (len == 0) { return -EINVAL; }
     len = page_up(len);
@@ -117,7 +117,10 @@ int64_t vma_mmap(struct process *p, uint64_t addr, uint64_t len,
         if (addr & 0xFFF) { return -EINVAL; }
         // Overlapping an existing mapping REPLACES it, as POSIX
         // requires and as the dynamic linker will rely on.
-        vma_munmap(p, addr, len);
+        //
+        // The *_locked form: we already hold p->mm_lock, and the public
+        // vma_munmap would retake it and self-deadlock.
+        vma_munmap_locked(p, addr, len);
     } else {
         addr = p->mmap_next;
         if (addr + len > MMAP_LIMIT || addr + len < addr) { return -ENOMEM; }
@@ -128,13 +131,13 @@ int64_t vma_mmap(struct process *p, uint64_t addr, uint64_t len,
     return (int64_t)addr;
 }
 
-int vma_reserve(struct process *p, uint64_t start, uint64_t len,
+static int vma_reserve_locked(struct process *p, uint64_t start, uint64_t len,
                 uint32_t prot, uint32_t flags) {
     return vma_insert(p, page_down(start), page_up(start + len), prot, flags)
            ? 0 : -ENOMEM;
 }
 
-int vma_mprotect(struct process *p, uint64_t addr, uint64_t len, uint32_t prot) {
+static int vma_mprotect_locked(struct process *p, uint64_t addr, uint64_t len, uint32_t prot) {
     if (addr & 0xFFF) { return -EINVAL; }
     uint64_t start = addr, end = page_up(addr + len);
 
@@ -155,7 +158,7 @@ int vma_mprotect(struct process *p, uint64_t addr, uint64_t len, uint32_t prot) 
     return 0;
 }
 
-int vma_fault(struct process *p, uint64_t addr, int write) {
+static int vma_fault_locked(struct process *p, uint64_t addr, int write) {
     struct vma *v = vma_find(p, addr);
     if (!v) { return 0; }                                  // -> SIGSEGV
     if (v->prot == PROT_NONE) { return 0; }
@@ -178,7 +181,7 @@ int vma_fault(struct process *p, uint64_t addr, int write) {
     return 1;
 }
 
-void vma_destroy_all(struct process *p) {
+static void vma_destroy_all_locked(struct process *p) {
     struct vma *v = p->vmas;
     while (v) {
         struct vma *next = v->next;
@@ -190,6 +193,57 @@ void vma_destroy_all(struct process *p) {
 }
 
 // ---------------------------------------------------------------- selftest
+
+
+// ---- locked public entry points -------------------------------------
+//
+// Only these take p->mm_lock; the *_locked bodies above are called from
+// within an already-locked region. The lock ranks at LOCK_RANK_MM (3),
+// beneath which the allocator (HEAP 12, PMM 13) is legally reachable,
+// and none of these paths sleep or reach schedule().
+
+int vma_munmap(struct process *p, uint64_t addr, uint64_t len) {
+    uint64_t f = spin_lock_irqsave(&p->mm_lock);
+    int rc = vma_munmap_locked(p, addr, len);
+    spin_unlock_irqrestore(&p->mm_lock, f);
+    return rc;
+}
+
+int64_t vma_mmap(struct process *p, uint64_t addr, uint64_t len,
+                 uint32_t prot, uint32_t flags) {
+    uint64_t f = spin_lock_irqsave(&p->mm_lock);
+    int64_t rc = vma_mmap_locked(p, addr, len, prot, flags);
+    spin_unlock_irqrestore(&p->mm_lock, f);
+    return rc;
+}
+
+int vma_reserve(struct process *p, uint64_t start, uint64_t len,
+                uint32_t prot, uint32_t flags) {
+    uint64_t f = spin_lock_irqsave(&p->mm_lock);
+    int rc = vma_reserve_locked(p, start, len, prot, flags);
+    spin_unlock_irqrestore(&p->mm_lock, f);
+    return rc;
+}
+
+int vma_mprotect(struct process *p, uint64_t addr, uint64_t len, uint32_t prot) {
+    uint64_t f = spin_lock_irqsave(&p->mm_lock);
+    int rc = vma_mprotect_locked(p, addr, len, prot);
+    spin_unlock_irqrestore(&p->mm_lock, f);
+    return rc;
+}
+
+int vma_fault(struct process *p, uint64_t addr, int write) {
+    uint64_t f = spin_lock_irqsave(&p->mm_lock);
+    int rc = vma_fault_locked(p, addr, write);
+    spin_unlock_irqrestore(&p->mm_lock, f);
+    return rc;
+}
+
+void vma_destroy_all(struct process *p) {
+    uint64_t f = spin_lock_irqsave(&p->mm_lock);
+    vma_destroy_all_locked(p);
+    spin_unlock_irqrestore(&p->mm_lock, f);
+}
 
 static int vma_count(struct process *p) {
     int n = 0;
@@ -205,6 +259,9 @@ void vma_selftest(void) {
     struct process t;
     for (unsigned i = 0; i < sizeof(t); i++) { ((uint8_t *)&t)[i] = 0; }
     t.mmap_next = MMAP_BASE;
+    // The scratch process never went through proc_alloc, so its lock
+    // needs initialising by hand -- the vma entry points take it.
+    spin_init(&t.mm_lock, LOCK_RANK_MM, "mm-selftest");
 
     int64_t a = vma_mmap(&t, 0, 4096, PROT_READ | PROT_WRITE, MAP_ANONYMOUS);
     if (a < 0 || (uint64_t)a < MMAP_BASE || (uint64_t)a >= MMAP_LIMIT) {
@@ -254,6 +311,19 @@ void vma_selftest(void) {
     }
 
     vma_destroy_all(&t);
+
+    // MM sits at rank 3: below the VFS ranks, because a demand-paging
+    // fault takes it and then reads through the filesystem; and below
+    // RUNQUEUE, because such a fault can sleep.
+    uint64_t lf = spin_lock_irqsave(&t.mm_lock);
+    int fs_ok   = lock_rank_ok(LOCK_RANK_MOUNTTABLE);
+    int rq_ok   = lock_rank_ok(LOCK_RANK_RUNQUEUE);
+    int heap_ok = lock_rank_ok(LOCK_RANK_HEAP);
+    spin_unlock_irqrestore(&t.mm_lock, lf);
+    if (!fs_ok || !rq_ok || !heap_ok) {
+        serial_write_string("[vma] selftest FAILED: mm rank does not dominate fs/runqueue/heap\n");
+        return;
+    }
     if (vma_count(&t) != 0) {
         serial_write_string("[vma] selftest FAILED: destroy left mappings\n");
         return;

@@ -63,8 +63,6 @@ void kmain(void *multiboot_info) {
     vga_clear();
     vga_print_string("NeoOS booted");
 
-    vma_selftest();
-
     idt_init();
     serial_write_string("[idt] loaded\n");
 
@@ -95,6 +93,12 @@ void kmain(void *multiboot_info) {
 
     heap_init();
     heap_selftest();
+    // AFTER heap_init: vma_insert allocates, so this cannot run against
+    // an uninitialised heap. It used to sit before heap_init and worked
+    // by accident -- class_pages is BSS-zero either way -- until
+    // heap_lock made "uninitialised" mean rank 0 with no name, an
+    // instant inversion under the vma lock.
+    vma_selftest();
 
     struct ata_identify_info ata_info;
     ata_identify(0, &ata_info);

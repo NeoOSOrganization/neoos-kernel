@@ -54,6 +54,7 @@ static struct process *proc_alloc(void) {
     p->state = PROC_ALIVE;
     p->vmas      = 0;
     p->mmap_next = MMAP_BASE;
+    spin_init(&p->mm_lock, LOCK_RANK_MM, "mm");
     waitq_init(&p->exit_waiters);
     waitq_init(&p->join_waiters);
     waitq_init(&p->sig_waiters);
