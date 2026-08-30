@@ -10,6 +10,7 @@
 #include "timer.h"
 #include "mm/vma.h"
 #include "mm/paging.h"
+#include "mm/heap.h"
 #include "cpu_local.h"
 #include "smp.h"
 #include "futex.h"
@@ -190,6 +191,44 @@ static int64_t sys_spawn(struct syscall_args *a) {
     return child ? child->pid : -1;
 }
 
+// spawn with an argument vector. `argv` is a NULL-terminated array of
+// user pointers, copied into the kernel before the new address space is
+// built -- because building it is what stops the caller's pointers from
+// being meaningful.
+static int64_t sys_spawnv(struct syscall_args *a) {
+    char path_buf[64];
+    copy_user_path(a->a1, a->a2, path_buf, sizeof(path_buf));
+
+    struct spawn_args *args = (struct spawn_args *)kmalloc(sizeof(*args));
+    if (!args) { return -ENOMEM; }
+    args->argc = 0;
+
+    const char *const *uargv = (const char *const *)(uintptr_t)a->a3;
+    if (uargv) {
+        if (!user_range_writable((uint64_t)(uintptr_t)uargv, sizeof(void *))) {
+            kfree(args);
+            return -EFAULT;
+        }
+        while (args->argc < SPAWN_MAX_ARGS && uargv[args->argc]) {
+            copy_user_string((int64_t)(uintptr_t)uargv[args->argc],
+                             args->argv[args->argc], SPAWN_ARG_MAX);
+            args->argc++;
+        }
+    }
+    // No vector, or an empty one, means the same as spawn(): argv[0] is
+    // the path. A program with no argv[0] at all is a shape nothing
+    // expects.
+    if (args->argc == 0) {
+        kfree(args);
+        struct process *child = spawn(path_buf);
+        return child ? child->pid : -1;
+    }
+
+    struct process *child = spawn_argv(path_buf, args);
+    kfree(args);
+    return child ? child->pid : -1;
+}
+
 static int64_t sys_wait(struct syscall_args *a) {
     return wait_for_pid((int)a->a1);
 }
@@ -328,6 +367,43 @@ static int64_t sys_getdents(struct syscall_args *a) {
     struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
     if (!f) { return -EBADF; }
     return file_getdents(f, (struct dirent *)(uintptr_t)a->a2, count);
+}
+
+// Linux's command numbers.
+#define F_DUPFD 0
+#define F_GETFD 1
+#define F_SETFD 2
+#define F_GETFL 3
+#define F_SETFL 4
+#define O_NONBLOCK 0x800
+
+static int64_t sys_fcntl(struct syscall_args *a) {
+    struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
+    if (!f) { return -EBADF; }
+
+    switch ((int)a->a2) {
+    case F_GETFL:
+        // Only O_NONBLOCK is tracked. The access mode a real F_GETFL
+        // also reports is not recorded per-fd here, and reporting a
+        // made-up one would be worse than reporting none.
+        return f->nonblock ? O_NONBLOCK : 0;
+    case F_SETFL:
+        // POSIX: only a few flags are settable, and the rest are
+        // ignored rather than rejected -- which is what lets
+        // `fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)` work
+        // without the caller knowing which bits it just passed back.
+        f->nonblock = ((int)a->a3 & O_NONBLOCK) ? 1 : 0;
+        return 0;
+    case F_GETFD:
+        return 0;   // FD_CLOEXEC is never set; there is no exec-time walk
+    case F_SETFD:
+        return 0;   // accepted and ignored, for the same reason
+    default:
+        // F_DUPFD, the locking commands, and everything else. Refusing
+        // is right: a caller that asked for a duplicate and got a
+        // silent success would use fd -1 as if it were open.
+        return -EINVAL;
+    }
 }
 
 static int64_t sys_pipe2(struct syscall_args *a) {
@@ -725,6 +801,8 @@ static const struct syscall_desc syscall_table[SYS_MAX] = {
     [SYS_SENDTO]          = { sys_sendto,          "sendto" },
     [SYS_RECVFROM]        = { sys_recvfrom,        "recvfrom" },
     [SYS_GETSOCKNAME]     = { sys_getsockname,     "getsockname" },
+    [SYS_SPAWNV]          = { sys_spawnv,          "spawnv" },
+    [SYS_FCNTL]           = { sys_fcntl,           "fcntl" },
 };
 
 // Asserts what the table's shape is supposed to guarantee. Cheap, and

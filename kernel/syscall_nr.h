@@ -83,8 +83,15 @@
 #define SYS_SENDTO          48
 #define SYS_RECVFROM        49
 #define SYS_GETSOCKNAME     50
+// spawn with an argument vector. spawn (4) stays, taking only a path;
+// this is what a launcher needs, and what execve's argv will become.
+#define SYS_SPAWNV          51
+// fcntl, F_GETFL/F_SETFL only. Enough to turn O_NONBLOCK on and off,
+// which is what a program needs to poll a pipe or a socket without a
+// select() to wait on.
+#define SYS_FCNTL           52
 
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX             51
+#define SYS_MAX             53
 
 #endif

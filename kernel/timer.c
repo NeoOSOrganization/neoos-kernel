@@ -37,6 +37,21 @@ void timer_handler(void) {
         waitq_timeout_tick();
     }
 
+    // Never preempt a CPU that has not yet entered the scheduler.
+    // Before its first schedule() a CPU is still on a BOOTSTRAP stack
+    // -- kmain's on the BSP, ap_main's on an AP -- and there is no
+    // thread to save that context into, so switching away abandons it
+    // permanently.
+    //
+    // That is not theoretical. tlb_shootdown deliberately enables
+    // interrupts while waiting for acknowledgements (it must, or two
+    // CPUs shooting down at once deadlock waiting for each other), and
+    // a tick landing in that window took the BSP out of kmain before it
+    // had spawned a single process or printed the boot marker. The
+    // machine then ran the four selftest threads that already existed
+    // and nothing else, which looks like a hang with no error at all.
+    if (!c->current) { return; }
+
     if (--c->timeslice_remaining == 0) {
         c->timeslice_remaining = TIMESLICE_TICKS;
         schedule();

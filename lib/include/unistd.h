@@ -51,6 +51,11 @@ int getpid(void);
 int pipe(int fds[2]);
 int pipe2(int fds[2], int flags);
 
+// spawn with an argument vector. `argv` is NULL-terminated and becomes
+// the new process's argv; passing null is the same as spawn(). At most
+// 8 arguments of 128 bytes each -- see docs/stdlib.md.
+int spawnv(const char *path, char *const argv[]);
+
 // sysconf() names. Values match Linux's <bits/confname.h> so a ported
 // program compiled against glibc/musl headers sees the same constants.
 #define _SC_NPROCESSORS_CONF  83

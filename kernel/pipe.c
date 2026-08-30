@@ -48,7 +48,6 @@ struct pipe {
     int writers_open;
     int refs;                   // total fds pointing here
 
-    int nonblock;
 };
 
 static struct pipe *pipe_alloc(void) {
@@ -108,7 +107,7 @@ static int64_t pipe_read(struct file_descriptor *f, void *buf, uint64_t len) {
             spin_unlock_irqrestore(&p->lock, flags);
             return 0;
         }
-        if (p->nonblock) {
+        if (f->nonblock) {
             spin_unlock_irqrestore(&p->lock, flags);
             return -EAGAIN;
         }
@@ -166,7 +165,7 @@ static int64_t pipe_write(struct file_descriptor *f, const void *buf, uint64_t l
         if (written == len) { break; }
 
         // Full. A non-blocking write reports what it managed.
-        if (p->nonblock) {
+        if (f->nonblock) {
             spin_unlock_irqrestore(&p->lock, flags);
             waitq_wake_all(&p->readers);
             return written ? (int64_t)written : -EAGAIN;
@@ -273,7 +272,6 @@ int pipe_create(int fds[2], int flags) {
 
     struct pipe *p = pipe_alloc();
     if (!p) { return -ENOMEM; }
-    p->nonblock = (flags & PIPE_O_NONBLOCK) ? 1 : 0;
 
     int rfd = fd_table_alloc(proc->fd_table);
     if (rfd < 0) { pipe_free(p); return rfd; }
@@ -296,8 +294,9 @@ int pipe_create(int fds[2], int flags) {
     p->readers_open = 1;
     p->writers_open = 1;
 
-    r->ops = &pipe_ops; r->priv = p; r->readable = 1; r->writable = 0;
-    w->ops = &pipe_ops; w->priv = p; w->readable = 0; w->writable = 1;
+    int nb = (flags & PIPE_O_NONBLOCK) ? 1 : 0;
+    r->ops = &pipe_ops; r->priv = p; r->readable = 1; r->writable = 0; r->nonblock = nb;
+    w->ops = &pipe_ops; w->priv = p; w->readable = 0; w->writable = 1; w->nonblock = nb;
 
     fds[0] = rfd;
     fds[1] = wfd;

@@ -28,6 +28,7 @@ static void slot_reset(struct file_descriptor *f) {
     // Vnode-backed fds have always been readable regardless of open
     // mode; only pipes distinguish the two ends. See docs/stdlib.md.
     f->readable = 1;
+    f->nonblock = 0;
 }
 
 static void slots_clear(struct file_descriptor *slots, int n) {

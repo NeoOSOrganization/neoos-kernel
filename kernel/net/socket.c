@@ -48,7 +48,6 @@ struct socket {
 
     int      type;
     int      refs;
-    int      nonblock;
 
     int      bound;
     uint32_t local_ip_n;
@@ -404,11 +403,11 @@ int64_t socket_sendto(int fd, const void *buf, uint64_t len, int flags,
 // Dequeues one datagram, blocking if there is none. Shared by
 // recvfrom() and by read() on a socket, which is the same operation
 // with nowhere to report the sender.
-static int64_t recv_one(struct socket *s, void *buf, uint64_t len,
+static int64_t recv_one(struct socket *s, int nonblock, void *buf, uint64_t len,
                         struct k_sockaddr *src, uint32_t *src_len) {
     uint64_t sf = spin_lock_irqsave(&s->lock);
     while (!s->rx_head) {
-        if (s->nonblock) {
+        if (nonblock) {
             spin_unlock_irqrestore(&s->lock, sf);
             return -EAGAIN;
         }
@@ -442,10 +441,11 @@ static int64_t recv_one(struct socket *s, void *buf, uint64_t len,
 int64_t socket_recvfrom(int fd, void *buf, uint64_t len, int flags,
                         struct k_sockaddr *src, uint32_t *src_len) {
     (void)flags;   // MSG_* are all unimplemented; see docs/stdlib.md
-    struct socket *s = sock_of(fd, 0);
+    struct file_descriptor *f = 0;
+    struct socket *s = sock_of(fd, &f);
     if (!s) { return -EBADF; }
     if (!user_range_writable((uint64_t)(uintptr_t)buf, len)) { return -EFAULT; }
-    return recv_one(s, buf, len, src, src_len);
+    return recv_one(s, f->nonblock, buf, len, src, src_len);
 }
 
 // -------------------------------------------------------------- file_ops
@@ -457,7 +457,7 @@ static int64_t sock_read(struct file_descriptor *f, void *buf, uint64_t len) {
     struct socket *s = (struct socket *)f->priv;
     if (!s) { return -EBADF; }
     if (!s->bound) { return -ENOTCONN; }
-    return recv_one(s, buf, len, 0, 0);
+    return recv_one(s, f->nonblock, buf, len, 0, 0);
 }
 
 static int64_t sock_write(struct file_descriptor *f, const void *buf, uint64_t len) {

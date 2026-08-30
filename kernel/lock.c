@@ -28,6 +28,39 @@ void lock_panic(const char *msg, const char *a, const char *b) {
     for (;;) { __asm__ volatile ("hlt"); }
 }
 
+// How long a spin may last before it is treated as a deadlock rather
+// than as contention.
+//
+// Every spinlock in this kernel is held with interrupts disabled and
+// for a bounded number of instructions, so a wait of this length is not
+// slow -- it is a cycle that will never break. Without this the symptom
+// is a CPU that simply stops: no output, no panic, and (since it is
+// spinning with IF clear) not even a timer tick to show it is alive.
+// That is exactly how a boot failure presented, and it took a log with
+// no ticks in it at all to work out which CPU had stopped, let alone
+// where.
+//
+// The bound is a heuristic and deliberately generous: roughly twenty
+// seconds under QEMU's TCG, far longer than any real hold, so a false
+// positive would need a genuinely pathological workload.
+#define SPIN_DEADLOCK_LIMIT 1000000000ULL
+
+// Spins, and panics by NAME if the wait never ends. Both locks are
+// named in the message -- the one being waited for, and the one this
+// CPU already holds -- because a deadlock is a property of the pair.
+static void spin_acquire_watched(struct spinlock *l) {
+    uint64_t spins = 0;
+    while (__atomic_exchange_n(&l->locked, 1u, __ATOMIC_ACQUIRE)) {
+        __asm__ volatile ("pause");
+        if (++spins > SPIN_DEADLOCK_LIMIT) {
+            struct cpu *c = this_cpu();
+            const char *held = "(none)";
+            if (c->held_depth > 0) { held = "see held_ranks"; }
+            lock_panic("spin timed out; deadlock", l->name ? l->name : "(unnamed)", held);
+        }
+    }
+}
+
 void spin_init(struct spinlock *l, uint8_t rank, const char *name) {
     l->locked = 0;
     l->rank   = rank;
@@ -72,9 +105,7 @@ uint64_t spin_lock_irqsave(struct spinlock *l) {
 
     // Uncontended on one CPU, but a real atomic so the SMP milestone
     // changes nothing here.
-    while (__atomic_exchange_n(&l->locked, 1u, __ATOMIC_ACQUIRE)) {
-        __asm__ volatile ("pause");
-    }
+    spin_acquire_watched(l);
 
     c->held_ranks[c->held_depth++] = l->rank;
     return flags;
@@ -112,12 +143,8 @@ uint64_t spin_lock_ordered_pair(struct spinlock *a, struct spinlock *b) {
         lock_panic("held-lock stack overflow", first->name, 0);
     }
 
-    while (__atomic_exchange_n(&first->locked, 1u, __ATOMIC_ACQUIRE)) {
-        __asm__ volatile ("pause");
-    }
-    while (__atomic_exchange_n(&second->locked, 1u, __ATOMIC_ACQUIRE)) {
-        __asm__ volatile ("pause");
-    }
+    spin_acquire_watched(first);
+    spin_acquire_watched(second);
     // Both ranks are recorded, so the checker still sees the true depth
     // and still rejects a third lock of this rank.
     c->held_ranks[c->held_depth++] = first->rank;

@@ -49,6 +49,10 @@ struct file_descriptor {
     // open mode, which is how NeoOS has always behaved -- O_WRONLY does
     // not currently prevent a read. Recorded in docs/stdlib.md.
     int readable;
+    // O_NONBLOCK. Per-DESCRIPTOR, which is where POSIX puts it: it
+    // belongs to the open file description, not to the pipe or socket
+    // underneath, so two fds on one pipe can disagree about it.
+    int nonblock;
 };
 
 struct thread;
@@ -218,7 +222,25 @@ static inline uint64_t thread_stack_top_for(int slot) {
 int  thread_stack_alloc(struct process *p, uint64_t *out_top);
 void thread_stack_free(struct process *p, int slot);
 
+// Arguments for a new process. Bounded and copied by value rather than
+// pointed at: they come from a user address space that spawn is about
+// to stop looking at, and a fixed ceiling is simpler to reason about
+// than a growable buffer the caller could use to exhaust the heap.
+// The ceilings are recorded in docs/stdlib.md.
+#define SPAWN_MAX_ARGS 8
+#define SPAWN_ARG_MAX  128
+
+struct spawn_args {
+    int  argc;
+    char argv[SPAWN_MAX_ARGS][SPAWN_ARG_MAX];
+};
+
 struct process *spawn(const char *path);
+
+// spawn with an argument vector. `args` may be null, in which case the
+// process gets argv[0] = path and nothing else -- which is exactly what
+// spawn() does.
+struct process *spawn_argv(const char *path, const struct spawn_args *args);
 
 // Duplicates the calling THREAD into a new single-threaded process,
 // sharing user frames copy-on-write. Returns the child's thread, or 0

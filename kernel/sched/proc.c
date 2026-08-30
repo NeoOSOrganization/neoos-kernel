@@ -249,20 +249,26 @@ static int poke_user_bytes(uint64_t pml4_phys, uint64_t uva,
 // Lays out the entry stack and returns the RSP the program should
 // start on, or 0 on failure. `path` becomes argv[0].
 static uint64_t build_initial_stack(uint64_t pml4_phys, uint64_t stack_top,
-                                    const char *path,
+                                    const struct spawn_args *args,
                                     const struct elf_info *info) {
     uint64_t sp = stack_top;
 
-    // argv[0]'s bytes, then AT_RANDOM's sixteen. Both live ABOVE the
-    // vector that points at them, since the vector is built downward
-    // from here.
-    uint64_t arg_len = 0;
-    while (path[arg_len]) { arg_len++; }
-    arg_len++;                       // the NUL
+    // The argument STRINGS, then AT_RANDOM's sixteen bytes. All of it
+    // lives ABOVE the vector that points at it, since the vector is
+    // built downward from here.
+    uint64_t argv_ptr[SPAWN_MAX_ARGS];
+    int argc = args->argc;
+    if (argc > SPAWN_MAX_ARGS) { argc = SPAWN_MAX_ARGS; }
 
-    sp -= arg_len;
-    uint64_t argv0 = sp;
-    if (!poke_user_bytes(pml4_phys, argv0, (const uint8_t *)path, arg_len)) { return 0; }
+    for (int i = argc - 1; i >= 0; i--) {
+        const char *s = args->argv[i];
+        uint64_t len = 0;
+        while (s[len]) { len++; }
+        len++;                        // the NUL
+        sp -= len;
+        argv_ptr[i] = sp;
+        if (!poke_user_bytes(pml4_phys, sp, (const uint8_t *)s, len)) { return 0; }
+    }
 
     // AT_RANDOM: sixteen bytes musl uses to seed its stack guard and
     // its malloc. NOT cryptographic here -- NeoOS has no entropy source
@@ -278,10 +284,10 @@ static uint64_t build_initial_stack(uint64_t pml4_phys, uint64_t stack_top,
         if (!poke_user_u64(pml4_phys, at_random + (uint64_t)i * 8, mix)) { return 0; }
     }
 
-    // The vector itself: argc(1) + argv(1) + NULL(1) + envp NULL(1)
+    // The vector itself: argc(1) + argv(argc) + NULL(1) + envp NULL(1)
     // + 7 auxv pairs, in qwords.
     const int aux_pairs = 7;
-    uint64_t words = 1 + 1 + 1 + 1 + (uint64_t)aux_pairs * 2;
+    uint64_t words = 1 + (uint64_t)argc + 1 + 1 + (uint64_t)aux_pairs * 2;
     // RSP must be 16-byte aligned AT _start. The vector occupies
     // `words` qwords above it, so the base is aligned after rounding
     // the whole block down to 16.
@@ -290,8 +296,8 @@ static uint64_t build_initial_stack(uint64_t pml4_phys, uint64_t stack_top,
 
     uint64_t at = sp;
     #define PUSH(v) do { if (!poke_user_u64(pml4_phys, at, (v))) { return 0; } at += 8; } while (0)
-    PUSH(1);            // argc
-    PUSH(argv0);        // argv[0]
+    PUSH((uint64_t)argc);
+    for (int i = 0; i < argc; i++) { PUSH(argv_ptr[i]); }
     PUSH(0);            // argv terminator
     PUSH(0);            // envp terminator (no environment yet)
     PUSH(AT_PHDR);   PUSH(info->phdr);
@@ -306,7 +312,23 @@ static uint64_t build_initial_stack(uint64_t pml4_phys, uint64_t stack_top,
     return sp;
 }
 
-struct process *spawn(const char *path) {
+// Fills `out` with a single argument, the path -- what a spawn with no
+// argument vector gets, and what execve(path, {path, NULL}, ...) would
+// build.
+static void args_from_path(struct spawn_args *out, const char *path) {
+    out->argc = 1;
+    int i = 0;
+    while (path[i] && i < SPAWN_ARG_MAX - 1) { out->argv[0][i] = path[i]; i++; }
+    out->argv[0][i] = '\0';
+}
+
+struct process *spawn(const char *path) { return spawn_argv(path, 0); }
+
+struct process *spawn_argv(const char *path, const struct spawn_args *args) {
+    struct spawn_args local;
+    if (!args) { args_from_path(&local, path); args = &local; }
+    if (args->argc < 1) { return 0; }
+
     uint64_t pml4_phys;
     struct elf_info info;
     if (!build_user_address_space(path, &pml4_phys, &info)) {
@@ -343,7 +365,7 @@ struct process *spawn(const char *path) {
     zero_frames(kstack_phys, KERNEL_STACK_ORDER);
     uint64_t kstack_top = (uint64_t)(uintptr_t)phys_to_virt(kstack_phys) + (PMM_FRAME_SIZE << KERNEL_STACK_ORDER);
 
-    uint64_t entry_sp = build_initial_stack(pml4_phys, user_stack_top, path, &info);
+    uint64_t entry_sp = build_initial_stack(pml4_phys, user_stack_top, args, &info);
     if (!entry_sp) {
         serial_write_string("[process] spawn FAILED: could not build the entry stack\n");
         free_address_space(pml4_phys);
@@ -420,7 +442,13 @@ int exec_task(const char *path, struct syscall_frame *frame) {
 
     p->elf = info;
 
-    uint64_t entry_sp = build_initial_stack(new_pml4_phys, user_stack_top, path, &info);
+    // exec has no argument vector of its own yet, so the new image gets
+    // argv[0] = path and nothing else. execve's argv is the obvious
+    // next step and is recorded as a gap in docs/abi-compatibility.md.
+    struct spawn_args exec_args;
+    args_from_path(&exec_args, path);
+    uint64_t entry_sp = build_initial_stack(new_pml4_phys, user_stack_top,
+                                            &exec_args, &info);
     if (!entry_sp) { return 0; }
 
     // The new program starts with no thread pointer. Not resetting it

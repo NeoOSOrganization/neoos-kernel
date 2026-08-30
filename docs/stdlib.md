@@ -674,3 +674,95 @@ port. It is not a shortcut between two buffers.
 - **`inet_ntoa` is spelled `inet_ntoa_r`** and takes the output buffer.
   The standard one returns a pointer to a static buffer, which is not
   thread-safe; NeoOS has threads and no reason to reproduce that.
+
+## MPI: `<mpi.h>`
+
+A subset of MPI-1, in userland, over UDP on 127.0.0.1. Rank *r* listens
+on port 20000+*r*, and a message is exactly one datagram.
+
+```c
+int MPI_Init(int *argc, char ***argv);        int MPI_Finalize(void);
+int MPI_Comm_size(MPI_Comm, int *);           int MPI_Comm_rank(MPI_Comm, int *);
+int MPI_Send(const void *, int, MPI_Datatype, int dest, int tag, MPI_Comm);
+int MPI_Recv(void *, int, MPI_Datatype, int src, int tag, MPI_Comm, MPI_Status *);
+int MPI_Barrier(MPI_Comm);                    int MPI_Bcast(void *, int, MPI_Datatype, int root, MPI_Comm);
+int MPI_Reduce(...);                          int MPI_Allreduce(...);
+int MPI_Launch(const char *path, int size, int *out_pids);   /* NeoOS-specific */
+```
+
+Datatypes: `MPI_BYTE`, `MPI_CHAR`, `MPI_INT`, `MPI_LONG`, `MPI_DOUBLE`.
+Operations: `MPI_SUM`, `MPI_PROD`, `MPI_MAX`, `MPI_MIN`.
+`MPI_ANY_SOURCE` and `MPI_ANY_TAG` work, and a message that does not
+match the current receive is queued rather than dropped — without which
+two ranks exchanging messages in opposite orders would deadlock.
+
+Building on sockets rather than on a bespoke kernel "port" object was a
+deliberate choice: the transport is one already tested and already
+visible to a debugger, it is what a real MPI uses for its TCP path, and
+when NeoOS gets a NIC this runs between machines with no change above
+the socket calls.
+
+### Divergences, and what is absent
+
+- **`mpirun` is `MPI_Launch()`**, a NeoOS-specific call that spawns the
+  ranks with their rank and world size in `argv`. A real MPI passes
+  those through the environment; NeoOS has no environment yet.
+  `MPI_Init` reads them back and removes them, so a program's own
+  `argc`/`argv` look normal afterwards.
+- **One communicator.** `MPI_COMM_WORLD` only: no `MPI_Comm_split`, no
+  `MPI_Comm_dup`, no groups, no inter-communicators, no Cartesian or
+  graph topologies.
+- **Blocking point-to-point only.** No `MPI_Isend`/`MPI_Irecv`/`MPI_Wait`,
+  no `MPI_Sendrecv`, no persistent requests, no `MPI_Probe`. Note that
+  `MPI_Send` here never blocks — a datagram send does not wait for a
+  receiver — so ring exchanges that would deadlock on a synchronous
+  implementation happen to work. **Do not rely on that**; it is not
+  what MPI guarantees.
+- **Collectives are O(n) through rank 0**, not trees. With four ranks on
+  one machine the difference is unmeasurable, and a correct simple
+  collective is a better base to optimise from than a clever one that
+  is subtly wrong. No `MPI_Gather`, `MPI_Scatter`, `MPI_Alltoall`,
+  `MPI_Scan`, or user-defined operations.
+- **`MPI_MAX_MESSAGE` is 8192 bytes.** A message is one datagram and
+  there is no segmentation layer, so this is a real limit: a larger
+  `MPI_Send` returns `MPI_ERR_COUNT`.
+- **At most 16 ranks**, and at most 16 unmatched messages queued per
+  rank. A seventeenth unmatched message prints a warning and is
+  dropped, which is a real (bounded) failure mode rather than a silent
+  one.
+- **Tags above `MPI_TAG_UB` (0x3FFFFFFF) are refused.** The library's
+  own collective tags live above it, with a per-collective sequence
+  number in the low bits — because collectives are not synchronous, and
+  a fast rank reaching the *next* collective while the root is still
+  gathering the last one will otherwise have its contribution folded
+  into the wrong result. (Observed: `MPI_Reduce(SUM)` immediately
+  followed by `MPI_Allreduce(MAX)` over 1,2,3,4 gave 8 instead of 10.)
+- **No error handlers, no `MPI_Abort`, no `MPI_Wtime`.** Every call
+  returns an `MPI_ERR_*` code; nothing is installed to act on one.
+- **`MPI_Recv` reports `MPI_ERR_TRUNCATE`** for a message larger than
+  the buffer, which is MPI's rule and the opposite of `recvfrom`'s
+  silent truncation.
+
+## `spawnv` and `fcntl`
+
+```c
+int spawnv(const char *path, char *const argv[]);   /* <unistd.h> */
+int fcntl(int fd, int cmd, int arg);                /* <fcntl.h>  */
+```
+
+`spawnv` is `spawn` with an argument vector: at most **8 arguments of
+128 bytes each**, copied into the kernel before the new address space
+is built. `spawn(path)` is the same thing with `argv = {path, NULL}`.
+`exec` still has no argument vector — a program `exec`s into
+`argv[0] = path` and nothing else.
+
+`fcntl` implements `F_GETFL` and `F_SETFL`, which is enough to turn
+`O_NONBLOCK` on and off. `F_GETFD`/`F_SETFD` are accepted and ignored,
+since nothing closes descriptors at `exec` yet. Everything else —
+`F_DUPFD`, the locking commands — returns `-EINVAL` rather than a
+silent success, because a caller that asked for a duplicate descriptor
+and got one would use fd -1 as if it were open. `F_GETFL` reports only
+`O_NONBLOCK`; the access mode is not tracked per descriptor.
+
+`O_NONBLOCK` is per-DESCRIPTOR, which is where POSIX puts it: two
+descriptors on one pipe can disagree about it.

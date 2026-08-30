@@ -245,17 +245,28 @@ void smp_steal_selftest_check(void) {
 
     int online = smp_online_count();
     int seen = 0;
-    uint64_t steals = 0;
+    uint64_t steals = 0, user = 0;
     for (int i = 0; i < online; i++) {
         if (steal_cpu_seen[i]) { seen++; }
         steals += __atomic_load_n(&cpus[i].steals, __ATOMIC_ACQUIRE);
+        user   += __atomic_load_n(&cpus[i].steals_user, __ATOMIC_ACQUIRE);
     }
     if (steals == 0) {
         serial_write_string("[smp] steal selftest FAILED: no cpu ever stole any work\n");
         return;
     }
+    // The claim this milestone actually made -- that a thread carrying
+    // an address space, an fd table and signal state is safe to move --
+    // is asserted here rather than inferred from a total that kernel
+    // threads alone could account for.
+    if (user == 0) {
+        serial_write_string("[smp] steal selftest FAILED: no USER thread ever migrated\n");
+        return;
+    }
     serial_write_string("[smp] steal selftest passed, steals=");
     serial_write_hex64(steals);
+    serial_write_string(" user=");
+    serial_write_hex64(user);
     serial_write_string(" worker cpus=");
     serial_write_hex64((uint64_t)seen);
     serial_write_string("\n");

@@ -31,7 +31,36 @@
 volatile uint64_t ipi_tlb_count;
 
 static volatile int    shootdown_pending;   // acks still outstanding
-static struct spinlock shootdown_lock;      // serializes shootdowns
+
+// Serialises shootdowns, and is NOT a rank-checked spinlock on purpose.
+//
+// shootdown_pending is a single counter, so only one shootdown may be
+// in flight at a time -- but the wait for acknowledgements runs with
+// interrupts ENABLED and no lock held, which means the waiting thread
+// can be preempted. Holding a real spinlock across that would hit
+// schedule()'s "no spinlock held" assertion; holding one with
+// interrupts off would reintroduce the deadlock the design note above
+// describes.
+//
+// So it is a plain test-and-set. A CPU that is preempted while holding
+// it delays other CPUs' shootdowns until it runs again, which is a
+// latency cost rather than a correctness one. The alternative -- what
+// this replaced -- was releasing the lock before the wait, which let
+// two shootdowns share one counter: each decremented the other's acks,
+// one returned early and the other timed out. "[tlb] shootdown timed
+// out; continuing" in a log with two concurrent munmaps was exactly
+// that, not a lost IPI.
+static volatile int shootdown_busy;
+
+static void shootdown_acquire(void) {
+    while (__atomic_exchange_n(&shootdown_busy, 1, __ATOMIC_ACQUIRE)) {
+        __asm__ volatile ("pause");
+    }
+}
+
+static void shootdown_release(void) {
+    __atomic_store_n(&shootdown_busy, 0, __ATOMIC_RELEASE);
+}
 
 #define DEFER_MAX 64
 struct deferred { uint64_t phys; unsigned order; };
@@ -44,7 +73,6 @@ void tlb_init(void) {
     // paging_unmap_from while a process's mm_lock (rank 3) is held, and
     // a rank-1 lock taken there is a descending acquisition. The rank
     // checker caught exactly that on the first boot.
-    spin_init(&shootdown_lock, LOCK_RANK_TLB, "tlb-shootdown");
     spin_init(&deferred_lock,  LOCK_RANK_TLB, "tlb-deferred");
     deferred_n = 0;
 }
@@ -120,7 +148,7 @@ void tlb_shootdown(uint64_t pml4_phys) {
     uint64_t caller_flags;
     __asm__ volatile ("pushfq; pop %0" : "=r"(caller_flags) :: "memory");
 
-    uint64_t f = spin_lock_irqsave(&shootdown_lock);
+    shootdown_acquire();
 
     int self   = (int)(this_cpu() - &cpus[0]);
     int online = smp_online_count();
@@ -147,11 +175,11 @@ void tlb_shootdown(uint64_t pml4_phys) {
     for (int i = 0; i < ntargets; i++) {
         lapic_send_ipi(smp_lapic_for_index(targets[i]), VECTOR_IPI_TLB);
     }
-    spin_unlock_irqrestore(&shootdown_lock, f);
 
-    // Wait for acks WITH INTERRUPTS ENABLED and NO LOCK HELD. Both
+    // Wait for acks WITH INTERRUPTS ENABLED and NO SPINLOCK HELD. Both
     // matter: a target may need to take an interrupt to make progress,
     // and holding a lock here is the deadlock described at the top.
+    // shootdown_busy is still held, which is why it is not a spinlock.
     __asm__ volatile ("sti");
     int spins = 0;
     while (__atomic_load_n(&shootdown_pending, __ATOMIC_ACQUIRE) > 0) {
@@ -165,6 +193,7 @@ void tlb_shootdown(uint64_t pml4_phys) {
 
     if (!(caller_flags & (1ULL << 9))) { __asm__ volatile ("cli"); }
 
+    shootdown_release();
     tlb_flush_deferred();
 }
 

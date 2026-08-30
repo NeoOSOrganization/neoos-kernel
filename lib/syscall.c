@@ -50,6 +50,8 @@
 #define SYS_FUTEX         42
 #define SYS_PIPE2         43
 #define SYS_ARCH_PRCTL    44
+#define SYS_SPAWNV        51
+#define SYS_FCNTL         52
 
 static inline int64_t syscall0(int64_t num) {
     int64_t ret;
@@ -164,6 +166,12 @@ void yield(void) {
 int spawn(const char *path) {
     uint64_t len = strlen(path);
     return (int)syscall2(SYS_SPAWN, (int64_t)(uint64_t)path, (int64_t)len);
+}
+
+int spawnv(const char *path, char *const argv[]) {
+    uint64_t len = strlen(path);
+    return (int)__neoos_syscall3(SYS_SPAWNV, (long)(uintptr_t)path, (long)len,
+                                 (long)(uintptr_t)argv);
 }
 
 int fork(void) {
@@ -343,6 +351,10 @@ int pipe2(int fds[2], int flags) {
 // musl supplies it over pipe2 there. Same arrangement here: one
 // syscall, and the legacy spelling is library code.
 int pipe(int fds[2]) { return pipe2(fds, 0); }
+
+int fcntl(int fd, int cmd, int arg) {
+    return (int)syscall3(SYS_FCNTL, fd, cmd, arg);
+}
 
 // ------------------------------------------------------------------- TLS
 

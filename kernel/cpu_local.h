@@ -60,6 +60,11 @@ struct cpu {
     // than a snapshot of where a handful of test threads happened to
     // land.
     volatile uint64_t steals;
+    // Of those, the ones carrying a process. Counted separately because
+    // "a USER thread migrated" is the claim that was previously only
+    // assumed safe, and it is worth asserting on its own rather than
+    // inferring from a total that kernel threads could account for.
+    volatile uint64_t steals_user;
     // IA32_FS_BASE as this CPU last wrote it, so a context switch that
     // does not change the thread pointer skips the WRMSR. See
     // schedule().
