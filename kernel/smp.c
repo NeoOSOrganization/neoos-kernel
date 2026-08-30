@@ -12,6 +12,7 @@
 #include "mm/paging.h"
 #include "sched/proc.h"
 #include "sched/sched.h"
+#include "syscall.h"
 
 // Dense CPU index -> lapic id. cpus[] in cpu_local.h is indexed the same
 // way. NEVER index anything by lapic_id directly: APIC ids are sparse
@@ -105,6 +106,7 @@ void ap_main(int index) {
     cpu_local_init_ap(index); // AFTER gdt_load -- mov gs,ax zeroes GS_BASE
     lapic_init_this_cpu();
     cpu_init();               // SSE/xstate on this CPU
+    syscall_init_this_cpu();  // EFER.SCE/STAR/LSTAR/SFMASK are per-CPU MSRs
     idle_init_for(index);     // must run ON this CPU: uses this_cpu()'s queue
 
     __atomic_store_n(&cpus[index].online, 1u, __ATOMIC_RELEASE);

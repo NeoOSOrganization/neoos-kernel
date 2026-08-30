@@ -162,6 +162,7 @@ void kmain(void *multiboot_info) {
 
     smp_start_aps();
     smp_online_selftest();
+    syscall_msr_selftest();   // after bringup: asserts every AP programmed its own MSRs
     smp_reschedule_ipi_selftest();
     tlb_shootdown_selftest();
     panic_stop_selftest();

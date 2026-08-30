@@ -20,6 +20,10 @@
 #define EFER_SCE (1ULL << 0)
 #define EFER_NXE (1ULL << 11)
 
+// LSTAR as each CPU actually read it back after programming itself.
+// Written once per CPU during bringup, read only by the selftest.
+static uint64_t syscall_msr_seen[MAX_CPUS];
+
 #define SYS_EXIT   0
 #define SYS_WRITE  1
 #define SYS_YIELD  2
@@ -586,6 +590,21 @@ int64_t syscall_dispatch(int64_t num, int64_t a1, int64_t a2, int64_t a3,
 
 void syscall_init(void) {
     mutex_init(&fs_lock, LOCK_RANK_MOUNTTABLE, "fs");
+    syscall_init_this_cpu();
+    serial_write_string("[syscall] SYSCALL/SYSRET configured\n");
+}
+
+// EFER, STAR, LSTAR and SFMASK are all PER-CPU MSRs -- writing them on
+// the BSP configures the BSP and nothing else. Every CPU that may ever
+// return to ring 3 has to program them for itself, so ap_main calls
+// this too. A user thread that reaches an AP whose MSRs were never
+// written SYSCALLs into an unconfigured LSTAR; observed as every
+// userland suite producing no output at all, with no exception logged.
+//
+// Reachable without work stealing: enqueue_ready() targets this_cpu(),
+// so a user thread woken by a kernel thread running on an AP is queued
+// -- and then run -- there.
+void syscall_init_this_cpu(void) {
     uint64_t efer = rdmsr(MSR_EFER);
     // EFER_NXE: elf_load (Task 5) is the first code in NeoOS to
     // actually set PAGE_NO_EXECUTE (bit 63) on a real PTE -- without
@@ -603,5 +622,29 @@ void syscall_init(void) {
     wrmsr(MSR_LSTAR, (uint64_t)syscall_entry);
     wrmsr(MSR_SFMASK, 0x200); // mask IF (bit 9) on syscall entry
 
-    serial_write_string("[syscall] SYSCALL/SYSRET configured\n");
+    // Read BACK, so the selftest below asserts what the hardware holds
+    // rather than what we believe we wrote.
+    syscall_msr_seen[this_cpu() - &cpus[0]] = rdmsr(MSR_LSTAR);
+}
+
+// Asserts the invariant the split above exists to maintain: every
+// online CPU has its own LSTAR pointing at syscall_entry. Silent
+// breakage here shows up as a userland suite that emits nothing at all
+// and logs no exception, which is close to undiagnosable from the
+// serial log -- hence a direct check.
+void syscall_msr_selftest(void) {
+    int online = smp_online_count();
+    for (int i = 0; i < online; i++) {
+        if (syscall_msr_seen[i] != (uint64_t)(uintptr_t)syscall_entry) {
+            serial_write_string("[syscall] msr selftest FAILED: cpu=");
+            serial_write_hex64((uint64_t)i);
+            serial_write_string(" lstar=");
+            serial_write_hex64(syscall_msr_seen[i]);
+            serial_write_string("\n");
+            return;
+        }
+    }
+    serial_write_string("[syscall] per-cpu msr selftest passed, cpus=");
+    serial_write_hex64((uint64_t)online);
+    serial_write_string("\n");
 }
