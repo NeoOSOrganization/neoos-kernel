@@ -34,6 +34,25 @@ void kmain(void *multiboot_info) {
     serial_write_hex64((uint64_t)(uintptr_t)kmain);
     serial_write_string("\n");
 
+    // BEFORE pmm_init: every rank-checked spinlock calls this_cpu(),
+    // which reads gs:0. Until cpu_local_init() installs a GS base that
+    // read returns 0 and the lock dereferences physical address 0. pmm
+    // and the heap are locked subsystems now, so their init must not be
+    // the first thing to run.
+    //
+    // tss_init, gdt_init and cpu_local_init touch only static memory --
+    // no allocator, no paging -- so nothing is lost by hoisting them.
+    tss_init();
+    gdt_init();
+    // AFTER gdt_init: gdt_flush reloads the segment registers, and
+    // `mov gs, ax` ZEROES IA32_GS_BASE as a side effect. Installing the
+    // per-CPU pointer any earlier would have it wiped a few
+    // instructions later, and every this_cpu() would then dereference
+    // physical address 0.
+    cpu_local_init();
+    serial_write_string("[gdt] loaded, tss_selector=0x18\n");
+    lock_selftest();
+
     pmm_init(multiboot_info);
     pmm_selftest();
 
@@ -43,17 +62,7 @@ void kmain(void *multiboot_info) {
     vga_clear();
     vga_print_string("NeoOS booted");
 
-    tss_init();
-    gdt_init();
-    // AFTER gdt_init: gdt_flush reloads the segment registers, and
-    // `mov gs, ax` ZEROES IA32_GS_BASE as a side effect. Installing the
-    // per-CPU pointer any earlier would have it wiped a few
-    // instructions later, and every this_cpu() would then dereference
-    // physical address 0.
-    cpu_local_init();
-    lock_selftest();
     vma_selftest();
-    serial_write_string("[gdt] loaded, tss_selector=0x18\n");
 
     idt_init();
     serial_write_string("[idt] loaded\n");

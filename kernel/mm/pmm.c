@@ -1,5 +1,12 @@
 #include "pmm.h"
 #include "serial.h"
+#include "../lock.h"
+
+// One lock over the whole buddy allocator. pmm is a leaf: it calls
+// nothing that takes another lock, so a single lock costs nothing in
+// ordering complexity. Non-static only so pmm_selftest can assert its
+// rank.
+struct spinlock pmm_lock;
 
 #define PMM_MAX_FRAMES ((4ULL * 1024 * 1024 * 1024) / PMM_FRAME_SIZE) // 4GiB cap, see Global Constraints
 #define ORDER_NONE 0xFF
@@ -58,7 +65,8 @@ static void list_remove(unsigned order, struct free_block *block) {
     frame_order[phys_to_frame((uint64_t)(uintptr_t)block)] = ORDER_NONE;
 }
 
-uint64_t pmm_alloc(unsigned order) {
+// Unlocked. Caller must hold pmm_lock.
+static uint64_t pmm_alloc_locked(unsigned order) {
     if (order > PMM_MAX_ORDER) {
         return 0;
     }
@@ -90,7 +98,8 @@ uint64_t pmm_alloc(unsigned order) {
     return phys;
 }
 
-void pmm_free(uint64_t phys_addr, unsigned order) {
+// Unlocked. Caller must hold pmm_lock.
+static void pmm_free_locked(uint64_t phys_addr, unsigned order) {
     uint64_t frame = phys_to_frame(phys_addr);
 
     for (uint64_t i = 0; i < (1ULL << order); i++) {
@@ -120,8 +129,28 @@ void pmm_free(uint64_t phys_addr, unsigned order) {
     list_push(order, (struct free_block *)(uintptr_t)frame_to_phys(frame));
 }
 
+// The locked public entry points. Only these take pmm_lock; the static
+// helpers above (list_push, list_remove, *_locked) are called from
+// within an already-locked region, and locking them too would be a
+// same-rank self-deadlock.
+uint64_t pmm_alloc(unsigned order) {
+    uint64_t flags = spin_lock_irqsave(&pmm_lock);
+    uint64_t phys = pmm_alloc_locked(order);
+    spin_unlock_irqrestore(&pmm_lock, flags);
+    return phys;
+}
+
+void pmm_free(uint64_t phys_addr, unsigned order) {
+    uint64_t flags = spin_lock_irqsave(&pmm_lock);
+    pmm_free_locked(phys_addr, order);
+    spin_unlock_irqrestore(&pmm_lock, flags);
+}
+
 uint64_t pmm_free_frame_count(void) {
-    return total_free_frames;
+    uint64_t flags = spin_lock_irqsave(&pmm_lock);
+    uint64_t n = total_free_frames;
+    spin_unlock_irqrestore(&pmm_lock, flags);
+    return n;
 }
 
 static void add_region(uint64_t start, uint64_t end) {
@@ -160,6 +189,10 @@ struct multiboot_tag_mmap {
 #define MULTIBOOT_MEMORY_AVAILABLE 1
 
 void pmm_init(void *multiboot_info) {
+    // Before the free lists are touched. pmm_init itself is NOT locked:
+    // it runs before any other CPU exists.
+    spin_init(&pmm_lock, LOCK_RANK_PMM, "pmm");
+
     for (unsigned i = 0; i <= PMM_MAX_ORDER; i++) {
         free_lists[i] = 0;
     }
@@ -230,11 +263,16 @@ void pmm_init(void *multiboot_info) {
 }
 
 void pmm_frame_share(uint64_t phys) {
+    uint64_t flags = spin_lock_irqsave(&pmm_lock);
     frame_refcount[phys_to_frame(phys)]++;
+    spin_unlock_irqrestore(&pmm_lock, flags);
 }
 
 unsigned pmm_frame_refcount(uint64_t phys) {
-    return frame_refcount[phys_to_frame(phys)];
+    uint64_t flags = spin_lock_irqsave(&pmm_lock);
+    unsigned n = frame_refcount[phys_to_frame(phys)];
+    spin_unlock_irqrestore(&pmm_lock, flags);
+    return n;
 }
 
 void pmm_selftest(void) {
@@ -293,6 +331,30 @@ void pmm_selftest(void) {
     pmm_free(shared_block, 0); // drops to 0 -- now it should actually free
     if (frame_order[phys_to_frame(shared_block)] == ORDER_NONE) {
         serial_write_string("[pmm] selftest FAILED: frame not returned to free list at refcount 0\n");
+        return;
+    }
+
+    // The lock must exist, and taking it must be legal from a context
+    // holding nothing. lock_rank_ok() checks legality WITHOUT acquiring,
+    // so this never risks the panic path.
+    if (pmm_lock.rank != LOCK_RANK_PMM) {
+        serial_write_string("[pmm] selftest FAILED: lock rank wrong\n");
+        return;
+    }
+    if (!lock_rank_ok(LOCK_RANK_PMM)) {
+        serial_write_string("[pmm] selftest FAILED: pmm rank not acquirable\n");
+        return;
+    }
+    // An allocation must leave nothing held -- a leaked lock here
+    // deadlocks the next allocator call on any CPU.
+    uint64_t probe = pmm_alloc(0);
+    if (lock_held_depth() != 0) {
+        serial_write_string("[pmm] selftest FAILED: alloc leaked the lock\n");
+        return;
+    }
+    pmm_free(probe, 0);
+    if (lock_held_depth() != 0) {
+        serial_write_string("[pmm] selftest FAILED: free leaked the lock\n");
         return;
     }
 
