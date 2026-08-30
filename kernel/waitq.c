@@ -9,7 +9,41 @@
 #include "timer.h"
 #include "serial.h"
 
-void waitq_init(struct waitq *q) { q->head = 0; q->tail = 0; }
+void waitq_init(struct waitq *q) {
+    q->head = 0;
+    q->tail = 0;
+    spin_init(&q->lock, LOCK_RANK_WAITQ, "waitq");
+}
+
+void waitq_lock_selftest(void) {
+    struct waitq q;
+    waitq_init(&q);
+    if (q.lock.rank != LOCK_RANK_WAITQ) {
+        serial_write_string("[waitq] selftest FAILED: lock rank wrong\n");
+        return;
+    }
+    // A mutex passes its own guard into waitq_sleep as `release`, so
+    // WAITQ must be acquirable while a guard of mutex rank is held.
+    struct spinlock guard;
+    spin_init(&guard, LOCK_RANK_VNODE, "selftest-guard");
+    uint64_t f = spin_lock_irqsave(&guard);
+    int ok = lock_rank_ok(LOCK_RANK_WAITQ);
+    spin_unlock_irqrestore(&guard, f);
+    if (!ok) {
+        serial_write_string("[waitq] selftest FAILED: waitq not acquirable under a mutex guard\n");
+        return;
+    }
+    // And RUNQUEUE must be acquirable under WAITQ, since the sleep path
+    // reaches schedule() after touching the queue.
+    uint64_t f2 = spin_lock_irqsave(&q.lock);
+    int rq_ok = lock_rank_ok(LOCK_RANK_RUNQUEUE);
+    spin_unlock_irqrestore(&q.lock, f2);
+    if (!rq_ok) {
+        serial_write_string("[waitq] selftest FAILED: runqueue not acquirable under waitq\n");
+        return;
+    }
+    serial_write_string("[waitq] lock selftest passed\n");
+}
 
 static void waitq_enqueue(struct waitq *q, struct thread *t) {
     t->next = 0;
@@ -30,6 +64,13 @@ static struct thread *waitq_dequeue(struct waitq *q) {
 void waitq_remove(struct thread *t) {
     struct waitq *q = t->blocked_on;
     if (!q) { return; }
+    uint64_t rf = spin_lock_irqsave(&q->lock);
+    // Re-read under the lock: the thread may have been woken between the
+    // read above and the acquire, in which case q is stale.
+    if (t->blocked_on != q) {
+        spin_unlock_irqrestore(&q->lock, rf);
+        return;
+    }
     struct thread **pp = &q->head;
     struct thread *prev = 0;
     while (*pp && *pp != t) { prev = *pp; pp = &(*pp)->next; }
@@ -42,6 +83,7 @@ void waitq_remove(struct thread *t) {
     }
     t->next = 0;
     t->blocked_on = 0;
+    spin_unlock_irqrestore(&q->lock, rf);
 }
 
 int waitq_sleep(struct waitq *q, struct spinlock *release) {
@@ -60,9 +102,14 @@ int waitq_sleep(struct waitq *q, struct spinlock *release) {
         return -EINTR;
     }
 
+    // The queue lock covers only the enqueue. It is released before
+    // schedule(), which must be entered holding no spinlock at all --
+    // schedule() panics otherwise.
+    uint64_t qf = spin_lock_irqsave(&q->lock);
     waitq_enqueue(q, t);
     t->blocked_on = q;
     t->state      = THREAD_BLOCKED;
+    spin_unlock_irqrestore(&q->lock, qf);
 
     if (release) { spin_unlock_irqrestore(release, 0); } // deliberately keeps IF off
 
@@ -147,14 +194,35 @@ static void waitq_make_ready(struct thread *t) {
     thread_enqueue_ready(t);
 }
 
+// Both wakers dequeue under q->lock and only then make the threads
+// ready: thread_enqueue_ready takes a run queue lock (rank 10), and
+// keeping the waitq lock (rank 9) held across it would be legal but
+// would hold two locks for no reason.
 void waitq_wake_one(struct waitq *q) {
+    uint64_t f = spin_lock_irqsave(&q->lock);
     struct thread *t = waitq_dequeue(q);
+    spin_unlock_irqrestore(&q->lock, f);
     if (t) { waitq_make_ready(t); }
 }
 
 void waitq_wake_all(struct waitq *q) {
+    // Drain into a local list first, so the queue lock is dropped before
+    // any thread is enqueued on a run queue.
+    uint64_t f = spin_lock_irqsave(&q->lock);
+    struct thread *woken = 0;
     struct thread *t;
-    while ((t = waitq_dequeue(q)) != 0) { waitq_make_ready(t); }
+    while ((t = waitq_dequeue(q)) != 0) {
+        t->next = woken;
+        woken = t;
+    }
+    spin_unlock_irqrestore(&q->lock, f);
+
+    while (woken) {
+        struct thread *next = woken->next;
+        woken->next = 0;
+        waitq_make_ready(woken);
+        woken = next;
+    }
 }
 
 // ---------------------------------------------------------------- selftest

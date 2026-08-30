@@ -2,16 +2,24 @@
 #define NEOOS_WAITQ_H
 
 #include <stdint.h>
+#include "spinlock_types.h"
 
 // Deliberately does NOT include lock.h: lock.h includes THIS header
 // (struct mutex embeds a struct waitq by value), so including it back
-// would be circular. A forward declaration is all that's needed.
-struct spinlock;
+// would be circular. spinlock_types.h carries just the struct
+// definition, which is all this header needs.
 struct thread;
 
 struct waitq {
     struct thread *head, *tail;
+    // Protects head/tail. Before this existed the fields were covered
+    // only by whichever guard the CALLER happened to hold -- a different
+    // lock for different callers, which is no protection at all across
+    // CPUs.
+    struct spinlock lock;
 };
+
+void waitq_lock_selftest(void);
 
 void waitq_init(struct waitq *q);
 

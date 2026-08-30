@@ -52,6 +52,7 @@ void kmain(void *multiboot_info) {
     cpu_local_init();
     serial_write_string("[gdt] loaded, tss_selector=0x18\n");
     lock_selftest();
+    waitq_lock_selftest();
 
     pmm_init(multiboot_info);
     pmm_selftest();

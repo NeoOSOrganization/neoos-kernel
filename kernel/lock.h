@@ -2,6 +2,7 @@
 #define NEOOS_LOCK_H
 
 #include <stdint.h>
+#include "spinlock_types.h"
 #include "waitq.h"
 
 /*
@@ -56,11 +57,8 @@
 
 #define LOCK_MAX_HELD 8
 
-struct spinlock {
-    volatile uint32_t locked;
-    uint8_t     rank;
-    const char *name;
-};
+// struct spinlock itself lives in spinlock_types.h so waitq.h can embed
+// one without including this header back.
 
 void     spin_init(struct spinlock *l, uint8_t rank, const char *name);
 uint64_t spin_lock_irqsave(struct spinlock *l);
