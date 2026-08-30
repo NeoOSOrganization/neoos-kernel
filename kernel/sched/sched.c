@@ -396,6 +396,24 @@ void schedule(void) {
     next->state = THREAD_RUNNING;
     __atomic_store_n(&next->on_cpu, 1, __ATOMIC_RELAXED);
     c->current = next;
+
+    // The thread pointer is per-THREAD but the MSR is per-CPU, so it
+    // has to be reloaded on every switch -- otherwise a thread arriving
+    // on a CPU keeps whatever FS base the previous occupant left, and
+    // every one of its __thread variables reads another thread's
+    // storage. Migration makes that a certainty rather than a
+    // possibility.
+    //
+    // Cached per CPU because WRMSR is expensive and the common case is
+    // that nothing changed: two kernel threads in a row, or one thread
+    // preempted and resumed. Nothing else writes IA32_FS_BASE, so the
+    // cache cannot go stale behind our back.
+    if (next->fs_base != c->fs_base_loaded) {
+        c->fs_base_loaded = next->fs_base;
+        uint32_t lo = (uint32_t)next->fs_base;
+        uint32_t hi = (uint32_t)(next->fs_base >> 32);
+        __asm__ volatile ("wrmsr" :: "c"(0xC0000100u), "a"(lo), "d"(hi));
+    }
     c->tss->rsp0    = next->kernel_stack_top;
     c->kernel_stack = next->kernel_stack_top;
 

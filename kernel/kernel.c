@@ -181,6 +181,7 @@ void kmain(void *multiboot_info) {
     spawn("/BIN/SMPTEST.ELF");
     spawn("/BIN/IPCTEST.ELF");
     spawn("/BIN/PIPETEST.ELF");
+    spawn("/BIN/TLSTEST.ELF");
 
     // After the spawns so the selftest's own kernel threads draw ids
     // above the real processes', keeping pids stable across boots.

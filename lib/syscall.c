@@ -5,6 +5,8 @@
 #include "signal.h"
 #include "sys/wait.h"
 #include "futex.h"
+#include "tls.h"
+#include "sys/mman.h"
 
 #define SYS_EXIT   0
 #define SYS_WRITE  1
@@ -36,6 +38,7 @@
 #define SYS_SIGALTSTACK   28
 #define SYS_MMAP          37
 #define SYS_MUNMAP        38
+#define SYS_MPROTECT      39
 #define SYS_KILL          29
 #define SYS_WAIT4         32
 #define SYS_SETPGID       33
@@ -46,6 +49,7 @@
 #define SYS_TGKILL        31
 #define SYS_FUTEX         42
 #define SYS_PIPE2         43
+#define SYS_ARCH_PRCTL    44
 
 static inline int64_t syscall0(int64_t num) {
     int64_t ret;
@@ -262,6 +266,28 @@ int munmap_raw(unsigned long addr, unsigned long len) {
     return (int)syscall2(SYS_MUNMAP, (int64_t)addr, (int64_t)len);
 }
 
+// POSIX shapes over the raw calls: -1/MAP_FAILED instead of a negative
+// errno. This is the one place in the library that translates, and it
+// does so because these three names have a return convention every
+// caller already knows.
+void *mmap(void *addr, uint64_t length, int prot, int flags, int fd, int64_t offset) {
+    if (fd >= 0 || offset != 0) { return MAP_FAILED; }   // no file mappings yet
+    long rc = mmap_raw((unsigned long)(uintptr_t)addr, length, prot, flags);
+    if (rc < 0) { return MAP_FAILED; }
+    return (void *)(uintptr_t)rc;
+}
+
+int munmap(void *addr, uint64_t length) {
+    int rc = munmap_raw((unsigned long)(uintptr_t)addr, length);
+    return rc < 0 ? -1 : 0;
+}
+
+int mprotect(void *addr, uint64_t length, int prot) {
+    int rc = (int)syscall3(SYS_MPROTECT, (int64_t)(uint64_t)(uintptr_t)addr,
+                           (int64_t)length, prot);
+    return rc < 0 ? -1 : 0;
+}
+
 // ---------------------------------------------------------------- futex
 //
 // The raw primitive, exposed so <semaphore.h> and <pthread.h> can be
@@ -297,3 +323,9 @@ int pipe2(int fds[2], int flags) {
 // musl supplies it over pipe2 there. Same arrangement here: one
 // syscall, and the legacy spelling is library code.
 int pipe(int fds[2]) { return pipe2(fds, 0); }
+
+// ------------------------------------------------------------------- TLS
+
+int arch_prctl(int code, unsigned long addr) {
+    return (int)syscall2(SYS_ARCH_PRCTL, code, (int64_t)addr);
+}

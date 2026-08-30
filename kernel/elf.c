@@ -32,6 +32,7 @@ struct elf64_phdr {
 } __attribute__((packed));
 
 #define ELF_PT_LOAD 1
+#define ELF_PT_TLS  7
 #define ELF_PF_X    1
 
 static int is_valid_elf64(const struct elf64_header *hdr) {
@@ -40,7 +41,9 @@ static int is_valid_elf64(const struct elf64_header *hdr) {
            hdr->e_ident[4] == 2; // ELFCLASS64
 }
 
-int elf_load(const uint8_t *data, uint32_t size, uint64_t *pml4, uint64_t *out_entry) {
+int elf_load(const uint8_t *data, uint32_t size, uint64_t *pml4,
+             struct elf_info *out) {
+    for (unsigned i = 0; i < sizeof(*out); i++) { ((uint8_t *)out)[i] = 0; }
     if (size < sizeof(struct elf64_header)) {
         serial_write_string("[elf] load FAILED: image too small\n");
         return 0;
@@ -55,8 +58,31 @@ int elf_load(const uint8_t *data, uint32_t size, uint64_t *pml4, uint64_t *out_e
     for (uint16_t i = 0; i < hdr->e_phnum; i++) {
         const struct elf64_phdr *ph =
             (const struct elf64_phdr *)(data + hdr->e_phoff + (uint64_t)i * hdr->e_phentsize);
+        if (ph->p_type == ELF_PT_TLS) {
+            // Recorded, never mapped. A PT_TLS segment is a TEMPLATE:
+            // its bytes live inside some PT_LOAD segment, and each
+            // thread gets its own copy. Mapping it as if it were data
+            // would give every thread the same storage, which is the
+            // opposite of what it is for.
+            out->tls_vaddr  = ph->p_vaddr;
+            out->tls_filesz = ph->p_filesz;
+            out->tls_memsz  = ph->p_memsz;
+            out->tls_align  = ph->p_align ? ph->p_align : 1;
+            continue;
+        }
         if (ph->p_type != ELF_PT_LOAD) {
             continue;
+        }
+
+        // AT_PHDR is a VIRTUAL address, and the only thing that relates
+        // a file offset to one is a PT_LOAD segment that covers it.
+        // Nothing guarantees the headers are inside a loaded segment --
+        // it is a convention every real toolchain follows, not a rule --
+        // so this stays zero when they are not, and the auxv simply
+        // omits AT_PHDR rather than pointing at nothing.
+        if (hdr->e_phoff >= ph->p_offset &&
+            hdr->e_phoff <  ph->p_offset + ph->p_filesz) {
+            out->phdr = ph->p_vaddr + (hdr->e_phoff - ph->p_offset);
         }
 
         uint64_t flags = PAGE_WRITABLE | PAGE_USER; // always writable -- no read-only .text/.rodata this milestone
@@ -98,6 +124,8 @@ int elf_load(const uint8_t *data, uint32_t size, uint64_t *pml4, uint64_t *out_e
         }
     }
 
-    *out_entry = hdr->e_entry;
+    out->entry     = hdr->e_entry;
+    out->phentsize = hdr->e_phentsize;
+    out->phnum     = hdr->e_phnum;
     return 1;
 }

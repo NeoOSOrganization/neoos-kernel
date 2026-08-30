@@ -72,8 +72,11 @@
 // pipe() on top -- exactly how musl does it on architectures where
 // Linux dropped the legacy call.
 #define SYS_PIPE2           43
+// arch_prctl(ARCH_SET_FS/ARCH_GET_FS). Linux's codes and semantics; it
+// is how every x86-64 libc installs the thread pointer.
+#define SYS_ARCH_PRCTL      44
 
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX             44
+#define SYS_MAX             45
 
 #endif

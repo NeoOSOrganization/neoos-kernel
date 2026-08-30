@@ -10,6 +10,7 @@
 #include "../mm/pmm.h"
 #include "../mm/vma.h"
 #include "../sync/rcu.h"
+#include "../elf.h"
 
 #define KERNEL_STACK_ORDER 2 // 4 frames = 16KiB
 
@@ -63,6 +64,11 @@ struct process {
     // is freed by wait_for_pid's reap.
     uint32_t refcount;
     uint64_t pml4_phys;             // 0 = shares the kernel address space
+    // What the ELF loader learned about the image: where its program
+    // headers landed, and its PT_TLS template. Kept for the whole life
+    // of the process because every thread created later needs the TLS
+    // template again, not just the first one.
+    struct elf_info elf;
     struct vma *vmas;               // sorted by start, non-overlapping
     uint64_t    mmap_next;          // bump hint for unhinted mmap
     // Guards `vmas`, `mmap_next` and this process's page tables. Rank
@@ -122,6 +128,12 @@ struct thread {
     // sched.c for the whole story.
     volatile uint32_t on_cpu;
     uint64_t saved_rsp;
+    // IA32_FS_BASE for this thread: the thread pointer, and therefore
+    // where all its __thread variables live. Per-THREAD and restored on
+    // every context switch -- without that, a thread migrating to
+    // another CPU would keep whatever FS base the previous occupant of
+    // that CPU left behind. Set only by arch_prctl(ARCH_SET_FS).
+    uint64_t fs_base;
     uint64_t kernel_stack_top;
     uint64_t kernel_stack_phys;
     int stack_slot;                 // -1 for kernel-only threads

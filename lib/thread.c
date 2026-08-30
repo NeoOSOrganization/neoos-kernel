@@ -1,5 +1,6 @@
 #include <thread.h>
 #include <errno.h>
+#include <tls.h>
 
 // The kernel starts a thread at RIP=entry with RDI=arg, but a raw `fn`
 // that simply returned would fall off the end of its stack. So the
@@ -28,6 +29,14 @@ static void thread_trampoline(void *raw) {
     void (*fn)(void *) = s->fn;
     void  *arg = s->arg;
     s->in_use = 0;   // the slot is only needed until the thread starts
+
+    // Every thread needs its OWN TLS block: that is what thread-local
+    // means. The kernel starts a new thread with %fs at zero, so this
+    // must happen before fn touches any __thread variable -- and it has
+    // to happen HERE, on the new thread, since arch_prctl acts on the
+    // caller.
+    if (__tls_setup_self() != 0) { __sys_thread_exit(127); }
+
     fn(arg);
     __sys_thread_exit(0);
 }

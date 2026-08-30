@@ -44,9 +44,18 @@ int paging_map(uint64_t virt, uint64_t phys, uint64_t flags);
 void paging_unmap(uint64_t virt);
 uint64_t paging_translate(uint64_t virt); // returns the mapped physical address, or 0 if unmapped
 
-// Translates through the address space currently in CR3, so it works
-// for USER pointers -- paging_translate walks the kernel's own p4_table,
-// where user mappings do not exist. Returns 0 if unmapped.
+// Translates through an ARBITRARY address space -- necessary to write
+// into a process's memory before its PML4 has ever been loaded into
+// CR3, which is what building the entry stack does. Unlike the walk
+// paging_map/paging_unmap do, this handles 1GiB and 2MiB pages: the
+// kernel's higher-half alias and the physmap are both large-page
+// mapped, and a walk assuming 4KiB entries throughout would read a
+// 2MiB PD entry as if it pointed at a page table. Returns 0 if
+// unmapped.
+uint64_t paging_translate_in(uint64_t pml4_phys, uint64_t virt);
+
+// The same, through whatever is in CR3 now -- so it works for USER
+// pointers, which paging_translate cannot see at all.
 uint64_t paging_translate_current(uint64_t virt);
 
 // Allocates a fresh, zeroed page-table frame -- suitable as a new

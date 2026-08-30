@@ -572,6 +572,49 @@ static int64_t sys_tgkill(struct syscall_args *a) {
     return signal_tkill((int)a->a1, (int)a->a2, (int)a->a3, &info);
 }
 
+// x86-64 arch_prctl. Linux's code values, unchanged.
+#define ARCH_SET_GS 0x1001
+#define ARCH_SET_FS 0x1002
+#define ARCH_GET_FS 0x1003
+#define ARCH_GET_GS 0x1004
+#define MSR_FS_BASE 0xC0000100
+
+static int64_t sys_arch_prctl(struct syscall_args *a) {
+    struct thread *t = current_thread();
+    if (!t || !t->proc) { return -ESRCH; }
+
+    if ((int)a->a1 == ARCH_SET_FS) {
+        uint64_t addr = (uint64_t)a->a2;
+        // Must be a canonical user address. A non-canonical value makes
+        // the WRMSR below #GP inside the kernel, which is a user-
+        // triggerable fault rather than a user error, so it is rejected
+        // here. Linux does the same check for the same reason.
+        if (addr >= USER_ADDR_LIMIT) { return -EPERM; }
+        t->fs_base = addr;
+        // Written immediately as well as recorded: this thread is
+        // running right now and expects the change to take effect
+        // before the syscall returns, not at its next context switch.
+        wrmsr(MSR_FS_BASE, addr);
+        return 0;
+    }
+    if ((int)a->a1 == ARCH_GET_FS) {
+        uint64_t *out = (uint64_t *)(uintptr_t)a->a2;
+        if (!user_range_writable((uint64_t)(uintptr_t)out, sizeof(uint64_t))) {
+            return -EFAULT;
+        }
+        *out = t->fs_base;
+        return 0;
+    }
+    // ARCH_SET_GS / ARCH_GET_GS are deliberately absent. NeoOS uses GS
+    // for its own per-CPU block: on kernel entry GS_BASE holds the
+    // per-CPU pointer and KERNEL_GS_BASE holds userland's, so setting
+    // "the user GS base" from a syscall means writing the swapped MSR,
+    // and getting that subtly wrong corrupts this_cpu() for every
+    // thread on the CPU. No libc uses it on x86-64. Recorded in
+    // docs/stdlib.md.
+    return -EINVAL;
+}
+
 static int64_t sys_futex(struct syscall_args *a) {
     // Linux's argument order, unchanged: uaddr, op, val, timeout. The
     // fifth and sixth (uaddr2, val3) belong to REQUEUE and the BITSET
@@ -638,6 +681,7 @@ static const struct syscall_desc syscall_table[SYS_MAX] = {
     [SYS_GETCPU]          = { sys_getcpu,          "getcpu" },
     [SYS_FUTEX]           = { sys_futex,           "futex" },
     [SYS_PIPE2]           = { sys_pipe2,           "pipe2" },
+    [SYS_ARCH_PRCTL]      = { sys_arch_prctl,      "arch_prctl" },
 };
 
 // Asserts what the table's shape is supposed to guarantee. Cheap, and

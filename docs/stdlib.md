@@ -530,3 +530,80 @@ from userland:
   What IS shared is the underlying object: both sides hold a reference
   on the same pipe, and the pipe's end counts are what decide EOF and
   `SIGPIPE`, not the number of file descriptors.
+
+## Process startup: `<auxv.h>`, and thread-local storage
+
+A NeoOS process now starts on a real SysV/Linux entry stack. At
+`_start`, `RSP` is 16-byte aligned and points at:
+
+```
+    argc
+    argv[0] .. argv[argc-1], NULL
+    envp[0] .. NULL                 (empty for now, but present)
+    auxv pairs, terminated by AT_NULL
+```
+
+`argv[0]` is the path the program was spawned from. `<auxv.h>` exposes
+`getauxval()` and `environ`.
+
+Supplied auxiliary vector entries: `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`,
+`AT_PAGESZ`, `AT_ENTRY`, `AT_RANDOM`. That is exactly the set musl's
+`__libc_start_main` requires.
+
+### Thread-local storage
+
+`__thread` works. There is no API: the C runtime allocates each
+thread's TLS block from the image's `PT_TLS` template and installs the
+thread pointer, for the main thread at startup and for every other
+thread inside `thread_create`/`pthread_create`.
+
+The layout is x86-64's variant II — the TLS block sits *below* the
+thread pointer, `%fs:0` is a self-pointer — and `%fs` is per-thread,
+saved and restored on every context switch. That last part is not
+optional on NeoOS: threads migrate between CPUs, so a thread arriving
+on a CPU would otherwise inherit whatever thread pointer the previous
+occupant left behind.
+
+```c
+#include <tls.h>
+int arch_prctl(int code, unsigned long addr);   /* ARCH_SET_FS, ARCH_GET_FS */
+```
+
+### Divergences from Linux
+
+- **`ARCH_SET_GS` and `ARCH_GET_GS` return `-EINVAL`.** NeoOS uses
+  `%gs` for its own per-CPU block: on kernel entry `GS_BASE` holds the
+  per-CPU pointer and `KERNEL_GS_BASE` holds userland's, so "set the
+  user GS base" means writing the swapped MSR, and getting that subtly
+  wrong corrupts `this_cpu()` for every thread on that CPU. No x86-64
+  libc uses it.
+- **`AT_RANDOM` is not random.** There is no entropy source; the
+  sixteen bytes are derived from the tick counter and the addresses at
+  hand, so they differ between processes and are worthless against an
+  attacker. musl uses them to seed its stack guard, which is therefore
+  guessable. A real RNG is the fix and is not written yet.
+- **No `AT_BASE`, `AT_SECURE`, `AT_HWCAP`, `AT_CLKTCK`, `AT_UID` and
+  friends.** `AT_BASE` in particular is absent because there is no
+  dynamic linker; a program that finds no `AT_BASE` correctly concludes
+  it is static.
+- **`envp` is always empty.** Nothing sets an environment yet, so
+  `getenv` would always fail. `environ` is a valid, NULL-terminated
+  array rather than a null pointer, so code that walks it works.
+- **Only the local-exec TLS model.** Executables are static and
+  non-PIE, and are built with `-ftls-model=local-exec`. The
+  initial-exec, local-dynamic and general-dynamic models need a dynamic
+  linker and a DTV, which arrive with dynamic linking. `__tls_get_addr`
+  does not exist.
+- **`set_thread_area` / `set_tid_address` do not exist.** `arch_prctl`
+  is the only way to install a thread pointer.
+- **The TLS block is `mmap`ped and never freed** when a thread exits;
+  it is reclaimed with the address space at process exit. Threads are
+  bounded at 16 per process, so the leak is bounded too.
+
+### `<sys/mman.h>`
+
+`mmap`, `munmap` and `mprotect` now have their POSIX shapes —
+`MAP_FAILED` and `-1` rather than a negative errno — alongside the raw
+`mmap_raw`/`munmap_raw` the rest of this library's convention uses.
+Only anonymous private mappings are supported: a non-negative `fd` or a
+non-zero offset returns `MAP_FAILED`.

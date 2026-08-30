@@ -17,6 +17,7 @@
 #include "../cpu_local.h"
 #include "../waitq.h"
 #include "../errno.h"
+#include "../timer.h"
 
 extern void context_switch(uint64_t *old_rsp, uint64_t *new_rsp);
 extern void kernel_thread_entry_trampoline(void);
@@ -149,7 +150,8 @@ void thread_stack_free(struct process *p, int slot) {
 // the result into a process. On failure, returns 0 having freed
 // any partial address space it built -- the caller's own state (if
 // any) is untouched.
-static int build_user_address_space(const char *path, uint64_t *out_pml4_phys, uint64_t *out_entry) {
+static int build_user_address_space(const char *path, uint64_t *out_pml4_phys,
+                                   struct elf_info *out_info) {
     int err = 0;
     struct vnode *vn = vfs_resolve(path, &err);
     if (!vn) {
@@ -175,8 +177,7 @@ static int build_user_address_space(const char *path, uint64_t *out_pml4_phys, u
     pml4[256] = p4_table[256]; // physmap
     pml4[511] = p4_table[511]; // kernel higher-half alias
 
-    uint64_t entry;
-    if (!elf_load(image, size, pml4, &entry)) {
+    if (!elf_load(image, size, pml4, out_info)) {
         kfree(image);
         free_address_space(pml4_phys);
         return 0;
@@ -189,13 +190,126 @@ static int build_user_address_space(const char *path, uint64_t *out_pml4_phys, u
     // thread uses.
 
     *out_pml4_phys = pml4_phys;
-    *out_entry = entry;
     return 1;
 }
 
+// ---------------------------------------------------------- initial stack
+//
+// Builds the SysV/Linux process entry stack in the NEW address space,
+// which is not the one currently in CR3 -- so every write goes through
+// the physmap alias of the stack's own frames rather than through the
+// user virtual address.
+//
+// The layout at _start is fixed by the ABI, bottom-up from RSP:
+//
+//     argc
+//     argv[0] .. argv[argc-1], NULL
+//     envp[0] .. NULL
+//     auxv pairs, terminated by AT_NULL
+//     ... the strings and AT_RANDOM bytes those point at ...
+//
+// and RSP must be 16-byte aligned. Nothing depended on any of this
+// until now -- crt0.asm simply passed argc = 0 -- but TLS does: a
+// static executable cannot find its own PT_TLS template without
+// AT_PHDR, because it has no dynamic section to look it up in. musl's
+// __libc_start_main needs the same vector, which is why building it
+// properly now is worth more than a NeoOS-specific "where is my TLS"
+// syscall would be.
+
+#define AT_NULL   0
+#define AT_PHDR   3
+#define AT_PHENT  4
+#define AT_PHNUM  5
+#define AT_PAGESZ 6
+#define AT_BASE   7
+#define AT_ENTRY  9
+#define AT_RANDOM 25
+
+// Writes `val` at user virtual address `uva` in the address space
+// rooted at pml4_phys, via the physmap. Returns 0 if the address is
+// not mapped, which for a stack page the caller just created would be
+// a bug rather than a user error.
+static int poke_user_u64(uint64_t pml4_phys, uint64_t uva, uint64_t val) {
+    uint64_t phys = paging_translate_in(pml4_phys, uva);
+    if (!phys) { return 0; }
+    *(uint64_t *)phys_to_virt(phys) = val;
+    return 1;
+}
+
+static int poke_user_bytes(uint64_t pml4_phys, uint64_t uva,
+                           const uint8_t *src, uint64_t len) {
+    for (uint64_t i = 0; i < len; i++) {
+        uint64_t phys = paging_translate_in(pml4_phys, uva + i);
+        if (!phys) { return 0; }
+        *(uint8_t *)phys_to_virt(phys) = src[i];
+    }
+    return 1;
+}
+
+// Lays out the entry stack and returns the RSP the program should
+// start on, or 0 on failure. `path` becomes argv[0].
+static uint64_t build_initial_stack(uint64_t pml4_phys, uint64_t stack_top,
+                                    const char *path,
+                                    const struct elf_info *info) {
+    uint64_t sp = stack_top;
+
+    // argv[0]'s bytes, then AT_RANDOM's sixteen. Both live ABOVE the
+    // vector that points at them, since the vector is built downward
+    // from here.
+    uint64_t arg_len = 0;
+    while (path[arg_len]) { arg_len++; }
+    arg_len++;                       // the NUL
+
+    sp -= arg_len;
+    uint64_t argv0 = sp;
+    if (!poke_user_bytes(pml4_phys, argv0, (const uint8_t *)path, arg_len)) { return 0; }
+
+    // AT_RANDOM: sixteen bytes musl uses to seed its stack guard and
+    // its malloc. NOT cryptographic here -- NeoOS has no entropy source
+    // -- and derived from the tick counter and the addresses at hand so
+    // that it at least differs between processes. Recorded as a
+    // divergence in docs/abi-compatibility.md; a real RNG replaces it.
+    sp -= 16;
+    sp &= ~0xFULL;
+    uint64_t at_random = sp;
+    uint64_t mix = timer_ticks() ^ (stack_top >> 12) ^ (info->entry << 7);
+    for (int i = 0; i < 2; i++) {
+        mix = mix * 6364136223846793005ULL + 1442695040888963407ULL;
+        if (!poke_user_u64(pml4_phys, at_random + (uint64_t)i * 8, mix)) { return 0; }
+    }
+
+    // The vector itself: argc(1) + argv(1) + NULL(1) + envp NULL(1)
+    // + 7 auxv pairs, in qwords.
+    const int aux_pairs = 7;
+    uint64_t words = 1 + 1 + 1 + 1 + (uint64_t)aux_pairs * 2;
+    // RSP must be 16-byte aligned AT _start. The vector occupies
+    // `words` qwords above it, so the base is aligned after rounding
+    // the whole block down to 16.
+    sp -= words * 8;
+    sp &= ~0xFULL;
+
+    uint64_t at = sp;
+    #define PUSH(v) do { if (!poke_user_u64(pml4_phys, at, (v))) { return 0; } at += 8; } while (0)
+    PUSH(1);            // argc
+    PUSH(argv0);        // argv[0]
+    PUSH(0);            // argv terminator
+    PUSH(0);            // envp terminator (no environment yet)
+    PUSH(AT_PHDR);   PUSH(info->phdr);
+    PUSH(AT_PHENT);  PUSH(info->phentsize);
+    PUSH(AT_PHNUM);  PUSH(info->phnum);
+    PUSH(AT_PAGESZ); PUSH(PMM_FRAME_SIZE);
+    PUSH(AT_ENTRY);  PUSH(info->entry);
+    PUSH(AT_RANDOM); PUSH(at_random);
+    PUSH(AT_NULL);   PUSH(0);
+    #undef PUSH
+
+    return sp;
+}
+
 struct process *spawn(const char *path) {
-    uint64_t pml4_phys, entry;
-    if (!build_user_address_space(path, &pml4_phys, &entry)) {
+    uint64_t pml4_phys;
+    struct elf_info info;
+    if (!build_user_address_space(path, &pml4_phys, &info)) {
         return 0;
     }
 
@@ -206,6 +320,7 @@ struct process *spawn(const char *path) {
         return 0;
     }
     p->pml4_phys   = pml4_phys;
+    p->elf          = info;   // the auxv and every thread's TLS come from here
     p->parent_pid  = current_proc() ? current_proc()->pid : 0;
     if (current_proc()) { p->pgid = current_proc()->pgid; p->sid = current_proc()->sid; }
 
@@ -228,10 +343,17 @@ struct process *spawn(const char *path) {
     zero_frames(kstack_phys, KERNEL_STACK_ORDER);
     uint64_t kstack_top = (uint64_t)(uintptr_t)phys_to_virt(kstack_phys) + (PMM_FRAME_SIZE << KERNEL_STACK_ORDER);
 
+    uint64_t entry_sp = build_initial_stack(pml4_phys, user_stack_top, path, &info);
+    if (!entry_sp) {
+        serial_write_string("[process] spawn FAILED: could not build the entry stack\n");
+        free_address_space(pml4_phys);
+        return 0;
+    }
+
     uint64_t *sp = (uint64_t *)kstack_top;
     *(--sp) = 0;                                  // arg (unused for a main thread)
-    *(--sp) = user_stack_top;                     // user_rsp, popped by kernel_thread_trampoline
-    *(--sp) = entry;                              // entry_rip, popped by kernel_thread_trampoline
+    *(--sp) = entry_sp;                           // user_rsp, popped by kernel_thread_trampoline
+    *(--sp) = info.entry;                         // entry_rip, popped by kernel_thread_trampoline
     *(--sp) = (uint64_t)kernel_thread_trampoline; // context_switch's `ret` lands here
     *(--sp) = 0; // rbp
     *(--sp) = 0; // rbx
@@ -266,8 +388,9 @@ struct process *spawn(const char *path) {
 // address space is built and validated to completion before the old
 // one is freed, so a bad path or OOM never destroys the caller.
 int exec_task(const char *path, struct syscall_frame *frame) {
-    uint64_t new_pml4_phys, new_entry;
-    if (!build_user_address_space(path, &new_pml4_phys, &new_entry)) {
+    uint64_t new_pml4_phys;
+    struct elf_info info;
+    if (!build_user_address_space(path, &new_pml4_phys, &info)) {
         return 0;
     }
 
@@ -295,8 +418,19 @@ int exec_task(const char *path, struct syscall_frame *frame) {
         return 0; // caller is left running its old program
     }
 
-    frame->rcx = new_entry;       // user RIP the ordinary sysret epilogue will return to
-    frame->user_rsp = user_stack_top;
+    p->elf = info;
+
+    uint64_t entry_sp = build_initial_stack(new_pml4_phys, user_stack_top, path, &info);
+    if (!entry_sp) { return 0; }
+
+    // The new program starts with no thread pointer. Not resetting it
+    // would leave FS pointing into the address space that was just
+    // freed, and the first __thread access in the new image would read
+    // whatever now occupies that physical page.
+    current_thread()->fs_base = 0;
+
+    frame->rcx = info.entry;      // user RIP the ordinary sysret epilogue will return to
+    frame->user_rsp = entry_sp;
 
     return 1;
 }

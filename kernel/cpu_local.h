@@ -60,6 +60,10 @@ struct cpu {
     // than a snapshot of where a handful of test threads happened to
     // land.
     volatile uint64_t steals;
+    // IA32_FS_BASE as this CPU last wrote it, so a context switch that
+    // does not change the thread pointer skips the WRMSR. See
+    // schedule().
+    uint64_t          fs_base_loaded;
 };
 
 _Static_assert(offsetof(struct cpu, self)             == CPU_SELF,     "CPU_SELF");

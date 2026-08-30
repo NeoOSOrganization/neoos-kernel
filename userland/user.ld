@@ -15,10 +15,32 @@ ENTRY(_start)
    PAGE_USER flags via its own default_flags. */
 SECTIONS
 {
-    . = 0x200000000000;
+    /* + SIZEOF_HEADERS so the ELF header and the program header table
+       fall INSIDE the first PT_LOAD segment and therefore have a
+       virtual address at run time. Without it the headers sit at file
+       offset 64 while the segment starts at 0x1000, no loaded segment
+       covers them, and the kernel has no address to put in AT_PHDR --
+       which is the only way a static executable can find its own PT_TLS
+       template. Costs one page of address space and nothing else. */
+    . = 0x200000000000 + SIZEOF_HEADERS;
 
     .text ALIGN(4K) : { *(.text .text.*) }
     .rodata ALIGN(4K) : { *(.rodata .rodata.*) }
     .data ALIGN(4K) : { *(.data .data.*) }
+
+    /* .tdata and .tbss MUST be named here, and in this order. Left as
+       orphan sections the linker placed both at the SAME address --
+       .tbss at 0x...3e60 and .tdata at 0x...3e60 -- so every
+       thread-local in .tdata overlapped one in .tbss and the offsets
+       the compiler emitted bore no relation to where the initialised
+       bytes actually were. The symptom was a __thread int initialised
+       to 0x5a5a reading as 0.
+
+       .tdata comes first because PT_TLS's file-backed part is its
+       leading bytes: p_offset points at .tdata and p_filesz covers only
+       it, with .tbss making up the rest of p_memsz as zero. */
+    .tdata ALIGN(4K) : { *(.tdata .tdata.*) }
+    .tbss : { *(.tbss .tbss.*) *(.tcommon) }
+
     .bss ALIGN(4K) : { *(COMMON) *(.bss .bss.*) }
 }

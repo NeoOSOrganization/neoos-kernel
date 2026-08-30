@@ -144,12 +144,10 @@ int user_range_writable(uint64_t addr, uint64_t len) {
 // own higher-half alias and the physmap are both 2MiB-mapped, so a walk
 // that assumed 4KiB entries throughout would read a 2MiB PD entry as if
 // it pointed at a page table and return a physical address derived from
-// whatever data happened to be in that page.
-#define PAGE_HUGE (1ULL << 7)   // PS, in a PDPT or PD entry
-uint64_t paging_translate_current(uint64_t virt) {
-    uint64_t cr3;
-    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
-    uint64_t *pml4 = (uint64_t *)phys_to_virt(cr3 & PAGE_ADDR_MASK);
+// whatever data happened to be in that page. PAGE_HUGE is the PS bit,
+// meaningful in a PDPT (1GiB) or PD (2MiB) entry.
+uint64_t paging_translate_in(uint64_t pml4_phys, uint64_t virt) {
+    uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys & PAGE_ADDR_MASK);
 
     uint64_t e = pml4[PML4_INDEX(virt)];
     if (!(e & PAGE_PRESENT)) { return 0; }
@@ -172,6 +170,12 @@ uint64_t paging_translate_current(uint64_t virt) {
     e = pt[PT_INDEX(virt)];
     if (!(e & PAGE_PRESENT)) { return 0; }
     return (e & PAGE_ADDR_MASK) | (virt & 0xFFFULL);
+}
+
+uint64_t paging_translate_current(uint64_t virt) {
+    uint64_t cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+    return paging_translate_in(cr3, virt);
 }
 
 uint64_t paging_translate(uint64_t virt) {
