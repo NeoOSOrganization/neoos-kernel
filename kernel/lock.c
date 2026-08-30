@@ -87,6 +87,57 @@ void spin_unlock_irqrestore(struct spinlock *l, uint64_t flags) {
     }
 }
 
+// Address order is the total order. The per-CPU run queue locks live
+// inside cpus[], so address order and CPU-index order are the same
+// order -- and address order also stays correct for any other same-rank
+// pair.
+uint64_t spin_lock_ordered_pair(struct spinlock *a, struct spinlock *b) {
+    if (a == b) { lock_panic("ordered pair given one lock twice", a->name, 0); }
+    struct spinlock *first  = (a < b) ? a : b;
+    struct spinlock *second = (a < b) ? b : a;
+
+    uint64_t flags;
+    __asm__ volatile ("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
+
+    if (!lock_rank_ok(first->rank)) {
+        lock_panic("rank inversion", first->name, "see previous acquire");
+    }
+    struct cpu *c = this_cpu();
+    if (c->held_depth + 2 > LOCK_MAX_HELD) {
+        lock_panic("held-lock stack overflow", first->name, 0);
+    }
+
+    while (__atomic_exchange_n(&first->locked, 1u, __ATOMIC_ACQUIRE)) {
+        __asm__ volatile ("pause");
+    }
+    while (__atomic_exchange_n(&second->locked, 1u, __ATOMIC_ACQUIRE)) {
+        __asm__ volatile ("pause");
+    }
+    // Both ranks are recorded, so the checker still sees the true depth
+    // and still rejects a third lock of this rank.
+    c->held_ranks[c->held_depth++] = first->rank;
+    c->held_ranks[c->held_depth++] = second->rank;
+    return flags;
+}
+
+void spin_unlock_ordered_pair(struct spinlock *a, struct spinlock *b,
+                              uint64_t flags) {
+    struct cpu *c = this_cpu();
+    if (c->held_depth < 2) {
+        lock_panic("ordered-pair unlock with <2 held", a->name, 0);
+    }
+    c->held_depth -= 2;
+    struct spinlock *first  = (a < b) ? a : b;
+    struct spinlock *second = (a < b) ? b : a;
+    // Reverse of acquisition, by convention; release order does not
+    // affect correctness.
+    __atomic_store_n(&second->locked, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&first->locked,  0u, __ATOMIC_RELEASE);
+    if (flags & (1ULL << 9)) {
+        __asm__ volatile ("sti");
+    }
+}
+
 void lock_selftest(void) {
     struct spinlock outer, inner;
     spin_init(&outer, LOCK_RANK_PROCESS, "selftest-outer");
@@ -133,6 +184,29 @@ void lock_selftest(void) {
         serial_write_string("[lock] selftest FAILED: lock still held\n");
         return;
     }
+
+    // Two locks of EQUAL rank are an inversion for the normal path, and
+    // must stay one -- work stealing is the only caller allowed to hold
+    // two run queues, and it goes through the ordered-pair helper.
+    struct spinlock qa, qb;
+    spin_init(&qa, LOCK_RANK_RUNQUEUE, "selftest-queue-a");
+    spin_init(&qb, LOCK_RANK_RUNQUEUE, "selftest-queue-b");
+
+    uint64_t fp = spin_lock_ordered_pair(&qa, &qb);
+    if (lock_held_depth() != 2) {
+        serial_write_string("[lock] selftest FAILED: ordered pair depth\n");
+        return;
+    }
+    if (qa.locked != 1 || qb.locked != 1) {
+        serial_write_string("[lock] selftest FAILED: ordered pair did not lock both\n");
+        return;
+    }
+    spin_unlock_ordered_pair(&qa, &qb, fp);
+    if (lock_held_depth() != 0 || qa.locked != 0 || qb.locked != 0) {
+        serial_write_string("[lock] selftest FAILED: ordered pair not released\n");
+        return;
+    }
+
     serial_write_string("[lock] selftest passed\n");
 }
 

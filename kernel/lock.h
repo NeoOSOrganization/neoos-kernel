@@ -23,20 +23,32 @@
 #define LOCK_RANK_PROCTABLE   0
 #define LOCK_RANK_PROCESS     1
 #define LOCK_RANK_THREAD      2
-#define LOCK_RANK_MOUNTTABLE  3
-#define LOCK_RANK_VNODEHASH   4
-#define LOCK_RANK_VNODE       5
-#define LOCK_RANK_BLOCKDEV    6
-#define LOCK_RANK_DRIVER      7
-#define LOCK_RANK_RUNQUEUE    8
-#define LOCK_RANK_FDTABLE     9  // NEW: file descriptor table (per-bucket locks, after VFS)
-#define LOCK_RANK_HEAP       10
-#define LOCK_RANK_PMM        11
+// Per-process address space (vma list + pml4). Sits LOW, not up beside
+// HEAP where its allocation behaviour would suggest: a demand-paging
+// fault takes this lock and then reads through the filesystem, so it
+// must be above nothing in VFS -- and such a fault can sleep, so it must
+// be below RUNQUEUE. Next to HEAP it inverts on the first mmap-backed
+// page fault.
+#define LOCK_RANK_MM          3
+#define LOCK_RANK_MOUNTTABLE  4
+#define LOCK_RANK_VNODEHASH   5
+#define LOCK_RANK_VNODE       6
+#define LOCK_RANK_BLOCKDEV    7
+#define LOCK_RANK_DRIVER      8
+// Per-wait-queue. Above every lock legally held across waitq_sleep() (a
+// mutex passes its own guard in as `release`, carrying the mutex's
+// rank), and below RUNQUEUE, since the sleep path reaches schedule()
+// after the queue is updated.
+#define LOCK_RANK_WAITQ       9
+#define LOCK_RANK_RUNQUEUE   10
+#define LOCK_RANK_FDTABLE    11  // file descriptor table (per-bucket locks, after VFS)
+#define LOCK_RANK_HEAP       12
+#define LOCK_RANK_PMM        13
 // The signal-queue pool: a leaf allocator taken while a process's
 // sig_lock (rank 1) is held, and holding nothing itself. It sits
 // innermost rather than beside sig_lock because equal ranks are an
 // inversion -- acquisition must be strictly ascending.
-#define LOCK_RANK_SIGQUEUE   12
+#define LOCK_RANK_SIGQUEUE   14
 // Leaf lock: rank above every other, so it is always legal to take and
 // can be acquired from anywhere -- including while holding any other
 // lock. Whatever holds it must never acquire another lock.
@@ -53,6 +65,15 @@ struct spinlock {
 void     spin_init(struct spinlock *l, uint8_t rank, const char *name);
 uint64_t spin_lock_irqsave(struct spinlock *l);
 void     spin_unlock_irqrestore(struct spinlock *l, uint64_t flags);
+
+// Acquires two locks of the SAME rank. Only legal for the work-stealing
+// path, which must hold two run queues at once. Equal ranks are an
+// inversion for the normal checker and stay one; safety here comes from
+// a consistent global order instead -- both locks are taken in address
+// order, so no two CPUs can build a cycle. `a` and `b` must differ.
+uint64_t spin_lock_ordered_pair(struct spinlock *a, struct spinlock *b);
+void     spin_unlock_ordered_pair(struct spinlock *a, struct spinlock *b,
+                                  uint64_t flags);
 
 // Returns 1 if acquiring `rank` right now would be legal on this CPU.
 // Exists so the selftest can prove the checker detects an inversion

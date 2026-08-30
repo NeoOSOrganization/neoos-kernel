@@ -111,6 +111,17 @@ static inline void schedule_restore_if(uint64_t saved_flags) {
 }
 
 void schedule(void) {
+    // Entering schedule() with a spinlock held deadlocks every other CPU
+    // the moment SMP is real: the lock is released only when this thread
+    // runs again, and this thread runs again only when some other CPU
+    // makes progress. On one CPU it silently "works", which is exactly
+    // why it needs an assertion rather than a comment. waitq_sleep
+    // already releases the caller's guard before calling us; this makes
+    // that an enforced invariant rather than an accident.
+    if (lock_held_depth() != 0) {
+        lock_panic("schedule() with a spinlock held", "schedule", 0);
+    }
+
     // schedule() is NOT reentrant, and until this cli it ran with
     // interrupts enabled. Between `current = next` and the
     // context_switch() below, `current` already names the incoming
