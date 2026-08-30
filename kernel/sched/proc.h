@@ -112,6 +112,14 @@ struct thread {
     // inline array because the size is only known at run time -- see
     // the extended-state design spec.
     void *xstate;
+
+    // Hash table linkage (NEW: replacing linear scan)
+    struct thread *tid_next_hash;   // hash bucket chain (RCU-protected)
+
+    // RCU deferred cleanup (NEW: for safe deallocation)
+    struct rcu_head rcu;           // for synchronize_rcu() cleanup
+
+    // Legacy (DEPRECATED: being replaced by hash table)
     struct thread *proc_next;       // sibling / zombie list link
     struct thread *next;            // ready-queue link
 };
