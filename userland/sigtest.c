@@ -190,6 +190,45 @@ static int check_stop_continue(void) {
     return 1;
 }
 
+// Hammers the SIGSTOP/SIGCONT handshake, which is a race and not a
+// sequence: the SIGCONT is sent immediately after the SIGSTOP, so it
+// often lands while the child is somewhere inside its own stop path
+// rather than parked at the end of it.
+//
+// The kernel used to lose such a continue -- it looked at a thread that
+// was still RUNNING, found nothing to wake, and the thread stopped a
+// moment later and never ran again. The failure mode is therefore a
+// HANG in wait4 below, not a wrong status: this test passing at all is
+// the assertion. The delay is varied per round so the pair lands at
+// different points in the path.
+#define STOP_RACE_ROUNDS 10
+
+static int check_stop_continue_race(void) {
+    for (int round = 0; round < STOP_RACE_ROUNDS; round++) {
+        int child = fork();
+        if (child < 0) { printf("[sigtest] FAILED: fork for stop race\n"); return 0; }
+        if (child == 0) {
+            for (volatile long i = 0; i < 8000000L; i++) { }
+            exit(9);
+        }
+
+        for (volatile int i = 0; i < 200000; i++) { }   // let it get going
+        kill(child, SIGSTOP);
+        for (volatile int i = 0; i < round * 300; i++) { }
+        kill(child, SIGCONT);
+
+        int st = 0;
+        int rc = wait4(child, &st, 0, 0);
+        if (rc != child || !WIFEXITED(st) || WEXITSTATUS(st) != 9) {
+            printf("[sigtest] FAILED: stop/cont race round=%d rc=%d st=%d\n",
+                   round, rc, st);
+            return 0;
+        }
+    }
+    printf("[sigtest] SIGSTOP/SIGCONT race passed\n");
+    return 1;
+}
+
 static int check_signalled_status(void) {
     int child = fork();
     if (child < 0) { printf("[sigtest] FAILED: fork for kill\n"); return 0; }
@@ -289,6 +328,7 @@ int main(int argc, char **argv) {
     ok &= check_eintr();
     ok &= check_segv();
     ok &= check_stop_continue();
+    ok &= check_stop_continue_race();
     ok &= check_signalled_status();
     ok &= check_rt_queueing();
 

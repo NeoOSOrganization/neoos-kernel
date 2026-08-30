@@ -122,6 +122,11 @@ struct thread {
     struct sigqueue *queued;
     sigset_t_k    saved_blocked;    // sigsuspend / sigreturn
     int           in_sigsuspend;
+    // Set under p->sig_lock the moment this thread takes a stop signal
+    // out of its pending set, cleared under the same lock by SIGCONT
+    // and by the stop itself. It is what lets a SIGCONT cancel a stop
+    // that has been decided but not yet committed -- see signal_do_stop.
+    int           stopping;
     stack_t_k     altstack;         // sigaltstack; zeroed = none
     // cpu_state_size() bytes, 64-byte aligned. A pointer rather than an
     // inline array because the size is only known at run time -- see

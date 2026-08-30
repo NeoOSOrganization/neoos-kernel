@@ -302,6 +302,12 @@ void signal_do_stop(struct thread *t, int sig) {
     }
 
     uint64_t f = spin_lock_irqsave(&p->sig_lock);
+    if (!t->stopping) {
+        // A SIGCONT overtook us between taking the signal and getting
+        // here. Nothing to do: the continue already cleared the stop.
+        spin_unlock_irqrestore(&p->sig_lock, f);
+        return;
+    }
     p->stopped_count++;
     // The process counts as stopped only when EVERY thread has parked;
     // reporting a half-complete group stop to wait4 would be a lie.
@@ -315,14 +321,43 @@ void signal_do_stop(struct thread *t, int sig) {
     if (all_stopped) { p->stop_reported = 0; }
     spin_unlock_irqrestore(&p->sig_lock, f);
 
+    // BEFORE parking, not after: a thread that has already published
+    // THREAD_STOPPED can be preempted before it reaches this line and
+    // then never runs again until SIGCONT -- leaving the parent asleep
+    // in wait4 waiting for the very stop report that is stuck here.
     if (all_stopped) {
         struct process *parent = proc_find(p->parent_pid);
         if (parent) { waitq_wake_all(&parent->child_waiters); }
     }
 
-    __asm__ volatile ("cli");
-    t->state = THREAD_STOPPED;
-    __asm__ volatile ("sti");
+    // The commit, and the whole point of `stopping`.
+    //
+    // THE LOST WAKEUP THIS REPLACES: the old code flipped
+    // t->state = THREAD_STOPPED behind a bare cli/sti while
+    // signal_do_continue tested that same field from another CPU. A
+    // SIGCONT landing after the thread had decided to stop but before
+    // the flip saw a RUNNING thread, found nothing to wake, and the
+    // thread parked a moment later and never came back (observed as
+    // sigtest hanging after "SIGSEGV on sigaltstack"). Ordering the two
+    // the other way is no better: the continue then requeues a thread
+    // that is still running toward schedule().
+    //
+    // Publishing THREAD_STOPPED under the same lock that
+    // signal_do_continue clears `stopping` under makes the two
+    // exclusive. Either the continue gets here first, and this
+    // abandons the stop; or this publishes the state, and the continue
+    // is guaranteed to see THREAD_STOPPED and wake it. thread_wake()
+    // then handles the remaining hazard -- that the thread has not yet
+    // finished leaving its CPU.
+    f = spin_lock_irqsave(&p->sig_lock);
+    if (!t->stopping) {
+        spin_unlock_irqrestore(&p->sig_lock, f);
+        return;
+    }
+    t->stopping = 0;
+    t->state    = THREAD_STOPPED;
+    spin_unlock_irqrestore(&p->sig_lock, f);
+
     schedule();
     // Resumed by SIGCONT.
 }
@@ -331,10 +366,19 @@ void signal_do_continue(struct process *p) {
     uint64_t f = spin_lock_irqsave(&p->sig_lock);
     sigset_del(&p->pending, SIGSTOP);
     p->stopped_count = 0;
+    for (struct thread *t = p->threads; t; t = t->proc_next) {
+        // Clearing the pending bit cancels a stop that has not been
+        // taken yet; clearing `stopping` cancels one that has been
+        // taken but not yet committed. Together they cover every point
+        // a thread can be at on its way into signal_do_stop.
+        sigset_del(&t->pending, SIGSTOP);
+        t->stopping = 0;
+    }
     spin_unlock_irqrestore(&p->sig_lock, f);
 
+    // Outside the lock: thread_wake can spin waiting for a thread to
+    // finish leaving its CPU, and it takes a run queue lock.
     for (struct thread *t = p->threads; t; t = t->proc_next) {
-        sigset_del(&t->pending, SIGSTOP);
         thread_wake(t, THREAD_STOPPED);
     }
 }
@@ -359,6 +403,13 @@ extern void sigreturn_to_user(struct iret_ctx *ctx) __attribute__((noreturn));
 void signal_take_pending(struct thread *t, int sig, struct siginfo *out) {
     struct process *p = t->proc;
     uint64_t f = spin_lock_irqsave(&p->sig_lock);
+
+    // The atomic point of "this thread is going to stop". Once the
+    // signal leaves the pending set, a SIGCONT arriving afterwards can
+    // no longer cancel the stop by clearing the pending bit -- there is
+    // no bit left to clear -- so it has to cancel this flag instead.
+    // Both happen under sig_lock, which is what makes them exclusive.
+    if (signal_default_action(sig) == SIGACT_STOP) { t->stopping = 1; }
 
     struct sigqueue **head = 0;
     if (sigset_test(t->pending, sig)) {
