@@ -27,7 +27,13 @@
 struct vnode_slab {
     struct vnode_slab *next;           // linked list of slabs
     struct vnode slots[VNODE_SLAB_SIZE];
-    int in_use_count;                  // count of allocated vnodes in this slab
+    // Occupancy is tracked HERE, not inferred from the vnode's own
+    // refcount/mount fields. A freshly handed-out slot still reads as
+    // refcount 0 / mount 0 until its caller fills it in, so inferring
+    // occupancy hands the same slot to a second caller that allocates
+    // in that window.
+    uint16_t used_mask;                // bit i set => slots[i] allocated
+    int in_use_count;                  // popcount of used_mask
 };
 
 struct vnode_slab_pool {

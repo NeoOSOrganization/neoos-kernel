@@ -339,12 +339,9 @@ int vfs_open_into(const char *path, struct process *p, int fd, int writable) {
     struct vnode *vn = vfs_resolve(path, &err);
     if (!vn) { return err; }
 
-    // Use old files[] array for now (fd_table integration will come later)
-    if (fd < MAX_OPEN_FILES) {
-        p->files[fd].in_use = 1;
-        p->files[fd].vn = vn;
-        p->files[fd].position = 0;
-        p->files[fd].writable = writable;
+    if (!fd_table_put(p->fd_table, fd, vn, writable)) {
+        vnode_put(vn);   // slot already taken, or out of memory
+        return -EMFILE;
     }
 
     return 0;

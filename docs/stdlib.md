@@ -74,7 +74,9 @@ alongside the library code that exposes it.
 
 - `int open(const char *path, int flags)` — opens (or, with
   `O_CREAT`, creates) the file at `path`. Returns a file descriptor,
-  or a negative `<errno.h>` code on failure.
+  or a negative `<errno.h>` code on failure. The lowest free
+  descriptor at or above 3 is returned; a process may hold up to
+  16,384 descriptors at once.
 - `O_RDONLY`, `O_WRONLY`, `O_RDWR`, `O_CREAT`, `O_TRUNC`, `O_APPEND`
   flag constants.
 
@@ -221,9 +223,11 @@ convention.
   negative, or an unrecognized `whence`).
 - `ENFILE` (23) — the system-wide open-file table is full. Distinct
   from `EMFILE`, which is per-process.
-- `EMFILE` (24) — the process's file descriptor table is full (16
-  entries, of which 0/1/2 are the standard streams, so 13 files at
-  once, maximum).
+- `EMFILE` (24) — the process's file descriptor table is full (16,384
+  entries, of which 0/1/2 are the standard streams, so 16,381 files at
+  once, maximum). The table is sparse: a process pays only for the
+  512-entry blocks it actually reaches, so the ceiling costs nothing
+  until it is approached.
 - `EDEADLK` (35) — `thread_join` called on the calling thread itself.
 - `ETIMEDOUT` (110) — a timed wait expired (`rt_sigtimedwait`).
 - `ENOSPC` (28) — disk full (no free cluster), the mount table is

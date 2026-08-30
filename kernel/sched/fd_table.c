@@ -13,38 +13,63 @@ static inline unsigned fd_slot(int fd) {
     return (unsigned)fd % FD_TABLE_SLOTS;
 }
 
+static void slots_clear(struct file_descriptor *slots, int n) {
+    for (int i = 0; i < n; i++) {
+        slots[i].in_use   = 0;
+        slots[i].vn       = 0;
+        slots[i].position = 0;
+        slots[i].writable = 0;
+    }
+}
+
+// Returns the bucket's level-2 slot array, allocating it on first use.
+// MUST be called with the bucket lock held. kmalloc's heap lock ranks
+// ABOVE LOCK_RANK_FDTABLE, so taking it here is legal ascending order --
+// and doing the allocation inside the lock is what makes the lazy
+// allocation atomic. (The earlier version dropped the lock to allocate,
+// which let two callers install two arrays and leak one of them, with
+// the loser's file descriptors silently vanishing.)
+static struct file_descriptor *bucket_slots(struct fd_bucket *b) {
+    if (b->slots) {
+        return b->slots;
+    }
+    struct file_descriptor *slots = (struct file_descriptor *)kmalloc(
+        FD_TABLE_SLOTS * sizeof(struct file_descriptor));
+    if (!slots) {
+        return 0;
+    }
+    slots_clear(slots, FD_TABLE_SLOTS);
+    b->slots = slots;
+    return slots;
+}
+
 void fd_table_init(struct fd_table *table) {
     if (!table) return;
 
-    // Initialize all buckets (level 1)
     for (int i = 0; i < FD_TABLE_BUCKETS; i++) {
         spin_init(&table->buckets[i].lock, LOCK_RANK_FDTABLE, "fd_bucket");
         table->buckets[i].slots = 0;  // lazy allocation
         table->buckets[i].slot_count = 0;
     }
 
-    table->fd_count = 0;
     table->next_alloc = 0;
-    // count_lock has higher rank to prevent inversions with bucket locks
-    spin_init(&table->count_lock, LOCK_RANK_SIGQUEUE, "fd_count");
 }
 
+// Lockless, like the flat files[] array it replaces. `slots` is only
+// ever installed, never swapped or freed while the process runs, so a
+// racing allocation can make this miss a brand-new fd but can never
+// make it read freed memory.
 struct file_descriptor *fd_table_get(struct fd_table *table, int fd) {
     if (!table || fd < 0 || fd >= FD_TABLE_MAX) {
         return 0;
     }
 
-    unsigned bucket_idx = fd_bucket(fd);
-    unsigned slot_idx = fd_slot(fd);
-
-    struct fd_bucket *b = &table->buckets[bucket_idx];
-
-    // If bucket hasn't been allocated yet, FD doesn't exist
+    struct fd_bucket *b = &table->buckets[fd_bucket(fd)];
     if (!b->slots) {
-        return 0;
+        return 0;   // bucket never allocated, so the fd cannot be open
     }
 
-    struct file_descriptor *f = &b->slots[slot_idx];
+    struct file_descriptor *f = &b->slots[fd_slot(fd)];
     return f->in_use ? f : 0;
 }
 
@@ -52,69 +77,42 @@ int fd_table_alloc(struct fd_table *table) {
     if (!table) return -EMFILE;
 
     for (int attempt = 0; attempt < FD_TABLE_BUCKETS; attempt++) {
-        unsigned bucket_idx = table->next_alloc;
+        unsigned bucket_idx =
+            (unsigned)((table->next_alloc + attempt) % FD_TABLE_BUCKETS);
         struct fd_bucket *b = &table->buckets[bucket_idx];
 
-        uint64_t bucket_flags = spin_lock_irqsave(&b->lock);
+        uint64_t flags = spin_lock_irqsave(&b->lock);
 
-        // Lazy allocate level-2 slots if needed
-        if (!b->slots) {
-            spin_unlock_irqrestore(&b->lock, bucket_flags);
-
-            // Allocate 512-entry slot array (without holding any locks)
-            b->slots = (struct file_descriptor *)kmalloc(
-                FD_TABLE_SLOTS * sizeof(struct file_descriptor));
-            if (!b->slots) {
-                return -EMFILE;  // OOM
-            }
-
-            // Zero-initialize all slots
-            for (int i = 0; i < FD_TABLE_SLOTS; i++) {
-                b->slots[i].in_use = 0;
-                b->slots[i].vn = 0;
-                b->slots[i].position = 0;
-                b->slots[i].writable = 0;
-            }
-
-            // Retry the bucket lock acquisition after allocation
-            bucket_flags = spin_lock_irqsave(&b->lock);
+        struct file_descriptor *slots = bucket_slots(b);
+        if (!slots) {
+            spin_unlock_irqrestore(&b->lock, flags);
+            return -EMFILE;   // OOM
         }
 
-        // Find first unused slot in this bucket
-        for (unsigned slot_idx = 0; slot_idx < FD_TABLE_SLOTS; slot_idx++) {
-            if (!b->slots[slot_idx].in_use) {
-                int fd = bucket_idx * FD_TABLE_SLOTS + slot_idx;
+        // Bucket 0's first three slots are fds 0/1/2, handed out by
+        // fd_table_put at process creation and never by this allocator.
+        unsigned first = (bucket_idx == 0) ? FD_STDIO_COUNT : 0;
+        for (unsigned slot_idx = first; slot_idx < FD_TABLE_SLOTS; slot_idx++) {
+            if (slots[slot_idx].in_use) { continue; }
 
-                // Skip FDs 0-2 (stdin, stdout, stderr) on first allocation
-                if (fd < 3) continue;
+            slots[slot_idx].in_use   = 1;  // caller fills in vnode/position
+            slots[slot_idx].vn       = 0;
+            slots[slot_idx].position = 0;
+            slots[slot_idx].writable = 0;
+            b->slot_count++;
 
-                // Mark as in-use (caller will fill in vnode, position, writable)
-                b->slots[slot_idx].in_use = 1;
-                b->slot_count++;
+            // A hint only; a stale value costs a wasted scan, never
+            // correctness, so it needs no lock of its own.
+            table->next_alloc = (int)bucket_idx;
 
-                // Update next_alloc hint for next search
-                if (slot_idx + 1 < FD_TABLE_SLOTS) {
-                    table->next_alloc = bucket_idx;
-                } else {
-                    table->next_alloc = (bucket_idx + 1) % FD_TABLE_BUCKETS;
-                }
-
-                // Update global FD count
-                uint64_t count_flags = spin_lock_irqsave(&table->count_lock);
-                table->fd_count++;
-                spin_unlock_irqrestore(&table->count_lock, count_flags);
-
-                spin_unlock_irqrestore(&b->lock, bucket_flags);
-                return fd;
-            }
+            spin_unlock_irqrestore(&b->lock, flags);
+            return (int)(bucket_idx * FD_TABLE_SLOTS + slot_idx);
         }
 
-        // This bucket is full, try next one
-        spin_unlock_irqrestore(&b->lock, bucket_flags);
-        table->next_alloc = (bucket_idx + 1) % FD_TABLE_BUCKETS;
+        spin_unlock_irqrestore(&b->lock, flags);
     }
 
-    return -EMFILE;  // All buckets full
+    return -EMFILE;   // every bucket full
 }
 
 void fd_table_close(struct fd_table *table, int fd) {
@@ -122,182 +120,149 @@ void fd_table_close(struct fd_table *table, int fd) {
         return;
     }
 
-    unsigned bucket_idx = fd_bucket(fd);
-    unsigned slot_idx = fd_slot(fd);
-
-    struct fd_bucket *b = &table->buckets[bucket_idx];
-
+    struct fd_bucket *b = &table->buckets[fd_bucket(fd)];
     if (!b->slots) {
-        return;  // Bucket not allocated, FD doesn't exist
+        return;
     }
 
-    uint64_t bucket_flags = spin_lock_irqsave(&b->lock);
+    uint64_t flags = spin_lock_irqsave(&b->lock);
 
-    struct file_descriptor *f = &b->slots[slot_idx];
+    struct vnode *vn = 0;
+    struct file_descriptor *f = &b->slots[fd_slot(fd)];
     if (f->in_use) {
-        // Release vnode reference if held
-        if (f->vn) {
-            vnode_put(f->vn);
-            f->vn = 0;
-        }
-
-        f->in_use = 0;
+        vn = f->vn;
+        f->in_use   = 0;
+        f->vn       = 0;
         f->position = 0;
         f->writable = 0;
-
         b->slot_count--;
-
-        // Update global FD count
-        uint64_t count_flags = spin_lock_irqsave(&table->count_lock);
-        table->fd_count--;
-        spin_unlock_irqrestore(&table->count_lock, count_flags);
     }
 
-    spin_unlock_irqrestore(&b->lock, bucket_flags);
+    spin_unlock_irqrestore(&b->lock, flags);
+
+    // Deliberately outside the bucket lock: vnode_put writes the inode
+    // back through the filesystem, which takes locks of LOWER rank
+    // (BLOCKDEV, DRIVER) and can sleep. Dropping the last reference
+    // while holding a rank-9 spinlock would trip the rank checker.
+    if (vn) {
+        vnode_put(vn);
+    }
 }
 
-// Direct FD setter: used during process startup for FDs 0-2
-// Assumes FD table bucket for this FD is not yet allocated
-// WARNING: Must NOT be called while holding any other locks
+// Direct fd setter, used at process creation for fds 0-2. Must not be
+// called while holding another lock of rank >= LOCK_RANK_FDTABLE.
 int fd_table_put(struct fd_table *table, int fd, struct vnode *vn, int writable) {
     if (!table || fd < 0 || fd >= FD_TABLE_MAX || !vn) {
         return 0;
     }
 
-    unsigned bucket_idx = fd_bucket(fd);
+    struct fd_bucket *b = &table->buckets[fd_bucket(fd)];
     unsigned slot_idx = fd_slot(fd);
 
-    struct fd_bucket *b = &table->buckets[bucket_idx];
+    uint64_t flags = spin_lock_irqsave(&b->lock);
 
-    uint64_t bucket_flags = spin_lock_irqsave(&b->lock);
-
-    // Lazy allocate if needed
-    if (!b->slots) {
-        spin_unlock_irqrestore(&b->lock, bucket_flags);
-
-        b->slots = (struct file_descriptor *)kmalloc(
-            FD_TABLE_SLOTS * sizeof(struct file_descriptor));
-        if (!b->slots) {
-            return 0;  // OOM
-        }
-
-        // Zero-initialize
-        for (int i = 0; i < FD_TABLE_SLOTS; i++) {
-            b->slots[i].in_use = 0;
-            b->slots[i].vn = 0;
-            b->slots[i].position = 0;
-            b->slots[i].writable = 0;
-        }
-
-        bucket_flags = spin_lock_irqsave(&b->lock);
+    struct file_descriptor *slots = bucket_slots(b);
+    if (!slots) {
+        spin_unlock_irqrestore(&b->lock, flags);
+        return 0;   // OOM
     }
 
-    // Set the FD
-    if (!b->slots[slot_idx].in_use) {
-        b->slots[slot_idx].in_use = 1;
-        b->slots[slot_idx].vn = vn;
-        b->slots[slot_idx].position = 0;
-        b->slots[slot_idx].writable = writable;
+    int placed = 0;
+    if (!slots[slot_idx].in_use) {
+        slots[slot_idx].in_use   = 1;
+        slots[slot_idx].vn       = vn;
+        slots[slot_idx].position = 0;
+        slots[slot_idx].writable = writable;
         b->slot_count++;
-
-        uint64_t count_flags = spin_lock_irqsave(&table->count_lock);
-        table->fd_count++;
-        spin_unlock_irqrestore(&table->count_lock, count_flags);
+        placed = 1;
     }
 
-    spin_unlock_irqrestore(&b->lock, bucket_flags);
-    return 1;
+    spin_unlock_irqrestore(&b->lock, flags);
+    return placed;
 }
 
 void fd_table_free(struct fd_table *table) {
     if (!table) return;
 
-    // Close all open FDs (which releases vnode references)
     for (int bucket_idx = 0; bucket_idx < FD_TABLE_BUCKETS; bucket_idx++) {
         struct fd_bucket *b = &table->buckets[bucket_idx];
 
-        if (b->slots) {
-            for (int slot_idx = 0; slot_idx < FD_TABLE_SLOTS; slot_idx++) {
-                struct file_descriptor *f = &b->slots[slot_idx];
-                if (f->in_use && f->vn) {
-                    vnode_put(f->vn);
-                    f->vn = 0;
-                }
-            }
-            kfree(b->slots);
-            b->slots = 0;
-        }
-    }
+        // Detach the array first, then walk it unlocked: vnode_put may
+        // sleep, so it cannot run under the bucket lock (see
+        // fd_table_close). Nothing else can reach the array once
+        // b->slots is cleared.
+        uint64_t flags = spin_lock_irqsave(&b->lock);
+        struct file_descriptor *slots = b->slots;
+        b->slots = 0;
+        b->slot_count = 0;
+        spin_unlock_irqrestore(&b->lock, flags);
 
-    table->fd_count = 0;
+        if (!slots) { continue; }
+
+        for (int slot_idx = 0; slot_idx < FD_TABLE_SLOTS; slot_idx++) {
+            if (slots[slot_idx].in_use && slots[slot_idx].vn) {
+                vnode_put(slots[slot_idx].vn);
+                slots[slot_idx].vn = 0;
+            }
+        }
+        kfree(slots);
+    }
 }
 
 int fd_table_dup(struct fd_table *dst, struct fd_table *src) {
     if (!dst || !src) return 0;
 
-    // Iterate through all buckets in source table
     for (int bucket_idx = 0; bucket_idx < FD_TABLE_BUCKETS; bucket_idx++) {
         struct fd_bucket *src_b = &src->buckets[bucket_idx];
-
-        if (!src_b->slots) {
-            continue;  // This bucket empty in source, skip it
-        }
-
-        // Allocate corresponding bucket in destination
         struct fd_bucket *dst_b = &dst->buckets[bucket_idx];
 
-        uint64_t dst_flags = spin_lock_irqsave(&dst_b->lock);
-
-        if (!dst_b->slots) {
-            spin_unlock_irqrestore(&dst_b->lock, dst_flags);
-
-            dst_b->slots = (struct file_descriptor *)kmalloc(
-                FD_TABLE_SLOTS * sizeof(struct file_descriptor));
-            if (!dst_b->slots) {
-                return 0;  // OOM
-            }
-
-            // Zero-initialize
-            for (int i = 0; i < FD_TABLE_SLOTS; i++) {
-                dst_b->slots[i].in_use = 0;
-                dst_b->slots[i].vn = 0;
-                dst_b->slots[i].position = 0;
-                dst_b->slots[i].writable = 0;
-            }
-
-            dst_flags = spin_lock_irqsave(&dst_b->lock);
+        if (!src_b->slots) {
+            continue;   // empty in the parent, so nothing to inherit
         }
 
-        // Copy all slots from source bucket to destination
-        uint64_t src_flags = spin_lock_irqsave(&src_b->lock);
+        // Only the source is locked. `dst` belongs to a process that
+        // does not exist yet -- nothing else can reach it -- and taking
+        // two locks of the same rank is an inversion the rank checker
+        // panics on.
+        uint64_t flags = spin_lock_irqsave(&src_b->lock);
+
+        struct file_descriptor *dst_slots = bucket_slots(dst_b);
+        if (!dst_slots) {
+            spin_unlock_irqrestore(&src_b->lock, flags);
+            return 0;   // OOM; caller unwinds via fd_table_free
+        }
 
         for (int slot_idx = 0; slot_idx < FD_TABLE_SLOTS; slot_idx++) {
-            struct file_descriptor *src_f = &src_b->slots[slot_idx];
-            struct file_descriptor *dst_f = &dst_b->slots[slot_idx];
+            struct file_descriptor *s = &src_b->slots[slot_idx];
+            if (!s->in_use) { continue; }
 
-            if (src_f->in_use) {
-                dst_f->in_use = 1;
-                dst_f->vn = src_f->vn;
-                dst_f->position = 0;  // NOT shared across fork per docs/stdlib.md
-                dst_f->writable = src_f->writable;
-
-                // Increment vnode reference since child now holds it
-                if (dst_f->vn) {
-                    dst_f->vn->refcount++;
-                }
-
-                dst_b->slot_count++;
+            dst_slots[slot_idx] = *s;   // position included: the child
+                                        // inherits the offset, then the
+                                        // two diverge (docs/stdlib.md)
+            // The copy duplicates the vnode POINTER, so the child owes
+            // the cache its own reference; without this the first close
+            // on either side would free a vnode the other still holds.
+            if (dst_slots[slot_idx].vn) {
+                dst_slots[slot_idx].vn->refcount++;
             }
+            dst_b->slot_count++;
         }
 
-        spin_unlock_irqrestore(&src_b->lock, src_flags);
-        spin_unlock_irqrestore(&dst_b->lock, dst_flags);
-
-        // Update destination fd_count
-        uint64_t count_flags = spin_lock_irqsave(&dst->count_lock);
-        dst->fd_count += dst_b->slot_count;
-        spin_unlock_irqrestore(&dst->count_lock, count_flags);
+        spin_unlock_irqrestore(&src_b->lock, flags);
     }
 
-    return 1;  // Success
+    return 1;
+}
+
+int fd_table_count(struct fd_table *table) {
+    if (!table) return 0;
+
+    int total = 0;
+    for (int i = 0; i < FD_TABLE_BUCKETS; i++) {
+        struct fd_bucket *b = &table->buckets[i];
+        uint64_t flags = spin_lock_irqsave(&b->lock);
+        total += b->slot_count;
+        spin_unlock_irqrestore(&b->lock, flags);
+    }
+    return total;
 }

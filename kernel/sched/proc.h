@@ -11,10 +11,6 @@
 #include "../mm/vma.h"
 #include "../sync/rcu.h"
 
-// 16 entries indexed DIRECTLY by fd. /dev/CONSOLE is a real vnode
-// opened on 0, 1 and 2 at process creation, so the fd IS the index.
-// The table belongs to the PROCESS: threads share it.
-#define MAX_OPEN_FILES 16
 #define KERNEL_STACK_ORDER 2 // 4 frames = 16KiB
 
 // Mirrors syscall_entry.asm's saved-register block exactly, in
@@ -56,8 +52,11 @@ struct process {
     uint64_t pml4_phys;             // 0 = shares the kernel address space
     struct vma *vmas;               // sorted by start, non-overlapping
     uint64_t    mmap_next;          // bump hint for unhinted mmap
-    struct fd_table *fd_table;      // 2-level file descriptor table (NEW)
-    struct file_descriptor files[MAX_OPEN_FILES];  // DEPRECATED: kept for transition
+    // Indexed DIRECTLY by fd -- /dev/CONSOLE is a real vnode opened on
+    // 0, 1 and 2 at process creation, so the fd IS the index. The table
+    // belongs to the PROCESS: threads share it. See fd_table.h for the
+    // 2-level layout and the 16,384-fd ceiling.
+    struct fd_table *fd_table;
     struct thread *threads;         // live threads, via thread->proc_next
     struct thread *zombies;         // exited, unjoined; freed at reap
     struct thread_table *thread_table;  // per-process thread hash table (NEW)

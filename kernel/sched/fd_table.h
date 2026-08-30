@@ -7,24 +7,29 @@
 /*
  * 2-level sparse file descriptor table
  *
- * Scales from 16 FDs to 10,000+ FDs per process efficiently.
- * Uses lazy allocation: only allocates level-2 slots when needed.
+ * Replaces the flat 16-entry files[] array that used to live in
+ * struct process. Scales to 16,384 fds per process without paying for
+ * them up front: only the level-2 arrays a process actually reaches
+ * are allocated.
  *
- * Level 1: 32 buckets (always allocated)
- * Level 2: 512-entry slots per bucket (allocated on demand)
- * Max FDs: 32 * 512 = 16,384
+ * Level 1: 32 buckets (inline in the table, always present)
+ * Level 2: 512 slots per bucket (allocated on first use)
+ * Max fds: 32 * 512 = 16,384
  *
- * Lookup: bucket = fd / 512, slot = fd % 512
- * All accesses are O(1) average case.
+ * Lookup: bucket = fd / 512, slot = fd % 512. O(1).
  *
- * Lock hierarchy:
- *   bucket_lock[i] protects buckets[i]->slots
- *   Rank: LOCK_RANK_FDTABLE (acquired before thread_table locks)
+ * Locking: buckets[i].lock protects buckets[i], rank LOCK_RANK_FDTABLE.
+ * Reads (fd_table_get) are lockless -- a slot array is installed once
+ * and never swapped while the process lives.
  */
 
 #define FD_TABLE_BUCKETS       32     // Level 1: bucket count
 #define FD_TABLE_SLOTS         512    // Level 2: slots per bucket
 #define FD_TABLE_MAX           (FD_TABLE_BUCKETS * FD_TABLE_SLOTS)  // 16,384
+
+// fds 0/1/2 are opened on /dev/CONSOLE at process creation and are
+// never handed out by fd_table_alloc.
+#define FD_STDIO_COUNT         3
 
 // Forward declare file_descriptor (defined in proc.h)
 struct file_descriptor;
@@ -39,9 +44,7 @@ struct fd_bucket {
 // Level 1: the table itself
 struct fd_table {
     struct fd_bucket buckets[FD_TABLE_BUCKETS];
-    int fd_count;           // total open FDs across all buckets
-    struct spinlock count_lock;
-    int next_alloc;         // hint for alloc_fd (bucket index)
+    int next_alloc;         // hint: bucket index to start the next scan at
 };
 
 // Forward declare vnode for use in callbacks
@@ -54,21 +57,28 @@ void fd_table_init(struct fd_table *table);
 // Get a file descriptor entry (returns NULL if out of range or not in use)
 struct file_descriptor *fd_table_get(struct fd_table *table, int fd);
 
-// Allocate the next available FD >= 3 (stdin/stdout/stderr reserved)
-// Returns FD number, or -EMFILE if table full
+// Reserve the lowest available fd >= 3 (stdin/stdout/stderr excluded).
+// The slot is marked in-use with a NULL vnode; the caller fills it in,
+// or hands it back with fd_table_close on failure.
+// Returns the fd number, or -EMFILE if the table is full.
 int fd_table_alloc(struct fd_table *table);
 
-// Mark FD as unused and release vnode reference if held
+// Release an fd, dropping its vnode reference if it holds one.
 void fd_table_close(struct fd_table *table, int fd);
 
-// Direct FD setter (used during process startup for FDs 0-2)
-// WARNING: Must NOT be called while holding other locks
+// Direct fd setter (used during process startup for fds 0-2).
+// Returns 1 if the slot was placed, 0 if it was taken or on OOM.
 int fd_table_put(struct fd_table *table, int fd, struct vnode *vn, int writable);
 
-// Free all FD entries and allocated buckets (during process cleanup)
+// Close every fd and free the level-2 arrays. Leaves the table itself
+// valid (and empty) so the caller can free it separately.
 void fd_table_free(struct fd_table *table);
 
-// Copy FD table from parent to child (used in fork)
+// Copy a parent's table into a freshly initialised child table (fork).
+// Returns 1 on success, 0 on OOM.
 int fd_table_dup(struct fd_table *dst, struct fd_table *src);
+
+// Total open fds. Diagnostic; walks every bucket.
+int fd_table_count(struct fd_table *table);
 
 #endif

@@ -45,6 +45,56 @@ static int roundtrip(const char *path, const char *label) {
     return 1;
 }
 
+// The fd table's own contract, checked directly rather than inferred
+// from the roundtrips: close has to REPORT success, a second close of
+// the same fd has to fail, and a process has to be able to hold far
+// more than the 16 fds the old flat array allowed.
+#define FD_BURST 64
+
+static int fd_lifecycle(void) {
+    int fd = open("/tmp/FDTEST.TXT", O_CREAT | O_RDWR | O_TRUNC);
+    if (fd < 3) {
+        printf("[vfstest] fd lifecycle FAILED: open returned %d\n", fd);
+        return 0;
+    }
+    int rc = close(fd);
+    if (rc != 0) {
+        printf("[vfstest] fd lifecycle FAILED: close returned %d (want 0)\n", rc);
+        return 0;
+    }
+    rc = close(fd);
+    if (rc >= 0) {
+        printf("[vfstest] fd lifecycle FAILED: double close returned %d (want < 0)\n", rc);
+        return 0;
+    }
+
+    int fds[FD_BURST];
+    for (int i = 0; i < FD_BURST; i++) {
+        fds[i] = open("/tmp/FDTEST.TXT", O_RDONLY);
+        if (fds[i] < 3) {
+            printf("[vfstest] fd lifecycle FAILED: open %d returned %d\n", i, fds[i]);
+            for (int j = 0; j < i; j++) { close(fds[j]); }
+            return 0;
+        }
+        for (int j = 0; j < i; j++) {
+            if (fds[j] == fds[i]) {
+                printf("[vfstest] fd lifecycle FAILED: fd %d handed out twice\n", fds[i]);
+                for (int k = 0; k <= i; k++) { close(fds[k]); }
+                return 0;
+            }
+        }
+    }
+    for (int i = 0; i < FD_BURST; i++) {
+        if (close(fds[i]) != 0) {
+            printf("[vfstest] fd lifecycle FAILED: close of fd %d\n", fds[i]);
+            return 0;
+        }
+    }
+
+    printf("[vfstest] fd lifecycle passed (%d concurrent fds)\n", FD_BURST);
+    return 1;
+}
+
 static void list(const char *path) {
     DIR *d = opendir(path);
     if (!d) {
@@ -66,6 +116,7 @@ int main(int argc, char **argv) {
     ok &= roundtrip("/RT.TXT",     "fat16 (/)");
     ok &= roundtrip("/tmp/RT.TXT", "ramfs (/tmp)");
     ok &= roundtrip("/mnt/RT.TXT", "fat32 (/mnt)");
+    ok &= fd_lifecycle();
 
     // Two fds on one path must share a vnode: the write through `a`
     // has to be visible through `b` with no reopen in between.

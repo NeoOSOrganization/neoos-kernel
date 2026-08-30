@@ -26,19 +26,32 @@ add_library(kernel_sources OBJECT
     kernel/lapic.c
     kernel/pic.c
     kernel/pit.c
-    kernel/process.c
     kernel/serial.c
+    kernel/signal.c
     kernel/syscall.c
     kernel/timer.c
     kernel/tss.c
     kernel/vga.c
+    kernel/waitq.c
+    kernel/cpu_local.c
+    kernel/lock.c
     kernel/mm/heap.c
     kernel/mm/paging.c
     kernel/mm/pmm.c
+    kernel/mm/vma.c
     kernel/fs/vfs.c
+    kernel/fs/vnode_slab.c
     kernel/fs/fatfs.c
     kernel/fs/ramfs.c
     kernel/fs/devfs.c
+    kernel/sched/proc.c
+    kernel/sched/sched.c
+    kernel/sched/thread.c
+    kernel/sched/proc_table.c
+    kernel/sched/thread_table.c
+    kernel/sched/fd_table.c
+    kernel/sched/pid_alloc.c
+    kernel/sync/rcu.c
 )
 
 target_include_directories(kernel_sources PRIVATE kernel)

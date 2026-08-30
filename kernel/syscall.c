@@ -94,58 +94,23 @@ static struct mutex fs_lock;
 #define fs_lock_acquire() mutex_lock(&fs_lock)
 #define fs_lock_release() mutex_unlock(&fs_lock)
 
-// FD table helpers: unified interface for old files[] array and new fd_table
-// During transition, these provide compatibility for both backends.
+// Every fd access in this file goes through these three, so the
+// backing store is named in exactly one place.
 
 static struct file_descriptor *fd_get(struct process *p, int fd) {
-    if (!p || fd < 0 || fd >= MAX_OPEN_FILES) {
-        return 0;
-    }
-
-    // TODO: Use fd_table when available (Phase 5b+ integration)
-    // For now, use only the old files[] array
-    struct file_descriptor *f = &p->files[fd];
-    return f->in_use ? f : 0;
+    if (!p) { return 0; }
+    return fd_table_get(p->fd_table, fd);
 }
 
 static int fd_alloc(struct process *p) {
     if (!p) return -EMFILE;
-
-    // TODO: Use fd_table when available (Phase 5b+ integration)
-    // For now, use only the old files[] array (slots 3+ are available)
-    for (int i = 3; i < MAX_OPEN_FILES; i++) {
-        if (!p->files[i].in_use) {
-            p->files[i].in_use = 1;  // Mark as allocated (caller fills in vnode)
-            return i;
-        }
-    }
-
-    return -EMFILE;
+    return fd_table_alloc(p->fd_table);
 }
 
 static int fd_close(struct process *p, int fd) {
     if (!p || fd < 0) return -EBADF;
-
-    // Use fd_table if available
-    if (p->fd_table) {
-        struct file_descriptor *f = fd_table_get(p->fd_table, fd);
-        if (!f) return -EBADF;
-        fd_table_close(p->fd_table, fd);
-        return 0;
-    }
-
-    // Fall back to old files[] array
-    if (fd >= MAX_OPEN_FILES) return -EBADF;
-
-    struct file_descriptor *f = &p->files[fd];
-    if (!f->in_use) return -EBADF;
-
-    vnode_put(f->vn);
-    f->vn = 0;
-    f->in_use = 0;
-    f->position = 0;
-    f->writable = 0;
-
+    if (!fd_table_get(p->fd_table, fd)) return -EBADF;
+    fd_table_close(p->fd_table, fd);
     return 0;
 }
 
@@ -242,6 +207,10 @@ static int64_t syscall_dispatch_inner(int64_t num, int64_t a1, int64_t a2, int64
             int slot = fd_alloc(task);
             if (slot < 0) { return -EMFILE; }
 
+            // Every failure exit from here on must hand the reserved
+            // slot back, or a process that fails N opens loses N fds
+            // for good. fd_close is safe on a slot that never got a
+            // vnode: it only drops a reference if one is there.
             fs_lock_acquire();
 
             int err = 0;
@@ -249,18 +218,19 @@ static int64_t syscall_dispatch_inner(int64_t num, int64_t a1, int64_t a2, int64
             if (!vn && (flags & O_CREAT)) {
                 char name[VFS_NAME_MAX];
                 struct vnode *dir = vfs_resolve_parent(path_buf, name, &err);
-                if (!dir) { fs_lock_release(); return err; }
+                if (!dir) { fs_lock_release(); fd_close(task, slot); return err; }
                 uint64_t new_id;
                 int rc = dir->mount->ops->create(dir, name, &new_id);
-                if (rc != 0) { vnode_put(dir); fs_lock_release(); return rc; }
+                if (rc != 0) { vnode_put(dir); fs_lock_release(); fd_close(task, slot); return rc; }
                 vn = vnode_get(dir->mount, new_id);
                 vnode_put(dir);
-                if (!vn) { fs_lock_release(); return -ENFILE; }
+                if (!vn) { fs_lock_release(); fd_close(task, slot); return -ENFILE; }
             }
-            if (!vn) { fs_lock_release(); return err; }
+            if (!vn) { fs_lock_release(); fd_close(task, slot); return err; }
             if (vn->type == VNODE_DIR && (flags & (O_WRONLY | O_RDWR))) {
                 vnode_put(vn);
                 fs_lock_release();
+                fd_close(task, slot);
                 return -EISDIR;
             }
             if (flags & O_TRUNC) {
@@ -272,6 +242,7 @@ static int64_t syscall_dispatch_inner(int64_t num, int64_t a1, int64_t a2, int64
             struct file_descriptor *f = fd_get(task, slot);
             if (!f) {
                 vnode_put(vn);
+                fd_close(task, slot);
                 return -EBADF;
             }
             f->vn = vn;   // the reference vfs_resolve/vnode_get took is now the fd's

@@ -422,14 +422,13 @@ struct thread *fork_task(struct syscall_frame *frame) {
     child_proc->pgid        = parent->pgid;
     child_proc->sid         = parent->sid;
     child_proc->stack_slots = parent->stack_slots;
-    for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        child_proc->files[i] = parent->files[i]; // copied by value -- see docs/stdlib.md
-        // The copy duplicates the vnode POINTER, so the child owes the
-        // cache its own reference; without this the first close on
-        // either side would free a vnode the other still holds.
-        if (child_proc->files[i].in_use && child_proc->files[i].vn) {
-            child_proc->files[i].vn->refcount++;
-        }
+    // Copied by value, references included -- see docs/stdlib.md.
+    if (!fd_table_dup(child_proc->fd_table, parent->fd_table)) {
+        serial_write_string("[process] fork FAILED: out of memory for fd table\n");
+        fd_table_free(child_proc->fd_table);
+        pmm_free(kstack_phys, KERNEL_STACK_ORDER);
+        free_address_space(child_pml4_phys);
+        return 0;
     }
 
     // POSIX: only the CALLING thread is duplicated. The child starts
@@ -532,13 +531,7 @@ void proc_put(struct process *p) {
     // Release the process's file descriptors. With refcounted vnodes,
     // leaving these open would pin them permanently and make umount
     // report -EBUSY forever.
-    for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        if (p->files[i].in_use && p->files[i].vn) {
-            vnode_put(p->files[i].vn);
-            p->files[i].vn = 0;
-            p->files[i].in_use = 0;
-        }
-    }
+    fd_table_free(p->fd_table);
 
     p->state = PROC_ZOMBIE;
     waitq_wake_all(&p->exit_waiters);
@@ -608,7 +601,15 @@ static void proc_reap(struct process *p) {
     }
     p->zombies = 0;
 
-    // Free per-process thread table before removing from process table
+    // Free the per-process tables before removing from the process
+    // table. task_exit already released every fd; this drops the
+    // level-2 arrays of anything opened after it (there is nothing) and
+    // then the table struct itself.
+    if (p->fd_table) {
+        fd_table_free(p->fd_table);
+        kfree(p->fd_table);
+        p->fd_table = 0;
+    }
     if (p->thread_table) {
         kfree(p->thread_table);
         p->thread_table = 0;
