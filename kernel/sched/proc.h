@@ -43,6 +43,7 @@ struct file_descriptor {
 
 struct thread;
 struct sigqueue;
+struct thread_table;  // opaque; defined in thread_table.h
 
 struct process {
     int pid, parent_pid;
@@ -57,6 +58,7 @@ struct process {
     struct file_descriptor files[MAX_OPEN_FILES];
     struct thread *threads;         // live threads, via thread->proc_next
     struct thread *zombies;         // exited, unjoined; freed at reap
+    struct thread_table *thread_table;  // per-process thread hash table (NEW)
     uint16_t stack_slots;           // bitmap of live thread user stacks
     int exiting;
     int exit_code;

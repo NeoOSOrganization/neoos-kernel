@@ -4,6 +4,7 @@
 
 #include "sched.h"
 #include "proc_table.h"
+#include "thread_table.h"
 #include "../mm/pmm.h"
 #include "../mm/paging.h"
 #include "../mm/heap.h"
@@ -35,6 +36,12 @@ static struct process *proc_alloc(void) {
     struct process *p = (struct process *)kmalloc(sizeof(struct process));
     if (!p) { return 0; }
     for (unsigned i = 0; i < sizeof(struct process); i++) { ((uint8_t *)p)[i] = 0; }
+
+    // Allocate per-process thread table
+    struct thread_table *tt = (struct thread_table *)kmalloc(sizeof(struct thread_table));
+    if (!tt) { kfree(p); return 0; }
+    thread_table_init(tt);
+    p->thread_table = tt;
 
     p->pid   = alloc_id();  // Uses new proc_table_alloc_pid()
     p->state = PROC_ALIVE;
@@ -591,6 +598,12 @@ static void proc_reap(struct process *p) {
         z = next;
     }
     p->zombies = 0;
+
+    // Free per-process thread table before removing from process table
+    if (p->thread_table) {
+        kfree(p->thread_table);
+        p->thread_table = 0;
+    }
 
     // Remove from new hash-based process table (uses RCU deferred cleanup)
     proc_table_remove(p);

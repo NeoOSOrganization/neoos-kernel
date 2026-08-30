@@ -3,6 +3,7 @@
 // unchanged, only relocated.
 
 #include "sched.h"
+#include "thread_table.h"
 #include "../mm/pmm.h"
 #include "../mm/paging.h"
 #include "../mm/heap.h"
@@ -72,6 +73,12 @@ struct thread *thread_alloc(struct process *p) {
     cpu_state_init(t->xstate);
     signal_init_thread(t);
     if (p) {
+        // Add to per-process thread table (if initialized)
+        if (p->thread_table) {
+            thread_table_insert(p->thread_table, t->tid, t);
+        }
+
+        // Keep proc_next for backward compat during transition
         t->proc_next = p->threads;
         p->threads   = t;
         p->refcount++;
@@ -117,6 +124,11 @@ void thread_exit_self(int code) {
     t->state     = THREAD_ZOMBIE;
 
     if (p) {
+        // Remove from per-process thread table (if initialized)
+        if (p->thread_table) {
+            thread_table_remove(p->thread_table, t);
+        }
+
         // Unlink from the live list, then park on the zombie list. We
         // cannot free our own kernel stack -- we are running on it --
         // so thread_join or wait_for_pid's reap frees it later.
