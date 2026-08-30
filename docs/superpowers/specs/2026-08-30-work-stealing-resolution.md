@@ -196,10 +196,17 @@ BSP before it printed. Three new selftests back the three new
 invariants, and each was verified by reverting its fix and watching it
 fail (the per-CPU MSR one reports `cpu=1 lstar=0`).
 
-`sigtest` gained a SIGSTOP/SIGCONT race loop. It could not fail before
-this milestone — with user threads confined to one CPU a parent's
-`SIGSTOP` and `SIGCONT` are serialised and the child never runs between
-them — and becomes a real regression test now that user threads migrate.
+`sigtest` gained a SIGSTOP/SIGCONT race loop.
+
+**It is a smoke test, not a proven reproducer, and §5.1's fix rests on
+construction rather than on it.** Reverting the fix was tried twice —
+before migration, when a parent's `SIGSTOP` and `SIGCONT` are serialised
+and the child never runs between them, and after, when it does — and the
+suite passed both times. The vulnerable window is the few microseconds
+between a thread taking the stop signal out of its pending set and
+publishing `THREAD_STOPPED`, and ten rounds do not land in it. Making
+this deterministic needs a deliberate widening of that window behind a
+debug switch; that is worth doing, and is not done here.
 
 ## 8. Known gaps
 
