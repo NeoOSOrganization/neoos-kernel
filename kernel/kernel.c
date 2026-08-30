@@ -25,6 +25,7 @@
 #include "waitq.h"
 #include "signal.h"
 #include "cpu_local.h"
+#include "smp.h"
 
 void kmain(void *multiboot_info) {
     serial_init();
@@ -59,6 +60,9 @@ void kmain(void *multiboot_info) {
 
     struct acpi_info acpi;
     acpi_find_madt(&acpi);
+
+    smp_topology_init(&acpi);
+    smp_topology_selftest();
 
     pic_disable();
     serial_write_string("[pic] disabled\n");

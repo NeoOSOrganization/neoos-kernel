@@ -37,6 +37,15 @@ struct madt_entry_header {
     uint8_t length;
 } __attribute__((packed));
 
+// MADT type 0. `flags` bit 0 = Enabled, bit 1 = Online Capable; either
+// one means the OS may start this CPU.
+struct madt_lapic {
+    struct madt_entry_header header;
+    uint8_t  acpi_processor_id;
+    uint8_t  apic_id;
+    uint32_t flags;
+} __attribute__((packed));
+
 struct madt_ioapic {
     struct madt_entry_header header;
     uint8_t ioapic_id;
@@ -139,6 +148,7 @@ static void parse_madt(struct acpi_madt *madt, struct acpi_info *info) {
     info->irq1_gsi = 1;
     info->irq1_polarity = 0;
     info->irq1_trigger = 0;
+    info->cpu_count = 0;
 
     uint8_t *ptr = (uint8_t *)madt + sizeof(struct acpi_madt);
     uint8_t *end = (uint8_t *)madt + madt->header.length;
@@ -146,7 +156,15 @@ static void parse_madt(struct acpi_madt *madt, struct acpi_info *info) {
     while (ptr < end) {
         struct madt_entry_header *entry = (struct madt_entry_header *)ptr;
 
-        if (entry->type == 1) {
+        if (entry->type == 0) {
+            struct madt_lapic *lapic = (struct madt_lapic *)ptr;
+            if ((lapic->flags & 0x3) && info->cpu_count < ACPI_MAX_CPUS) {
+                struct acpi_cpu *c = &info->cpus[info->cpu_count++];
+                c->acpi_id  = lapic->acpi_processor_id;
+                c->lapic_id = lapic->apic_id;
+                c->usable   = 1;
+            }
+        } else if (entry->type == 1) {
             struct madt_ioapic *ioapic = (struct madt_ioapic *)ptr;
             info->ioapic_address = ioapic->ioapic_address;
             info->ioapic_gsi_base = ioapic->gsi_base;
@@ -189,5 +207,6 @@ void acpi_find_madt(struct acpi_info *info) {
     serial_write_string(" ioapic_gsi_base="); serial_write_hex64(info->ioapic_gsi_base);
     serial_write_string("\n[acpi] irq0_gsi="); serial_write_hex64(info->irq0_gsi);
     serial_write_string(" irq1_gsi="); serial_write_hex64(info->irq1_gsi);
+    serial_write_string("\n[acpi] cpus="); serial_write_hex64(info->cpu_count);
     serial_write_string("\n");
 }
