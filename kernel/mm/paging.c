@@ -1,5 +1,6 @@
 #include "paging.h"
 #include "pmm.h"
+#include "../tlb.h"
 #include "serial.h"
 
 #define PAGE_HUGE (1ULL << 7) // 2MiB page at the PD level
@@ -92,7 +93,10 @@ int paging_unmap_from(uint64_t *pml4, uint64_t virt, int free_frame) {
     pt[PT_INDEX(virt)] = 0;
     __asm__ volatile ("invlpg (%0)" :: "r"(virt) : "memory");
     if (free_frame) {
-        pmm_free(phys, 0);
+        // NOT pmm_free: the frame must not be reusable until every CPU
+        // that might hold a stale TLB entry for it has acknowledged a
+        // shootdown. The local invlpg above only covers THIS CPU.
+        tlb_defer_free(phys, 0);
     }
     return 1;
 }

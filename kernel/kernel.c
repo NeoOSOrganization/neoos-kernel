@@ -25,6 +25,7 @@
 #include "waitq.h"
 #include "signal.h"
 #include "cpu_local.h"
+#include "tlb.h"
 #include "smp.h"
 
 void kmain(void *multiboot_info) {
@@ -93,6 +94,7 @@ void kmain(void *multiboot_info) {
 
     heap_init();
     heap_selftest();
+    tlb_init();
     // AFTER heap_init: vma_insert allocates, so this cannot run against
     // an uninitialised heap. It used to sit before heap_init and worked
     // by accident -- class_pages is BSS-zero either way -- until
@@ -160,6 +162,7 @@ void kmain(void *multiboot_info) {
     smp_start_aps();
     smp_online_selftest();
     smp_reschedule_ipi_selftest();
+    tlb_shootdown_selftest();
     smp_parallel_selftest_start();
 
     serial_write_string("NeoOS: interrupts enabled, starting scheduler\n");

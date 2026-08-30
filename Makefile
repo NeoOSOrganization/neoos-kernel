@@ -217,6 +217,18 @@ run: iso disk-image
 BOOT_TIMEOUT ?= 60
 BOOT_MARKER  ?= NeoOS: interrupts enabled, starting scheduler
 
+# A suite that never RUNS is not a pass. Grepping only for FAILED lets a
+# silently-missing suite look identical to a green one -- which it did,
+# until a scheduler bug stopped three of the five from ever reporting and
+# `make test` still said PASS. grep -F because "[vfstest]" is a character
+# class to a regex, and would never match the literal brackets.
+REQUIRED_MARKERS := \
+	"[vfstest] ALL PASSED" \
+	"[avxtest] ALL PASSED" \
+	"[mmaptest] ALL PASSED" \
+	"[threadtest] ALL PASSED" \
+	"[sigtest] ALL PASSED"
+
 # The fat16 WRITE selftest creates /NEWDIR and /RT.TXT on the real disk
 # image, and the image persists between runs -- so on the second boot
 # mkdir(/NEWDIR) fails with "already exists" and every later `make test`
@@ -235,7 +247,10 @@ test: fresh-disks iso disk-image
 	@if ! grep -q '$(BOOT_MARKER)' $(BUILD_DIR)/serial.log; then \
 		echo "BOOT DID NOT COMPLETE (no marker: '$(BOOT_MARKER)')"; \
 		tail -30 $(BUILD_DIR)/serial.log; exit 1; fi
-	@echo "PASS: no FAILED lines, boot reached the scheduler"
+	@for m in $(REQUIRED_MARKERS); do \
+		if ! grep -qF "$$m" $(BUILD_DIR)/serial.log; then \
+			echo "MISSING EXPECTED RESULT: $$m"; exit 1; fi; done
+	@echo "PASS: no FAILED lines, boot reached the scheduler, all suites reported"
 
 clean:
 	rm -rf $(BUILD_DIR) $(ISO_DIR)

@@ -3,6 +3,7 @@
 #include "vga.h"
 #include "timer.h"
 #include "smp.h"
+#include "tlb.h"
 #include "lapic.h"
 #include "keyboard.h"
 #include "mm/paging.h"
@@ -146,6 +147,11 @@ static void isr_handler_inner(struct registers *regs) {
         // logging stops completely the moment a switch happens mid-handler).
         lapic_send_eoi();
         timer_handler();
+        return;
+    }
+
+    if (regs->vector_number == VECTOR_IPI_TLB) {
+        ipi_tlb_handler();
         return;
     }
 

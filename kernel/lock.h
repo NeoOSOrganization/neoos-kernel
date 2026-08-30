@@ -50,6 +50,11 @@
 // innermost rather than beside sig_lock because equal ranks are an
 // inversion -- acquisition must be strictly ascending.
 #define LOCK_RANK_SIGQUEUE   14
+// TLB shootdown bookkeeping: the deferred-free queue is filled from
+// paging_unmap_from, which runs UNDER a process's mm_lock (rank 3), so
+// it must rank strictly below it. It is a leaf -- tlb_flush_deferred
+// releases it before calling pmm_free.
+#define LOCK_RANK_TLB        15
 // Leaf lock: rank above every other, so it is always legal to take and
 // can be acquired from anywhere -- including while holding any other
 // lock. Whatever holds it must never acquire another lock.
