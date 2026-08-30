@@ -55,6 +55,11 @@ struct cpu {
     // is the one direct evidence that this CPU is actually being
     // preempted rather than merely looking busy.
     volatile uint64_t timer_ticks_local;
+    // Threads this CPU has taken from another CPU's queue. Read by the
+    // steal selftest, which needs a fact about the mechanism rather
+    // than a snapshot of where a handful of test threads happened to
+    // land.
+    volatile uint64_t steals;
 };
 
 _Static_assert(offsetof(struct cpu, self)             == CPU_SELF,     "CPU_SELF");

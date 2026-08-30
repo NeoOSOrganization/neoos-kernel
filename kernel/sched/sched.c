@@ -197,6 +197,7 @@ static struct thread *steal_work(struct cpu *self) {
     // Re-checked under the lock: the victim may have been drained
     // between the scan and the acquire.
     struct thread *t = victim->ready_count > 0 ? ready_pop(victim) : 0;
+    if (t) { self->steals++; }   // under the lock; only this CPU writes it
     spin_unlock_ordered_pair(&self->ready_lock, &victim->ready_lock, f);
     return t;
 }
