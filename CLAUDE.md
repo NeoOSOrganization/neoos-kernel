@@ -44,3 +44,39 @@ Do not leave a user-facing kernel feature exposed only via a raw
 syscall number with no library support. `docs/stdlib.md` documents the
 NeoOS extensions and the deliberate divergences, not a whole libc;
 musl documents itself.
+
+## Linux ABI compatibility
+
+**Internals are ours; the ABI is not.** Anything that never crosses
+into userland — kernel data structures, internal calling conventions,
+lock ranks, NeoOS's own syscall numbers, scheduler and memory
+internals — may be designed, renamed, and reshaped freely. There is no
+obligation to resemble Linux inside the kernel.
+
+But **the long-term goal is to run real Linux applications on NeoOS
+without patching them**. So wherever a kernel primitive is
+*observable* from a user-mode program, it must be Linux-SHAPED:
+
+- struct layouts crossing the boundary (`stat`, `dirent`, `timespec`,
+  `sigaction`, `utsname`, ...) match Linux's x86_64 field order,
+  sizes, and padding
+- flag and constant values (`O_*`, `PROT_*`, `MAP_*`, `SIG*`, `AT_*`,
+  `CLOCK_*`, errno numbers) match Linux's values
+- semantics match Linux's where an application could tell the
+  difference — return values, error codes, edge-case behaviour
+- the auxv/ELF entry contract, TLS setup, and signal frame layout
+  follow the x86_64 SysV + Linux conventions
+
+The syscall *numbers* stay NeoOS's own; the shim translates those. It
+is the shapes and semantics behind the numbers that must not diverge,
+because no shim can retrofit a struct layout an application compiled
+against.
+
+**Every deliberate divergence from Linux must be recorded in
+`docs/stdlib.md`** with its reason. An unrecorded divergence is a bug,
+not a design choice.
+
+At the end of each milestone, refresh `docs/abi-compatibility.md`: what
+of the Linux ABI is implemented, what is stubbed, what diverges and
+why, and what a real ported application would still hit. If that file
+does not exist yet, the milestone that first needs it creates it.
