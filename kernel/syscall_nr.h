@@ -1,0 +1,70 @@
+#ifndef NEOOS_SYSCALL_NR_H
+#define NEOOS_SYSCALL_NR_H
+
+// NeoOS's own syscall numbering.
+//
+// These numbers are INTERNAL and deliberately unlike Linux's: per
+// /CLAUDE.md, the numbers stay ours and the musl shim translates them.
+// What must not diverge is what sits behind them -- struct layouts,
+// flag values, semantics. So a number here may be renumbered freely;
+// the SHAPE of the call may not.
+//
+// The numbers are dense and assigned in the order features landed, with
+// two historical exceptions (30/31 and 33-36 were filled in after 32
+// and 37-39). Dispatch is a table indexed by this number, so a gap
+// costs one null pointer and nothing else -- but SYS_MAX must always be
+// one past the highest number in use, or the table silently truncates.
+//
+// Keep in sync with docs/abi-compatibility.md's syscall inventory.
+
+#define SYS_EXIT            0
+#define SYS_WRITE           1
+#define SYS_YIELD           2
+#define SYS_GETPID          3
+#define SYS_SPAWN           4
+#define SYS_WAIT            5
+#define SYS_READ            6
+#define SYS_OPEN            7
+#define SYS_CLOSE           8
+#define SYS_MKDIR           9
+#define SYS_UNLINK          10
+#define SYS_LSEEK           11
+#define SYS_FORK            12
+#define SYS_EXEC            13
+#define SYS_MOUNT           14
+#define SYS_UMOUNT          15
+#define SYS_GETDENTS        16
+#define SYS_THREAD_CREATE   17
+#define SYS_THREAD_EXIT     18
+#define SYS_THREAD_JOIN     19
+#define SYS_THREAD_SELF     20
+#define SYS_RT_SIGACTION    21
+#define SYS_RT_SIGPROCMASK  22
+#define SYS_RT_SIGRETURN    23
+#define SYS_RT_SIGPENDING   24
+#define SYS_RT_SIGSUSPEND   25
+#define SYS_RT_SIGTIMEDWAIT 26
+#define SYS_RT_SIGQUEUEINFO 27
+#define SYS_SIGALTSTACK     28
+#define SYS_KILL            29
+#define SYS_TKILL           30
+#define SYS_TGKILL          31
+#define SYS_WAIT4           32
+#define SYS_SETPGID         33
+#define SYS_GETPGID         34
+#define SYS_SETSID          35
+#define SYS_GETSID          36
+#define SYS_MMAP            37
+#define SYS_MUNMAP          38
+#define SYS_MPROTECT        39
+// SMP visibility. Linux exposes these through sysconf(3) and
+// sched_getcpu(3), which are library calls over sysfs/vDSO rather than
+// syscalls of their own -- NeoOS gives them real syscall numbers, and
+// the library presents the POSIX shapes on top. See docs/stdlib.md.
+#define SYS_CPU_COUNT       40
+#define SYS_GETCPU          41
+
+// One past the highest number in use. The dispatch table is this long.
+#define SYS_MAX             42
+
+#endif

@@ -139,6 +139,7 @@ void kmain(void *multiboot_info) {
     process_init();
     runqueue_lock_selftest();
     syscall_init();
+    syscall_table_selftest();
 
     // BEFORE the spawns, and before any kernel thread exists.
     //
