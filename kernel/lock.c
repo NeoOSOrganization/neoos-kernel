@@ -1,4 +1,5 @@
 #include "lock.h"
+#include "smp.h"
 #include "cpu_local.h"
 #include "serial.h"
 
@@ -13,6 +14,10 @@ static void panic_puts(const char *s) {
 
 void lock_panic(const char *msg, const char *a, const char *b) {
     __asm__ volatile ("cli");
+    // Freeze the other CPUs BEFORE printing, so none of them scribbles
+    // over the evidence -- or panics concurrently and interleaves its
+    // own message into this one.
+    smp_panic_stop_others();
     panic_puts("[lock] PANIC: ");
     panic_puts(msg);
     panic_puts(" acquiring=");

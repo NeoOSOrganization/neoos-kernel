@@ -37,4 +37,15 @@ void     smp_send_reschedule(int cpu_index);
 void     ipi_reschedule_handler(void);
 void     smp_reschedule_ipi_selftest(void);
 
+// ---- panic stop ------------------------------------------------------
+#define VECTOR_IPI_PANIC 0xF2
+
+// Freezes every OTHER CPU. Delivered as an NMI, not a maskable vector:
+// the whole point is stopping CPUs spinning with interrupts disabled,
+// which a normal IPI cannot reach.
+void     smp_panic_stop_others(void);
+void     nmi_handler(void);
+int      smp_panic_handler_takes_serial_lock(void);
+void     panic_stop_selftest(void);
+
 #endif

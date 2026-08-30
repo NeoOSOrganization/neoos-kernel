@@ -163,6 +163,7 @@ void kmain(void *multiboot_info) {
     smp_online_selftest();
     smp_reschedule_ipi_selftest();
     tlb_shootdown_selftest();
+    panic_stop_selftest();
     smp_parallel_selftest_start();
 
     serial_write_string("NeoOS: interrupts enabled, starting scheduler\n");

@@ -164,3 +164,23 @@ void smp_parallel_selftest_check(void) {
     serial_write_hex64((uint64_t)distinct);
     serial_write_string("\n");
 }
+
+void panic_stop_selftest(void) {
+    // Cannot be tested by triggering it -- a real panic stops the boot --
+    // so the mechanism's preconditions are asserted instead.
+    if (VECTOR_IPI_PANIC != 0xF2) {
+        serial_write_string("[smp] panic-stop selftest FAILED: vector moved\n");
+        return;
+    }
+    // The handler must not take the serial lock: a panicking CPU may be
+    // holding it, so a handler that waited on it would hang the stop.
+    if (smp_panic_handler_takes_serial_lock()) {
+        serial_write_string("[smp] panic-stop selftest FAILED: handler touches the serial lock\n");
+        return;
+    }
+    if (smp_online_count() < 2) {
+        serial_write_string("[smp] panic-stop selftest FAILED: no other cpu to stop\n");
+        return;
+    }
+    serial_write_string("[smp] panic-stop selftest passed\n");
+}

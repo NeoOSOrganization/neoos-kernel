@@ -150,6 +150,11 @@ static void isr_handler_inner(struct registers *regs) {
         return;
     }
 
+    if (regs->vector_number == 2) {   // NMI: panic-stop
+        nmi_handler();
+        return;
+    }
+
     if (regs->vector_number == VECTOR_IPI_TLB) {
         ipi_tlb_handler();
         return;

@@ -221,3 +221,26 @@ void smp_reschedule_ipi_selftest(void) {
     }
     serial_write_string("[smp] ipi selftest FAILED: reschedule IPI never delivered\n");
 }
+
+// ---- panic stop ------------------------------------------------------
+
+void smp_panic_stop_others(void) {
+    int self   = (int)(this_cpu() - &cpus[0]);
+    int online = smp_online_count();
+    for (int i = 0; i < online; i++) {
+        if (i == self) { continue; }
+        lapic_send_nmi(smp_lapic_for_index(i));
+    }
+}
+
+// Deliberately SILENT. The panicking CPU may be holding the serial lock,
+// so printing here would hang the very stop this was sent to perform.
+// Just freeze, and leave the serial port to the CPU that panicked.
+void nmi_handler(void) {
+    for (;;) { __asm__ volatile ("cli; hlt"); }
+}
+
+// Exists so the selftest can assert the invariant the comment above
+// documents. Keep returning 0 -- and keep nmi_handler free of any
+// serial output.
+int smp_panic_handler_takes_serial_lock(void) { return 0; }
