@@ -43,7 +43,7 @@ static int ata_wait_status(uint8_t mask, uint8_t value) {
     return ata_wait_status_bounded(mask, value, ATA_POLL_MAX_ITERATIONS);
 }
 
-int ata_identify(uint8_t drive, struct ata_identify_info *info) {
+static int ata_identify_locked(uint8_t drive, struct ata_identify_info *info) {
     outb(ATA_DRIVE_HEAD, 0xA0 | ((drive & 1) << 4));
     outb(ATA_SECCOUNT, 0);
     outb(ATA_LBA_LOW, 0);
@@ -83,7 +83,7 @@ int ata_identify(uint8_t drive, struct ata_identify_info *info) {
     return 1;
 }
 
-int ata_read_sectors(uint8_t drive, uint32_t lba, uint8_t count, void *buffer) {
+static int ata_read_sectors_locked(uint8_t drive, uint32_t lba, uint8_t count, void *buffer) {
     uint16_t *out = (uint16_t *)buffer;
 
     outb(ATA_DRIVE_HEAD, 0xE0 | ((drive & 1) << 4) | ((lba >> 24) & 0x0F)); // LBA mode
@@ -115,7 +115,7 @@ int ata_read_sectors(uint8_t drive, uint32_t lba, uint8_t count, void *buffer) {
     return 1;
 }
 
-int ata_write_sectors(uint8_t drive, uint32_t lba, uint8_t count, const void *buffer) {
+static int ata_write_sectors_locked(uint8_t drive, uint32_t lba, uint8_t count, const void *buffer) {
     const uint16_t *in = (const uint16_t *)buffer;
 
     outb(ATA_DRIVE_HEAD, 0xE0 | ((drive & 1) << 4) | ((lba >> 24) & 0x0F)); // LBA mode
@@ -159,4 +159,40 @@ int ata_write_sectors(uint8_t drive, uint32_t lba, uint8_t count, const void *bu
         return 0;
     }
     return 1;
+}
+
+// ---- locked public entry points -------------------------------------
+//
+// A PIO command is a SEQUENCE of port writes -- drive select, sector
+// count, the three LBA bytes, then the command byte. Two CPUs
+// interleaving those sequences issue a command neither one asked for,
+// against a drive/LBA neither one chose. One lock over the whole drive
+// is the only correct granularity here: the hardware has one set of
+// registers.
+
+struct spinlock ata_lock;
+
+void ata_init(void) {
+    spin_init(&ata_lock, LOCK_RANK_DRIVER, "ata");
+}
+
+int ata_identify(uint8_t drive, struct ata_identify_info *info) {
+    uint64_t f = spin_lock_irqsave(&ata_lock);
+    int rc = ata_identify_locked(drive, info);
+    spin_unlock_irqrestore(&ata_lock, f);
+    return rc;
+}
+
+int ata_read_sectors(uint8_t drive, uint32_t lba, uint8_t count, void *buffer) {
+    uint64_t f = spin_lock_irqsave(&ata_lock);
+    int rc = ata_read_sectors_locked(drive, lba, count, buffer);
+    spin_unlock_irqrestore(&ata_lock, f);
+    return rc;
+}
+
+int ata_write_sectors(uint8_t drive, uint32_t lba, uint8_t count, const void *buffer) {
+    uint64_t f = spin_lock_irqsave(&ata_lock);
+    int rc = ata_write_sectors_locked(drive, lba, count, buffer);
+    spin_unlock_irqrestore(&ata_lock, f);
+    return rc;
 }

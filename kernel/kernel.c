@@ -100,6 +100,7 @@ void kmain(void *multiboot_info) {
     // instant inversion under the vma lock.
     vma_selftest();
 
+    ata_init();   // before the first ata_* call
     struct ata_identify_info ata_info;
     ata_identify(0, &ata_info);
 

@@ -2,8 +2,17 @@
 #define NEOOS_ATA_H
 
 #include <stdint.h>
+#include "lock.h"
 
 #define ATA_SECTOR_SIZE 512
+
+// Serializes PIO command sequences. Exposed so blkcache_selftest can
+// assert its rank -- the cache holds its own lock (BLOCKDEV, 7) while
+// calling into the driver (DRIVER, 8) on a miss.
+extern struct spinlock ata_lock;
+
+// Initialises ata_lock. Must run before the first ata_* call.
+void ata_init(void);
 
 struct ata_identify_info {
     uint32_t sector_count;

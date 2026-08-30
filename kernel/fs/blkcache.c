@@ -219,5 +219,12 @@ void blkcache_selftest(void) {
     misses = 0;
     spin_unlock_irqrestore(&cache_lock, flags);
 
+    // BLOCKDEV (7) then DRIVER (8): the cache holds its own lock while
+    // calling into the driver on a miss.
+    if (ata_lock.rank != LOCK_RANK_DRIVER) {
+        serial_write_string("[blkcache] selftest FAILED: ata lock rank wrong\n");
+        return;
+    }
+
     serial_write_string("[blkcache] selftest passed\n");
 }
