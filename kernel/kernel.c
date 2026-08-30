@@ -159,6 +159,8 @@ void kmain(void *multiboot_info) {
 
     smp_start_aps();
     smp_online_selftest();
+    smp_reschedule_ipi_selftest();
+    smp_parallel_selftest_start();
 
     serial_write_string("NeoOS: interrupts enabled, starting scheduler\n");
     __asm__ volatile ("sti");

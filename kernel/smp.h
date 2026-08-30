@@ -17,11 +17,24 @@ void     smp_topology_selftest(void);
 void     runqueue_lock_selftest(void);
 void     cpu_local_selftest(void);
 void     smp_online_selftest(void);
+void     smp_parallel_selftest_start(void);
+void     smp_parallel_selftest_check(void);
 
 // Application-processor bringup. Call after every subsystem an AP can
 // touch is initialised and locked.
 void     smp_start_aps(void);
 int      smp_online_count(void);
 void     ap_main(int index);
+
+// ---- IPIs ------------------------------------------------------------
+#define VECTOR_IPI_RESCHEDULE 0xF0
+
+extern volatile uint64_t ipi_reschedule_count;
+
+// Wakes `cpu_index` if it is halted in the idle loop. A no-op when the
+// target is this CPU.
+void     smp_send_reschedule(int cpu_index);
+void     ipi_reschedule_handler(void);
+void     smp_reschedule_ipi_selftest(void);
 
 #endif

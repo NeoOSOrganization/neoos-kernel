@@ -14,6 +14,7 @@
 #include "../cpu_local.h"
 #include "../waitq.h"
 #include "../errno.h"
+#include "../smp.h"
 
 extern void context_switch(uint64_t *old_rsp, uint64_t *new_rsp);
 extern void kernel_thread_entry_trampoline(void);
@@ -66,6 +67,20 @@ struct thread *dequeue_ready(void) {
 
 void thread_enqueue_ready(struct thread *t) { enqueue_ready(t); }
 
+// Enqueue onto a SPECIFIC CPU's queue rather than this one. Used at
+// thread creation to spread new work, and by the selftests.
+void enqueue_ready_on(int cpu_index, struct thread *t) {
+    struct cpu *c = &cpus[cpu_index];
+    uint64_t f = spin_lock_irqsave(&c->ready_lock);
+    ready_push(c, t);
+    spin_unlock_irqrestore(&c->ready_lock, f);
+    // Sent AFTER the unlock: the target may be spinning on this very lock
+    // with interrupts disabled and could not take the IPI. Without this
+    // poke a target parked in idle's `sti; hlt` never learns it has work
+    // -- APs receive no timer interrupt.
+    smp_send_reschedule(cpu_index);
+}
+
 // Removes `t` from the ready queue wherever it sits. Only used by
 // idle_init, which has to un-enqueue the idle thread that
 // thread_alloc_kernel just queued.
@@ -106,6 +121,16 @@ static void idle_entry(void) {
             kfree(z);
             z = next;
         }
+        smp_parallel_selftest_check();
+
+        // The idle thread must schedule() for ITSELF. On the BSP the
+        // timer interrupt preempts idle and calls schedule() on its
+        // behalf, which is why this was never needed before -- but the
+        // IOAPIC routes the timer only to the BSP, so an AP's idle thread
+        // would otherwise wake from the reschedule IPI, loop, and halt
+        // again without ever picking up the work the IPI was announcing.
+        schedule();
+
         __asm__ volatile ("sti; hlt");
     }
 }

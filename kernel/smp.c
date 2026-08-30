@@ -180,3 +180,44 @@ void smp_start_aps(void) {
     serial_write_hex64((uint64_t)smp_online_count());
     serial_write_string("\n");
 }
+
+// ---- reschedule IPI --------------------------------------------------
+
+volatile uint64_t ipi_reschedule_count;
+
+// The handler does nothing but acknowledge. Waking the target is the
+// INTERRUPT's job: it breaks the idle loop's `hlt`, and the loop reaches
+// schedule() on its next pass. Without this an AP that has parked in
+// idle can never be given work -- APs get no timer interrupt, since the
+// IOAPIC routes only to the BSP.
+void ipi_reschedule_handler(void) {
+    __atomic_fetch_add(&ipi_reschedule_count, 1, __ATOMIC_ACQ_REL);
+    lapic_send_eoi();
+}
+
+void smp_send_reschedule(int cpu_index) {
+    if (cpu_index < 0 || cpu_index >= smp_online_count()) { return; }
+    if (cpu_index == (int)(this_cpu() - &cpus[0])) { return; } // no self-IPI
+    lapic_send_ipi(smp_lapic_for_index(cpu_index), VECTOR_IPI_RESCHEDULE);
+}
+
+void smp_reschedule_ipi_selftest(void) {
+    int target = smp_online_count() - 1;
+    if (target < 1) {
+        serial_write_string("[smp] ipi selftest FAILED: no AP to target\n");
+        return;
+    }
+    uint64_t before = __atomic_load_n(&ipi_reschedule_count, __ATOMIC_ACQUIRE);
+    smp_send_reschedule(target);
+
+    // Bounded wait: an IPI that is never delivered must FAIL the test,
+    // not hang the boot.
+    for (int i = 0; i < 100000000; i++) {
+        if (__atomic_load_n(&ipi_reschedule_count, __ATOMIC_ACQUIRE) > before) {
+            serial_write_string("[smp] reschedule ipi selftest passed\n");
+            return;
+        }
+        __asm__ volatile ("pause");
+    }
+    serial_write_string("[smp] ipi selftest FAILED: reschedule IPI never delivered\n");
+}
