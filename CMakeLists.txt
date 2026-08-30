@@ -40,6 +40,7 @@ add_library(kernel_sources OBJECT
     kernel/mm/pmm.c
     kernel/mm/vma.c
     kernel/fs/vfs.c
+    kernel/fs/blkcache.c
     kernel/fs/vnode_slab.c
     kernel/fs/fatfs.c
     kernel/fs/ramfs.c

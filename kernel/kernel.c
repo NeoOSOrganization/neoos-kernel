@@ -15,6 +15,7 @@
 #include "mm/heap.h"
 #include "mm/vma.h"
 #include "ata.h"
+#include "fs/blkcache.h"
 #include "fs/fatfs.h"
 #include "fs/vfs.h"
 #include "sched/proc.h"
@@ -84,6 +85,11 @@ void kmain(void *multiboot_info) {
     struct ata_identify_info ata_info;
     ata_identify(0, &ata_info);
 
+    // Before the first sector read of the boot: every filesystem read
+    // below goes through it.
+    blkcache_init();
+    blkcache_selftest();
+
     fat16_mount();
     fat16_selftest();
     fat16_write_selftest();
@@ -94,6 +100,17 @@ void kmain(void *multiboot_info) {
     vfs_mount_fs(0,     "/tmp", "ramfs");
     vfs_mount_fs("hd1", "/mnt", "fat");
     vfs_selftest();
+
+    // Hits are sector reads the drive never saw. The ratio is the whole
+    // point of the cache, so it goes in the boot log where a regression
+    // in it is visible.
+    uint64_t bc_hits, bc_misses;
+    blkcache_stats(&bc_hits, &bc_misses);
+    serial_write_string("[blkcache] hits=");
+    serial_write_hex64(bc_hits);
+    serial_write_string(" misses=");
+    serial_write_hex64(bc_misses);
+    serial_write_string("\n");
 
     cpu_init();
     cpu_state_selftest();

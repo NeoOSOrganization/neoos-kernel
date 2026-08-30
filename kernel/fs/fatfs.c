@@ -1,4 +1,5 @@
 #include "fatfs.h"
+#include "blkcache.h"
 #include "../ata.h"
 #include "../serial.h"
 #include "../mm/heap.h"
@@ -7,19 +8,19 @@
 // VFS is the only way in from outside this file -- but the two
 // selftests below still drive the driver's internals through it, so
 // the prototypes live here instead.
-uint32_t fat16_read_file(uint16_t first_cluster, uint32_t size, void *buffer);
-void fat16_read_at(uint16_t first_cluster, uint32_t position, void *buf, uint32_t len);
-int fat16_write_file(uint16_t first_cluster, uint32_t current_size, uint32_t position,
+uint32_t fat16_read_file(uint32_t first_cluster, uint32_t size, void *buffer);
+void fat16_read_at(uint32_t first_cluster, uint32_t position, void *buf, uint32_t len);
+int fat16_write_file(uint32_t first_cluster, uint32_t current_size, uint32_t position,
                       const void *buf, uint32_t len,
-                      uint16_t *out_first_cluster, uint32_t *out_new_size);
-void fat16_truncate(uint16_t first_cluster, uint32_t dir_lba, uint16_t dir_offset,
-                    uint16_t *out_first_cluster);
-void fat16_update_entry_size(uint32_t dir_lba, uint16_t dir_offset, uint16_t first_cluster,
+                      uint32_t *out_first_cluster, uint32_t *out_new_size);
+void fat16_truncate(uint32_t first_cluster, uint32_t dir_lba, uint16_t dir_offset,
+                    uint32_t *out_first_cluster);
+void fat16_update_entry_size(uint32_t dir_lba, uint16_t dir_offset, uint32_t first_cluster,
                              uint32_t size);
 int fat16_create_file(const char *path, uint32_t *out_dir_lba, uint16_t *out_dir_offset);
 int fat16_mkdir(const char *path);
 int fat16_delete_entry(const char *path);
-int fat16_find(const char *path, uint16_t *out_cluster, uint32_t *out_size,
+int fat16_find(const char *path, uint32_t *out_cluster, uint32_t *out_size,
                uint32_t *out_dir_lba, uint16_t *out_dir_offset);
 #include "../errno.h"
 
@@ -72,6 +73,13 @@ struct fat16_dirent {
     uint32_t file_size;
 } __attribute__((packed));
 
+// This is an ON-DISK layout, not a convenience struct: FAT fixes every
+// field's width and offset. Widening one field silently reinterprets
+// every directory on the volume -- which is exactly what a careless
+// uint16->uint32 sweep of this file once did, turning /HELLO.TXT into
+// garbage on the very first read.
+_Static_assert(sizeof(struct fat16_dirent) == 32, "FAT directory entry must be 32 bytes");
+
 #define DIRENTS_PER_SECTOR (SECTOR_SIZE / sizeof(struct fat16_dirent))
 
 // Per-volume geometry. Was eight file-scope globals; becoming a struct
@@ -90,6 +98,19 @@ struct fat_volume {
     uint32_t root_dir_sector_count; // FAT16 only
     uint16_t root_entry_count;      // FAT16 only
     uint32_t root_cluster;          // FAT32 only
+
+    // Where the last successful allocation stopped. Restarting the
+    // free-cluster scan at cluster 2 every time makes filling a volume
+    // quadratic; this makes the common case land on the first entry
+    // looked at.
+    uint32_t next_free_hint;
+
+    // One-entry cursor for cluster_at_offset. Sequential I/O walks the
+    // same chain forwards, so remembering where the last walk ended
+    // turns an O(chain) re-walk per sector into a single step.
+    uint32_t walk_first;            // chain start, or 0 when invalid
+    uint32_t walk_index;            // cluster index within that chain
+    uint32_t walk_cluster;          // the cluster at walk_index
 };
 
 // The one volume the legacy fat16_* API operates on. It disappears
@@ -105,8 +126,13 @@ static uint32_t cluster_to_lba(struct fat_volume *v, uint32_t cluster) {
 // v->drive set. Returns 1 on success. Shared by the legacy
 // fat16_mount() and the VFS driver's mount op.
 static int fat_read_bpb(struct fat_volume *v) {
+    // Every mount path lands here, so the allocation hint and the
+    // chain cursor get their starting values in one place.
+    v->next_free_hint = 2;
+    v->walk_first = 0;
+
     uint8_t sector[SECTOR_SIZE];
-    if (!ata_read_sectors(v->drive, 0, 1, sector)) {
+    if (!blkcache_read(v->drive, 0, sector)) {
         return 0;
     }
     struct fat16_bpb *bpb = (struct fat16_bpb *)sector;
@@ -180,7 +206,7 @@ static uint32_t fat16_next_cluster(struct fat_volume *v, uint32_t cluster) {
     uint32_t offset_in_sector = fat_offset % v->bytes_per_sector;
 
     uint8_t sector[SECTOR_SIZE];
-    if (!ata_read_sectors(v->drive, fat_sector, 1, sector)) {
+    if (!blkcache_read(v->drive, fat_sector, sector)) {
         return 0x0FFFFFFF;
     }
     if (v->variant == FAT_32) {
@@ -198,7 +224,7 @@ static void fat16_set_next_cluster(struct fat_volume *v, uint32_t cluster, uint3
     uint32_t offset_in_sector = fat_offset % v->bytes_per_sector;
 
     uint8_t sector[SECTOR_SIZE];
-    if (!ata_read_sectors(v->drive, fat_sector, 1, sector)) {
+    if (!blkcache_read(v->drive, fat_sector, sector)) {
         return;
     }
     if (v->variant == FAT_32) {
@@ -208,7 +234,13 @@ static void fat16_set_next_cluster(struct fat_volume *v, uint32_t cluster, uint3
     } else {
         *(uint16_t *)(sector + offset_in_sector) = (uint16_t)value;
     }
-    ata_write_sectors(v->drive, fat_sector, 1, sector);
+    blkcache_write(v->drive, fat_sector, sector);
+
+    // Any chain this entry belongs to may have just been extended,
+    // truncated or freed, and the cursor caches a position inside one.
+    // Rebuilding it costs one walk; trusting a stale one corrupts a
+    // file.
+    v->walk_first = 0;
 }
 
 // FAT32 splits a directory entry's cluster number across two fields:
@@ -239,16 +271,54 @@ static uint32_t fat_eoc_marker(struct fat_volume *v) {
     return (v->variant == FAT_32) ? 0x0FFFFFFF : 0xFFFF;
 }
 
-// Scans the FAT linearly from cluster 2 for a free (0x0000) entry,
-// marks it as a fresh chain's end (0xFFFF), and returns it. Returns 0
-// if the disk is full.
+// Reads FAT entry `index` out of an already-loaded FAT sector.
+static uint32_t fat_entry_in_sector(struct fat_volume *v, const uint8_t *sector, uint32_t index) {
+    if (v->variant == FAT_32) {
+        return (*(const uint32_t *)(sector + index * 4)) & 0x0FFFFFFF;
+    }
+    return *(const uint16_t *)(sector + index * 2);
+}
+
+// Finds a free (0x0000) FAT entry, marks it as a fresh chain's end,
+// and returns it. Returns 0 if the volume is full.
+//
+// Scans a SECTOR at a time rather than an entry at a time. A FAT16
+// sector holds 256 entries, so the old per-entry fat16_next_cluster
+// call re-read the same sector 256 times in a row -- on the 32MiB test
+// volume, up to 16,384 reads of 64 distinct sectors to answer one
+// allocation. Combined with next_free_hint, filling a volume is now
+// linear in the FAT rather than quadratic.
 static uint32_t fat16_alloc_cluster(struct fat_volume *v) {
     uint32_t entry_size = (v->variant == FAT_32) ? 4 : 2;
     uint32_t total_entries = ((uint32_t)v->sectors_per_fat * v->bytes_per_sector) / entry_size;
-    for (uint32_t cluster = 2; cluster < total_entries; cluster++) {
-        if (fat16_next_cluster(v, cluster) == 0) {
-            fat16_set_next_cluster(v, cluster, fat_eoc_marker(v));
-            return cluster;
+    uint32_t per_sector = v->bytes_per_sector / entry_size;
+    if (total_entries <= 2 || per_sector == 0) { return 0; }
+
+    uint32_t hint = (v->next_free_hint < 2) ? 2 : v->next_free_hint;
+    if (hint >= total_entries) { hint = 2; }
+
+    uint8_t sector[SECTOR_SIZE];
+
+    // Two passes: hint..end, then 2..hint. A full volume therefore
+    // still reports full, and a mostly-full one still finds the hole
+    // behind the hint.
+    for (int pass = 0; pass < 2; pass++) {
+        uint32_t cluster = (pass == 0) ? hint : 2;
+        uint32_t limit   = (pass == 0) ? total_entries : hint;
+
+        while (cluster < limit) {
+            uint32_t fat_offset = cluster * entry_size;
+            uint32_t fat_sector = v->fat_start_lba + fat_offset / v->bytes_per_sector;
+            if (!blkcache_read(v->drive, fat_sector, sector)) { return 0; }
+
+            for (uint32_t index = cluster % per_sector;
+                 index < per_sector && cluster < limit;
+                 index++, cluster++) {
+                if (fat_entry_in_sector(v, sector, index) != 0) { continue; }
+                fat16_set_next_cluster(v, cluster, fat_eoc_marker(v));
+                v->next_free_hint = cluster + 1;
+                return cluster;
+            }
         }
     }
     return 0;
@@ -256,26 +326,54 @@ static uint32_t fat16_alloc_cluster(struct fat_volume *v) {
 
 // Walks a cluster chain from first_cluster, zeroing every FAT entry.
 static void fat16_free_chain(struct fat_volume *v, uint32_t first_cluster) {
-    uint16_t cluster = first_cluster;
+    // 32-bit throughout: a uint16_t here truncated every FAT32 cluster
+    // above 65535, so fat_is_eoc never matched and the walk ran off
+    // into whatever the truncated number pointed at.
+    uint32_t cluster = first_cluster;
     while (cluster >= 2 && !fat_is_eoc(v, cluster)) {
-        uint16_t next = fat16_next_cluster(v, cluster);
+        uint32_t next = fat16_next_cluster(v, cluster);
         fat16_set_next_cluster(v, cluster, 0x0000);
         cluster = next;
+    }
+    // Freed space sits behind the hint; let the next allocation find it.
+    if (first_cluster >= 2 && first_cluster < v->next_free_hint) {
+        v->next_free_hint = first_cluster;
     }
 }
 
 // Returns the cluster containing byte offset `byte_offset` within the
-// chain starting at `first_cluster`, by walking from the start every
-// call. O(chain length) per call -- acceptable at this project's file
-// sizes; a future milestone could cache the last-accessed cluster per
-// fd if it ever matters. Caller must ensure the chain is long enough.
+// chain starting at `first_cluster`. Caller must ensure the chain is
+// long enough.
+//
+// write_range and fat16_read_at_v call this once per SECTOR, always
+// moving forwards through one chain, so walking from the head every
+// time made a whole-file read O(clusters^2). The per-volume cursor
+// makes the forward case a single step; anything else (a new chain, a
+// backwards seek) falls back to the full walk. fat16_set_next_cluster
+// invalidates the cursor whenever a chain changes shape.
 static uint32_t cluster_at_offset(struct fat_volume *v, uint32_t first_cluster, uint32_t byte_offset) {
     uint32_t cluster_size_bytes = (uint32_t)v->sectors_per_cluster * v->bytes_per_sector;
     uint32_t cluster_index = byte_offset / cluster_size_bytes;
-    uint16_t cluster = first_cluster;
-    for (uint32_t i = 0; i < cluster_index; i++) {
-        cluster = fat16_next_cluster(v, cluster);
+
+    uint32_t cluster = first_cluster;
+    uint32_t i = 0;
+    if (v->walk_first == first_cluster && first_cluster >= 2 &&
+        v->walk_index <= cluster_index) {
+        cluster = v->walk_cluster;
+        i = v->walk_index;
     }
+
+    for (; i < cluster_index; i++) {
+        cluster = fat16_next_cluster(v, cluster);
+        if (cluster < 2 || fat_is_eoc(v, cluster)) {
+            v->walk_first = 0;
+            return cluster;
+        }
+    }
+
+    v->walk_first   = first_cluster;
+    v->walk_index   = cluster_index;
+    v->walk_cluster = cluster;
     return cluster;
 }
 
@@ -296,7 +394,7 @@ static void write_range(struct fat_volume *v, uint32_t chain_start, uint32_t wri
         uint32_t sector_index = offset_in_cluster / v->bytes_per_sector;
         uint32_t offset_in_sector = offset_in_cluster % v->bytes_per_sector;
 
-        uint16_t cluster = cluster_at_offset(v, chain_start, abs_offset);
+        uint32_t cluster = cluster_at_offset(v, chain_start, abs_offset);
         uint32_t lba = cluster_to_lba(v, cluster) + sector_index;
 
         uint32_t to_write = v->bytes_per_sector - offset_in_sector;
@@ -306,28 +404,28 @@ static void write_range(struct fat_volume *v, uint32_t chain_start, uint32_t wri
 
         uint8_t sector[SECTOR_SIZE];
         if (offset_in_sector != 0 || to_write != v->bytes_per_sector) {
-            ata_read_sectors(v->drive, lba, 1, sector); // partial sector: preserve untouched bytes
+            blkcache_read(v->drive, lba, sector); // partial sector: preserve untouched bytes
         }
         for (uint32_t i = 0; i < to_write; i++) {
             sector[offset_in_sector + i] = zero_fill ? 0 : in[written + i];
         }
-        ata_write_sectors(v->drive, lba, 1, sector);
+        blkcache_write(v->drive, lba, sector);
 
         written += to_write;
     }
 }
 
-uint32_t fat16_read_file(uint16_t first_cluster, uint32_t size, void *buffer) {
+uint32_t fat16_read_file(uint32_t first_cluster, uint32_t size, void *buffer) {
     struct fat_volume *v = &legacy_volume;
     uint8_t *out = (uint8_t *)buffer;
     uint32_t bytes_read = 0;
-    uint16_t cluster = first_cluster;
+    uint32_t cluster = first_cluster;
     uint8_t sector_buf[SECTOR_SIZE];
 
     while (!fat_is_eoc(v, cluster) && bytes_read < size) {
         uint32_t lba = cluster_to_lba(v, cluster);
         for (uint8_t s = 0; s < v->sectors_per_cluster && bytes_read < size; s++) {
-            ata_read_sectors(v->drive, lba + s, 1, sector_buf);
+            blkcache_read(v->drive, lba + s, sector_buf);
             uint32_t to_copy = size - bytes_read;
             if (to_copy > v->bytes_per_sector) {
                 to_copy = v->bytes_per_sector;
@@ -342,7 +440,7 @@ uint32_t fat16_read_file(uint16_t first_cluster, uint32_t size, void *buffer) {
     return bytes_read;
 }
 
-void fat16_read_at_v(struct fat_volume *v, uint16_t first_cluster, uint32_t position, void *buf, uint32_t len) {
+void fat16_read_at_v(struct fat_volume *v, uint32_t first_cluster, uint32_t position, void *buf, uint32_t len) {
     uint8_t *out = (uint8_t *)buf;
     uint32_t cluster_size_bytes = (uint32_t)v->sectors_per_cluster * v->bytes_per_sector;
     uint32_t read_so_far = 0;
@@ -353,7 +451,7 @@ void fat16_read_at_v(struct fat_volume *v, uint16_t first_cluster, uint32_t posi
         uint32_t sector_index = offset_in_cluster / v->bytes_per_sector;
         uint32_t offset_in_sector = offset_in_cluster % v->bytes_per_sector;
 
-        uint16_t cluster = cluster_at_offset(v, first_cluster, abs_offset);
+        uint32_t cluster = cluster_at_offset(v, first_cluster, abs_offset);
         uint32_t lba = cluster_to_lba(v, cluster) + sector_index;
 
         uint32_t to_read = v->bytes_per_sector - offset_in_sector;
@@ -362,7 +460,7 @@ void fat16_read_at_v(struct fat_volume *v, uint16_t first_cluster, uint32_t posi
         }
 
         uint8_t sector[SECTOR_SIZE];
-        ata_read_sectors(v->drive, lba, 1, sector);
+        blkcache_read(v->drive, lba, sector);
         for (uint32_t i = 0; i < to_read; i++) {
             out[read_so_far + i] = sector[offset_in_sector + i];
         }
@@ -371,9 +469,9 @@ void fat16_read_at_v(struct fat_volume *v, uint16_t first_cluster, uint32_t posi
     }
 }
 
-int fat16_write_file_v(struct fat_volume *v, uint16_t first_cluster, uint32_t current_size, uint32_t position,
+int fat16_write_file_v(struct fat_volume *v, uint32_t first_cluster, uint32_t current_size, uint32_t position,
                       const void *buf, uint32_t len,
-                      uint16_t *out_first_cluster, uint32_t *out_new_size) {
+                      uint32_t *out_first_cluster, uint32_t *out_new_size) {
     if (len == 0) {
         *out_first_cluster = first_cluster;
         *out_new_size = current_size;
@@ -384,12 +482,12 @@ int fat16_write_file_v(struct fat_volume *v, uint16_t first_cluster, uint32_t cu
     uint32_t end_position = position + len;
     uint32_t clusters_needed = (end_position + cluster_size_bytes - 1) / cluster_size_bytes;
 
-    uint16_t chain_start = first_cluster;
-    uint16_t last_cluster = 0;
+    uint32_t chain_start = first_cluster;
+    uint32_t last_cluster = 0;
     uint32_t existing_clusters = 0;
 
     if (chain_start != 0) {
-        uint16_t c = chain_start;
+        uint32_t c = chain_start;
         existing_clusters = 1;
         while (!fat_is_eoc(v, fat16_next_cluster(v, c))) {
             c = fat16_next_cluster(v, c);
@@ -399,7 +497,7 @@ int fat16_write_file_v(struct fat_volume *v, uint16_t first_cluster, uint32_t cu
     }
 
     while (existing_clusters < clusters_needed) {
-        uint16_t new_cluster = fat16_alloc_cluster(v);
+        uint32_t new_cluster = fat16_alloc_cluster(v);
         if (new_cluster == 0) {
             return -ENOSPC;
         }
@@ -511,7 +609,7 @@ static int find_in_root(struct fat_volume *v, const uint8_t *target_name, struct
     uint8_t sector[SECTOR_SIZE];
     for (uint32_t s = 0; s < v->root_dir_sector_count; s++) {
         uint32_t lba = v->root_dir_start_lba + s;
-        ata_read_sectors(v->drive, lba, 1, sector);
+        blkcache_read(v->drive, lba, sector);
         int result = scan_sector_for_name(sector, lba, target_name, out, out_lba, out_offset);
         if (result != 0) {
             return result > 0;
@@ -523,11 +621,11 @@ static int find_in_root(struct fat_volume *v, const uint8_t *target_name, struct
 static int find_in_directory_cluster(struct fat_volume *v, uint32_t dir_cluster, const uint8_t *target_name, struct fat16_dirent *out,
                                        uint32_t *out_lba, uint16_t *out_offset) {
     uint8_t sector[SECTOR_SIZE];
-    uint16_t cluster = dir_cluster;
+    uint32_t cluster = dir_cluster;
     while (!fat_is_eoc(v, cluster)) {
         uint32_t lba = cluster_to_lba(v, cluster);
         for (uint8_t s = 0; s < v->sectors_per_cluster; s++) {
-            ata_read_sectors(v->drive, lba + s, 1, sector);
+            blkcache_read(v->drive, lba + s, sector);
             int result = scan_sector_for_name(sector, lba + s, target_name, out, out_lba, out_offset);
             if (result != 0) {
                 return result > 0;
@@ -570,12 +668,12 @@ static int create_entry_in_directory(struct fat_volume *v, uint32_t dir_cluster,
     if (in_root) {
         for (uint32_t s = 0; s < v->root_dir_sector_count; s++) {
             uint32_t lba = v->root_dir_start_lba + s;
-            ata_read_sectors(v->drive, lba, 1, sector);
+            blkcache_read(v->drive, lba, sector);
             struct fat16_dirent *entries = (struct fat16_dirent *)sector;
             for (uint32_t e = 0; e < DIRENTS_PER_SECTOR; e++) {
                 if (entries[e].name[0] == 0x00 || entries[e].name[0] == 0xE5) {
                     write_dirent(v, &entries[e], fat_name, attr, first_cluster, size);
-                    ata_write_sectors(v->drive, lba, 1, sector);
+                    blkcache_write(v->drive, lba, sector);
                     if (out_lba) {
                         *out_lba = lba;
                     }
@@ -589,17 +687,17 @@ static int create_entry_in_directory(struct fat_volume *v, uint32_t dir_cluster,
         return -ENOSPC;
     }
 
-    uint16_t cluster = dir_cluster;
-    uint16_t last_cluster = dir_cluster;
+    uint32_t cluster = dir_cluster;
+    uint32_t last_cluster = dir_cluster;
     while (!fat_is_eoc(v, cluster)) {
         uint32_t lba = cluster_to_lba(v, cluster);
         for (uint8_t s = 0; s < v->sectors_per_cluster; s++) {
-            ata_read_sectors(v->drive, lba + s, 1, sector);
+            blkcache_read(v->drive, lba + s, sector);
             struct fat16_dirent *entries = (struct fat16_dirent *)sector;
             for (uint32_t e = 0; e < DIRENTS_PER_SECTOR; e++) {
                 if (entries[e].name[0] == 0x00 || entries[e].name[0] == 0xE5) {
                     write_dirent(v, &entries[e], fat_name, attr, first_cluster, size);
-                    ata_write_sectors(v->drive, lba + s, 1, sector);
+                    blkcache_write(v->drive, lba + s, sector);
                     if (out_lba) {
                         *out_lba = lba + s;
                     }
@@ -614,7 +712,7 @@ static int create_entry_in_directory(struct fat_volume *v, uint32_t dir_cluster,
         cluster = fat16_next_cluster(v, cluster);
     }
 
-    uint16_t new_cluster = fat16_alloc_cluster(v);
+    uint32_t new_cluster = fat16_alloc_cluster(v);
     if (new_cluster == 0) {
         return -ENOSPC;
     }
@@ -626,12 +724,12 @@ static int create_entry_in_directory(struct fat_volume *v, uint32_t dir_cluster,
     }
     uint32_t new_lba = cluster_to_lba(v, new_cluster);
     for (uint8_t s = 0; s < v->sectors_per_cluster; s++) {
-        ata_write_sectors(v->drive, new_lba + s, 1, zero_sector);
+        blkcache_write(v->drive, new_lba + s, zero_sector);
     }
 
     struct fat16_dirent *entries = (struct fat16_dirent *)zero_sector;
     write_dirent(v, &entries[0], fat_name, attr, first_cluster, size);
-    ata_write_sectors(v->drive, new_lba, 1, zero_sector);
+    blkcache_write(v->drive, new_lba, zero_sector);
     if (out_lba) {
         *out_lba = new_lba;
     }
@@ -656,7 +754,7 @@ static int resolve_parent(struct fat_volume *v, const char *path, int *out_in_ro
     }
 
     int in_root = 1;
-    uint16_t current_dir_cluster = 0;
+    uint32_t current_dir_cluster = 0;
 
     for (;;) {
         char component[13];
@@ -731,7 +829,7 @@ int fat16_mkdir(const char *path) {
         return -EEXIST;
     }
 
-    uint16_t new_cluster = fat16_alloc_cluster(v);
+    uint32_t new_cluster = fat16_alloc_cluster(v);
     if (new_cluster == 0) {
         return -ENOSPC;
     }
@@ -742,7 +840,7 @@ int fat16_mkdir(const char *path) {
     }
     uint32_t lba = cluster_to_lba(v, new_cluster);
     for (uint8_t s = 0; s < v->sectors_per_cluster; s++) {
-        ata_write_sectors(v->drive, lba + s, 1, zero_sector);
+        blkcache_write(v->drive, lba + s, zero_sector);
     }
 
     uint32_t dir_lba;
@@ -757,7 +855,7 @@ int fat16_mkdir(const char *path) {
 
 int fat16_delete_entry(const char *path) {
     struct fat_volume *v = &legacy_volume;
-    uint16_t cluster;
+    uint32_t cluster;
     uint32_t size;
     uint32_t dir_lba;
     uint16_t dir_offset;
@@ -766,7 +864,7 @@ int fat16_delete_entry(const char *path) {
     }
 
     uint8_t sector[SECTOR_SIZE];
-    ata_read_sectors(v->drive, dir_lba, 1, sector);
+    blkcache_read(v->drive, dir_lba, sector);
     struct fat16_dirent *entry = (struct fat16_dirent *)(sector + dir_offset);
     if (entry->attr & FAT_ATTR_DIRECTORY) {
         return -EISDIR;
@@ -776,20 +874,20 @@ int fat16_delete_entry(const char *path) {
         fat16_free_chain(v, cluster);
     }
     entry->name[0] = 0xE5;
-    ata_write_sectors(v->drive, dir_lba, 1, sector);
+    blkcache_write(v->drive, dir_lba, sector);
     return 0;
 }
 
-void fat16_update_entry_size_v(struct fat_volume *v, uint32_t dir_lba, uint16_t dir_offset, uint16_t first_cluster, uint32_t size) {
+void fat16_update_entry_size_v(struct fat_volume *v, uint32_t dir_lba, uint16_t dir_offset, uint32_t first_cluster, uint32_t size) {
     uint8_t sector[SECTOR_SIZE];
-    ata_read_sectors(v->drive, dir_lba, 1, sector);
+    blkcache_read(v->drive, dir_lba, sector);
     struct fat16_dirent *entry = (struct fat16_dirent *)(sector + dir_offset);
     dirent_set_cluster(v, entry, first_cluster);
     entry->file_size = size;
-    ata_write_sectors(v->drive, dir_lba, 1, sector);
+    blkcache_write(v->drive, dir_lba, sector);
 }
 
-int fat16_find(const char *path, uint16_t *out_cluster, uint32_t *out_size,
+int fat16_find(const char *path, uint32_t *out_cluster, uint32_t *out_size,
                uint32_t *out_dir_lba, uint16_t *out_dir_offset) {
     struct fat_volume *v = &legacy_volume;
     if (path[0] == '/') {
@@ -801,7 +899,7 @@ int fat16_find(const char *path, uint16_t *out_cluster, uint32_t *out_size,
 
     struct fat16_dirent entry;
     int in_root = 1;
-    uint16_t current_dir_cluster = 0;
+    uint32_t current_dir_cluster = 0;
     uint32_t dir_lba = 0;
     uint16_t dir_offset = 0;
 
@@ -855,7 +953,7 @@ static int buffer_equals_string(const uint8_t *buffer, uint32_t len, const char 
 }
 
 void fat16_selftest(void) {
-    uint16_t cluster;
+    uint32_t cluster;
     uint32_t size;
     uint8_t *buffer = (uint8_t *)kmalloc(8192);
     if (!buffer) {
@@ -911,7 +1009,7 @@ void fat16_selftest(void) {
 
 void fat16_write_selftest(void) {
     struct fat_volume *v = &legacy_volume;
-    uint16_t cluster = fat16_alloc_cluster(v);
+    uint32_t cluster = fat16_alloc_cluster(v);
     if (cluster == 0) {
         serial_write_string("[fat16] write selftest FAILED: alloc_cluster returned 0\n");
         return;
@@ -922,14 +1020,14 @@ void fat16_write_selftest(void) {
         write_buf[i] = (uint8_t)(i & 0xFF);
     }
     uint32_t lba = cluster_to_lba(v, cluster);
-    if (!ata_write_sectors(v->drive, lba, 1, write_buf)) {
-        serial_write_string("[fat16] write selftest FAILED: ata_write_sectors failed\n");
+    if (!blkcache_write(v->drive, lba, write_buf)) {
+        serial_write_string("[fat16] write selftest FAILED: sector write failed\n");
         return;
     }
 
     uint8_t read_buf[SECTOR_SIZE];
-    if (!ata_read_sectors(v->drive, lba, 1, read_buf)) {
-        serial_write_string("[fat16] write selftest FAILED: ata_read_sectors failed\n");
+    if (!blkcache_read(v->drive, lba, read_buf)) {
+        serial_write_string("[fat16] write selftest FAILED: sector read failed\n");
         return;
     }
     for (uint32_t i = 0; i < SECTOR_SIZE; i++) {
@@ -1003,7 +1101,7 @@ void fat16_write_selftest(void) {
     }
     const char *phrase = "Hello, written file!"; // NOTE: 20 bytes, see the next line
     uint32_t phrase_len = 20;
-    uint16_t new_cluster;
+    uint32_t new_cluster;
     uint32_t new_size;
     int written = fat16_write_file(0, 0, 0, phrase, phrase_len, &new_cluster, &new_size);
     if (written != (int)phrase_len || new_size != phrase_len) {
@@ -1063,26 +1161,25 @@ void fat16_write_selftest(void) {
 // Legacy single-volume wrappers. Each is the only thing still binding
 // &legacy_volume for these four operations; they disappear with the
 // rest of the legacy API once syscall.c moves to the VFS.
-void fat16_read_at(uint16_t first_cluster, uint32_t position, void *buf, uint32_t len) {
+void fat16_read_at(uint32_t first_cluster, uint32_t position, void *buf, uint32_t len) {
     fat16_read_at_v(&legacy_volume, first_cluster, position, buf, len);
 }
 
-int fat16_write_file(uint16_t first_cluster, uint32_t current_size, uint32_t position,
+int fat16_write_file(uint32_t first_cluster, uint32_t current_size, uint32_t position,
                       const void *buf, uint32_t len,
-                      uint16_t *out_first_cluster, uint32_t *out_new_size) {
+                      uint32_t *out_first_cluster, uint32_t *out_new_size) {
     return fat16_write_file_v(&legacy_volume, first_cluster, current_size, position,
                                buf, len, out_first_cluster, out_new_size);
 }
 
-void fat16_truncate(uint16_t first_cluster, uint32_t dir_lba, uint16_t dir_offset,
-                    uint16_t *out_first_cluster) {
-    // The legacy API is FAT16-only, so the wide value always fits.
+void fat16_truncate(uint32_t first_cluster, uint32_t dir_lba, uint16_t dir_offset,
+                    uint32_t *out_first_cluster) {
     uint32_t wide = first_cluster;
     fat16_truncate_v(&legacy_volume, first_cluster, dir_lba, dir_offset, &wide);
-    if (out_first_cluster) { *out_first_cluster = (uint16_t)wide; }
+    if (out_first_cluster) { *out_first_cluster = wide; }
 }
 
-void fat16_update_entry_size(uint32_t dir_lba, uint16_t dir_offset, uint16_t first_cluster,
+void fat16_update_entry_size(uint32_t dir_lba, uint16_t dir_offset, uint32_t first_cluster,
                              uint32_t size) {
     fat16_update_entry_size_v(&legacy_volume, dir_lba, dir_offset, first_cluster, size);
 }
@@ -1143,9 +1240,9 @@ static void from_fat_name(const uint8_t *raw, char *out) {
 // this exposes it for the VFS path.
 static int mark_dirent_deleted(struct fat_volume *v, uint32_t lba, uint16_t offset) {
     uint8_t sector[SECTOR_SIZE];
-    if (!ata_read_sectors(v->drive, lba, 1, sector)) { return -ENOSPC; }
+    if (!blkcache_read(v->drive, lba, sector)) { return -ENOSPC; }
     sector[offset] = 0xE5;
-    if (!ata_write_sectors(v->drive, lba, 1, sector)) { return -ENOSPC; }
+    if (!blkcache_write(v->drive, lba, sector)) { return -ENOSPC; }
     return 0;
 }
 
@@ -1153,17 +1250,17 @@ static int mark_dirent_deleted(struct fat_volume *v, uint32_t lba, uint16_t offs
 // (0x00), deleted (0xE5), volume-label, and VFAT long-name entries.
 // Contract matches ramfs: 0 with *out filled for a valid index,
 // -ENOENT once past the last entry.
-static int fat_dir_nth(struct fat_volume *v, uint16_t dir_cluster, int in_root,
+static int fat_dir_nth(struct fat_volume *v, uint32_t dir_cluster, int in_root,
                        uint32_t index, struct dirent *out) {
     uint32_t seen = 0;
     uint32_t sectors = in_root ? v->root_dir_sector_count : v->sectors_per_cluster;
-    uint16_t cluster = dir_cluster;
+    uint32_t cluster = dir_cluster;
 
     for (;;) {
         uint32_t base = in_root ? v->root_dir_start_lba : cluster_to_lba(v, cluster);
         for (uint32_t s = 0; s < sectors; s++) {
             uint8_t sector[SECTOR_SIZE];
-            if (!ata_read_sectors(v->drive, base + s, 1, sector)) { return -ENOENT; }
+            if (!blkcache_read(v->drive, base + s, sector)) { return -ENOENT; }
             for (uint32_t o = 0; o < SECTOR_SIZE; o += sizeof(struct fat16_dirent)) {
                 struct fat16_dirent *de = (struct fat16_dirent *)(sector + o);
                 if (de->name[0] == 0x00) { return -ENOENT; } // end of directory
@@ -1224,6 +1321,10 @@ static void fatfs_umount_op(struct vfs_mount *m) {
     for (int i = 0; i < FATFS_MAX_VOLUMES; i++) {
         if (&volumes[i] == v) { volume_used[i] = 0; }
     }
+    // Nothing else on this drive is mounted once the volume is
+    // released, and a remount must not be handed sectors cached from
+    // the image that was there before.
+    if (v) { blkcache_invalidate_drive(v->drive); }
     m->fs_private = 0;
 }
 
@@ -1252,7 +1353,7 @@ static int fatfs_read_inode(struct vfs_mount *m, uint64_t inode_id, struct vnode
     uint16_t off = (uint16_t)(inode_id & 0xFFFF);
 
     uint8_t sector[SECTOR_SIZE];
-    if (!ata_read_sectors(v->drive, lba, 1, sector)) {
+    if (!blkcache_read(v->drive, lba, sector)) {
         n->in_use = 0;
         return -ENOENT;
     }
@@ -1317,7 +1418,7 @@ static int64_t fatfs_write(struct vnode *vn, uint32_t pos, const void *buf, uint
     struct fat_volume *v = (struct fat_volume *)vn->mount->fs_private;
     struct fatfs_inode *n = (struct fatfs_inode *)vn->fs_private;
 
-    uint16_t new_cluster;
+    uint32_t new_cluster;
     uint32_t new_size;
     int rc = fat16_write_file_v(v, n->first_cluster, vn->size, pos, buf, len,
                                 &new_cluster, &new_size);
@@ -1377,7 +1478,7 @@ static int fatfs_mkdir_op(struct vnode *dir, const char *name) {
                                                       &existing, NULL, NULL);
     if (already) { return -EEXIST; }
 
-    uint16_t cluster = fat16_alloc_cluster(v);
+    uint32_t cluster = fat16_alloc_cluster(v);
     if (!cluster) { return -ENOSPC; }
     fat16_set_next_cluster(v, cluster, fat_eoc_marker(v));
 
@@ -1387,7 +1488,7 @@ static int fatfs_mkdir_op(struct vnode *dir, const char *name) {
     for (int i = 0; i < SECTOR_SIZE; i++) { zero[i] = 0; }
     uint32_t base = cluster_to_lba(v, cluster);
     for (uint32_t s = 0; s < v->sectors_per_cluster; s++) {
-        ata_write_sectors(v->drive, base + s, 1, zero);
+        blkcache_write(v->drive, base + s, zero);
     }
 
     uint32_t lba;
