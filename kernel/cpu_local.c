@@ -1,5 +1,6 @@
 #include "cpu_local.h"
 #include "serial.h"
+#include "lapic.h"
 
 #define MSR_GS_BASE        0xC0000101
 #define MSR_KERNEL_GS_BASE 0xC0000102
@@ -12,12 +13,12 @@ static void wrmsr64(uint32_t msr, uint64_t value) {
     __asm__ volatile ("wrmsr" :: "c"(msr), "a"(lo), "d"(hi));
 }
 
-void cpu_local_init(void) {
-    struct cpu *c = &cpus[0];
+static void cpu_local_install(int index) {
+    struct cpu *c = &cpus[index];
     c->self             = c;
     c->current          = 0;
     c->idle             = 0;
-    c->tss              = &tss[0];
+    c->tss              = &tss[index];
     c->user_rsp_scratch = 0;
     c->kernel_stack     = 0;
     c->lapic_id         = 0;
@@ -39,6 +40,14 @@ void cpu_local_init(void) {
     // arrangement and every exit swaps them back.
     wrmsr64(MSR_GS_BASE, (uint64_t)(uintptr_t)c);
     wrmsr64(MSR_KERNEL_GS_BASE, 0);
+}
 
-    serial_write_string("[cpu] per-CPU block installed\n");
+void cpu_local_init_bsp(void) {
+    cpu_local_install(0);
+    serial_write_string("[cpu] per-CPU block installed (bsp)\n");
+}
+
+void cpu_local_init_ap(int index) {
+    cpu_local_install(index);
+    cpus[index].lapic_id = lapic_get_id();
 }

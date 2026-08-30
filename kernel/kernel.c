@@ -49,8 +49,8 @@ void kmain(void *multiboot_info) {
     // per-CPU pointer any earlier would have it wiped a few
     // instructions later, and every this_cpu() would then dereference
     // physical address 0.
-    cpu_local_init();
-    serial_write_string("[gdt] loaded, tss_selector=0x18\n");
+    cpu_local_init_bsp();
+    cpu_local_selftest();
     lock_selftest();
     waitq_lock_selftest();
 

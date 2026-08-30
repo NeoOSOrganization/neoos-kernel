@@ -15,5 +15,6 @@ uint32_t smp_lapic_for_index(int index);           // 0xFFFFFFFF if out of range
 
 void     smp_topology_selftest(void);
 void     runqueue_lock_selftest(void);
+void     cpu_local_selftest(void);
 
 #endif

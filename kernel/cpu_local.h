@@ -6,7 +6,8 @@
 #include "lock.h"
 #include "tss.h"
 
-#define MAX_CPUS 1   // raised by the SMP milestone
+// 128 fits inside xAPIC's 8-bit APIC ID field, so no x2APIC needed.
+#define MAX_CPUS 128
 
 // Per-CPU block, reached through GS. The byte offsets below are
 // consumed by syscall_entry.asm and isr.asm and are asserted against
@@ -30,6 +31,7 @@ struct cpu {
     uint64_t          user_rsp_scratch; // was a global in syscall_entry.asm
     uint64_t          kernel_stack;     // mirrors tss->rsp0 for the syscall path
     uint32_t          lapic_id;
+    volatile uint32_t online;           // set by the AP itself once running
     int               held_depth;
     uint8_t           held_ranks[LOCK_MAX_HELD];
 
@@ -55,7 +57,8 @@ extern struct cpu cpus[MAX_CPUS];
 // Sets IA32_GS_BASE to this CPU's block and IA32_KERNEL_GS_BASE to 0
 // (userland's GS value). Call once per CPU, before the first syscall
 // or interrupt that uses GS.
-void cpu_local_init(void);
+void cpu_local_init_bsp(void);
+void cpu_local_init_ap(int index);
 
 static inline struct cpu *this_cpu(void) {
     struct cpu *c;

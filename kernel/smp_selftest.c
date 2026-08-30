@@ -6,6 +6,8 @@
 #include "lock.h"
 #include "serial.h"
 #include "sched/proc.h"
+#include "tss.h"
+#include "gdt.h"
 
 void runqueue_lock_selftest(void) {
     struct cpu *c = this_cpu();
@@ -26,4 +28,39 @@ void runqueue_lock_selftest(void) {
         return;
     }
     serial_write_string("[runq] selftest passed\n");
+}
+
+void cpu_local_selftest(void) {
+    // Every CPU must get a DISTINCT TSS selector: two CPUs sharing one
+    // TSS share rsp0, and the second ring-3 entry lands on the first
+    // CPU's kernel stack.
+    for (int i = 0; i < MAX_CPUS; i++) {
+        for (int j = i + 1; j < MAX_CPUS; j++) {
+            if (gdt_tss_selector(i) == gdt_tss_selector(j)) {
+                serial_write_string("[cpu] selftest FAILED: duplicate TSS selector\n");
+                return;
+            }
+        }
+    }
+    // Each CPU also needs its OWN double-fault stack, or two concurrent
+    // faults overwrite each other's frame.
+    for (int i = 0; i < MAX_TSS; i++) {
+        for (int j = i + 1; j < MAX_TSS; j++) {
+            if (tss[i].ist1 == tss[j].ist1) {
+                serial_write_string("[cpu] selftest FAILED: shared IST1 stack\n");
+                return;
+            }
+        }
+    }
+    // The BSP's block must be reachable through GS and self-consistent.
+    struct cpu *c = this_cpu();
+    if (c->self != c) {
+        serial_write_string("[cpu] selftest FAILED: gs:0 does not point at itself\n");
+        return;
+    }
+    if (c->tss != &tss[0]) {
+        serial_write_string("[cpu] selftest FAILED: BSP not bound to tss[0]\n");
+        return;
+    }
+    serial_write_string("[cpu] local selftest passed\n");
 }
