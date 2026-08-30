@@ -128,12 +128,10 @@ void smp_parallel_selftest_start(void) {
 
     int online = smp_online_count();
     for (int i = 0; i < PAR_THREADS; i++) {
-        struct thread *t = thread_alloc_kernel(par_worker);
-        if (!t) { return; }
-        // thread_alloc_kernel already queued it on THIS cpu; move it so
-        // the work cannot all land on the BSP by default.
-        dequeue_specific(t);
-        enqueue_ready_on(i % online, t);
+        // Placed directly rather than queued-then-moved: a thread that
+        // is briefly visible on CPU 0's queue can be picked up, run to
+        // completion and freed before the move lands.
+        if (!thread_alloc_kernel_on(par_worker, i % online)) { return; }
     }
 }
 

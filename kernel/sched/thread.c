@@ -86,7 +86,13 @@ struct thread *thread_alloc(struct process *p) {
     return t;
 }
 
-struct thread *thread_alloc_kernel(void (*entry)(void)) {
+// Builds a kernel thread WITHOUT queueing it anywhere. Split out so a
+// caller that wants the thread on a specific CPU -- or on no CPU at all
+// -- can say so up front. Queueing on one CPU and moving it afterwards
+// opens a window in which another CPU picks the thread up, runs it to
+// completion and frees it, leaving the mover to push freed memory onto
+// a run queue.
+static struct thread *thread_build_kernel(void (*entry)(void)) {
     struct thread *t = thread_alloc(0);
     if (!t) {
         return 0;
@@ -109,8 +115,29 @@ struct thread *thread_alloc_kernel(void (*entry)(void)) {
     t->saved_rsp = (uint64_t)sp;
     t->kernel_stack_top = stack_top;
     t->kernel_stack_phys = stack_phys;
+    return t;
+}
 
-    enqueue_ready(t);
+struct thread *thread_alloc_kernel(void (*entry)(void)) {
+    struct thread *t = thread_build_kernel(entry);
+    if (t) { enqueue_ready(t); }
+    return t;
+}
+
+// A kernel thread that is never placed on ANY run queue. For the idle
+// threads: idle_init_for used to allocate one -- which queued it -- and
+// then call dequeue_specific to take it off again. Between those two
+// points another CPU can pick the idle thread up and run it, after
+// which cpus[i].idle names a thread executing somewhere else entirely.
+struct thread *thread_alloc_kernel_unqueued(void (*entry)(void)) {
+    return thread_build_kernel(entry);
+}
+
+// A kernel thread placed directly on `cpu_index`, never visible on any
+// other CPU's queue in between.
+struct thread *thread_alloc_kernel_on(void (*entry)(void), int cpu_index) {
+    struct thread *t = thread_build_kernel(entry);
+    if (t) { enqueue_ready_on(cpu_index, t); }
     return t;
 }
 

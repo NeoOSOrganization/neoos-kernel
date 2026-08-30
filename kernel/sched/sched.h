@@ -17,7 +17,6 @@ int alloc_id(void);
 // sched.c (Phase 7: Per-CPU ready queues, no global ready_head/ready_tail)
 void enqueue_ready(struct thread *t);
 struct thread *dequeue_ready(void);
-void dequeue_specific(struct thread *t);
 void idle_init(void);
 void idle_init_for(int cpu_index);
 void enqueue_ready_on(int cpu_index, struct thread *t);

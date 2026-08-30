@@ -149,23 +149,13 @@ void enqueue_ready_on(int cpu_index, struct thread *t) {
     smp_send_reschedule(cpu_index);
 }
 
-// Removes `t` from the ready queue wherever it sits. Only used by
-// idle_init, which has to un-enqueue the idle thread that
-// thread_alloc_kernel just queued.
-void dequeue_specific(struct thread *t) {
-    struct cpu *c = this_cpu();
-    uint64_t f = spin_lock_irqsave(&c->ready_lock);
-    struct thread **pp = &c->ready_head;
-    struct thread *prev = 0;
-    while (*pp && *pp != t) { prev = *pp; pp = &(*pp)->next; }
-    if (*pp) {
-        *pp = t->next;
-        if (c->ready_tail == t) { c->ready_tail = prev; }
-        c->ready_count--;
-    }
-    t->next = 0;
-    spin_unlock_irqrestore(&c->ready_lock, f);
-}
+// dequeue_specific() lived here. It existed only to undo an enqueue
+// that should never have happened -- "allocate onto this CPU's queue,
+// then take it back off" -- and it only ever searched this_cpu()'s
+// queue, so it could not have found a thread another CPU had already
+// taken. thread_alloc_kernel_unqueued and thread_alloc_kernel_on
+// replace both of its callers by placing the thread correctly to begin
+// with. Deleted rather than fixed: nothing should want it.
 
 // Runs whenever no other thread is ready. Having a real idle thread
 // removes schedule()'s old "nothing ready, keep running whatever's
@@ -210,18 +200,22 @@ static void idle_entry(void) {
     }
 }
 
-// One idle thread per CPU. Each CPU calls this FOR ITSELF: both
-// thread_alloc_kernel and dequeue_specific operate on this_cpu()'s
-// queue, so calling it on another CPU's behalf would enqueue and
-// dequeue on the wrong list.
+// One idle thread per CPU. Still called by each CPU FOR ITSELF, which
+// is now a matter of taste rather than of correctness: the thread is
+// never queued at all, so nothing here depends on this_cpu().
 //
 // The reserved tid is -(index+1) rather than 0 so idle threads stay
 // distinguishable from each other -- and from real threads -- in the
 // serial log.
 void idle_init_for(int cpu_index) {
-    struct thread *t = thread_alloc_kernel(idle_entry);
+    // Never queued in the first place. This used to allocate it onto
+    // this CPU's queue and then call dequeue_specific to take it back
+    // off, which leaves a window in which another CPU can pick the idle
+    // thread up and run it -- after which cpus[i].idle names a thread
+    // executing on a different CPU, and schedule()'s fallback to it
+    // puts two CPUs on one kernel stack.
+    struct thread *t = thread_alloc_kernel_unqueued(idle_entry);
     t->tid = -(cpu_index + 1);
-    dequeue_specific(t);   // never on the ready queue; schedule() falls back to it
     cpus[cpu_index].idle = t;
 }
 

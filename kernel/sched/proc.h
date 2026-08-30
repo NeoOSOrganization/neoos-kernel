@@ -149,6 +149,8 @@ struct process *current_proc(void);
 // sharing the kernel's own address space. Used by selftests and by the
 // idle thread; real processes come from spawn() instead.
 struct thread *thread_alloc_kernel(void (*entry)(void));
+struct thread *thread_alloc_kernel_on(void (*entry)(void), int cpu_index);
+struct thread *thread_alloc_kernel_unqueued(void (*entry)(void));
 
 // Run-queue insertion, shared with waitq.c's wake path.
 void thread_enqueue_ready(struct thread *t);
