@@ -1,4 +1,5 @@
 #include "vfs.h"
+#include "vnode_slab.h"
 #include "ramfs.h"
 #include "fatfs.h"
 #include "devfs.h"
@@ -8,7 +9,7 @@
 #include "../sched/fd_table.h"
 
 static struct vfs_mount mounts[MAX_MOUNTS];
-static struct vnode vnodes[MAX_VNODES];
+// vnodes now allocated via slab allocator (vnode_slab.c)
 
 #define VNODE_BUCKETS 16
 static struct vnode *buckets[VNODE_BUCKETS];
@@ -44,25 +45,17 @@ static void str_copy(char *dst, const char *src, uint64_t dst_size) {
 // suspected, since a count that rises across an operation localises it
 // immediately.
 uint32_t vfs_vnode_in_use_count(void) {
-    uint32_t n = 0;
-    for (int i = 0; i < MAX_VNODES; i++) {
-        if (vnodes[i].mount != 0) { n++; }
-    }
-    return n;
+    return vnode_slab_in_use_count();
 }
 
 void vfs_init(void) {
     for (int i = 0; i < MAX_MOUNTS; i++) {
         mounts[i].in_use = 0;
     }
-    for (int i = 0; i < MAX_VNODES; i++) {
-        vnodes[i].refcount = 0;
-        vnodes[i].mount = 0;
-        vnodes[i].next = 0;
-    }
     for (int i = 0; i < VNODE_BUCKETS; i++) {
         buckets[i] = 0;
     }
+    vnode_slab_init();  // Initialize vnode slab allocator
     serial_write_string("[vfs] initialized\n");
 }
 
@@ -75,15 +68,10 @@ struct vnode *vnode_get(struct vfs_mount *m, uint64_t inode_id) {
         }
     }
 
-    struct vnode *slot = 0;
-    for (int i = 0; i < MAX_VNODES; i++) {
-        if (vnodes[i].refcount == 0 && vnodes[i].mount == 0) {
-            slot = &vnodes[i];
-            break;
-        }
-    }
+    // Allocate new vnode from slab pool
+    struct vnode *slot = vnode_slab_alloc();
     if (!slot) {
-        return 0; // pool exhausted -- caller reports -ENFILE
+        return 0; // pool exhausted or OOM -- caller reports -ENFILE
     }
 
     slot->mount = m;
@@ -93,6 +81,7 @@ struct vnode *vnode_get(struct vfs_mount *m, uint64_t inode_id) {
     if (m->ops->read_inode(m, inode_id, slot) != 0) {
         slot->refcount = 0;
         slot->mount = 0;
+        vnode_slab_free(slot);
         return 0;
     }
 
@@ -123,6 +112,9 @@ void vnode_put(struct vnode *vn) {
     vn->next = 0;
     vn->mount = 0;
     vn->fs_private = 0;
+
+    // Return to slab pool
+    vnode_slab_free(vn);
 }
 
 // Returns the mount owning `path` (longest matching mount-point
@@ -233,14 +225,16 @@ int vfs_umount(const char *target) {
 
     // The root vnode's own reference is ours, so anything above 1 --
     // or any OTHER vnode on this mount still held -- means live users.
-    for (int i = 0; i < MAX_VNODES; i++) {
-        if (vnodes[i].mount != m) {
-            continue;
-        }
-        if (&vnodes[i] == m->root) {
-            if (vnodes[i].refcount > 1) { return -EBUSY; }
-        } else if (vnodes[i].refcount > 0) {
-            return -EBUSY;
+    for (int b = 0; b < VNODE_BUCKETS; b++) {
+        for (struct vnode *vn = buckets[b]; vn; vn = vn->next) {
+            if (vn->mount != m) {
+                continue;
+            }
+            if (vn == m->root) {
+                if (vn->refcount > 1) { return -EBUSY; }
+            } else if (vn->refcount > 0) {
+                return -EBUSY;
+            }
         }
     }
 
