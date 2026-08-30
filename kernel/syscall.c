@@ -2,6 +2,7 @@
 #include "gdt.h"
 #include "serial.h"
 #include "sched/proc.h"
+#include "sched/fd_table.h"
 #include "fs/vfs.h"
 #include "errno.h"
 #include "lock.h"
@@ -93,6 +94,61 @@ static struct mutex fs_lock;
 #define fs_lock_acquire() mutex_lock(&fs_lock)
 #define fs_lock_release() mutex_unlock(&fs_lock)
 
+// FD table helpers: unified interface for old files[] array and new fd_table
+// During transition, these provide compatibility for both backends.
+
+static struct file_descriptor *fd_get(struct process *p, int fd) {
+    if (!p || fd < 0 || fd >= MAX_OPEN_FILES) {
+        return 0;
+    }
+
+    // TODO: Use fd_table when available (Phase 5b+ integration)
+    // For now, use only the old files[] array
+    struct file_descriptor *f = &p->files[fd];
+    return f->in_use ? f : 0;
+}
+
+static int fd_alloc(struct process *p) {
+    if (!p) return -EMFILE;
+
+    // TODO: Use fd_table when available (Phase 5b+ integration)
+    // For now, use only the old files[] array (slots 3+ are available)
+    for (int i = 3; i < MAX_OPEN_FILES; i++) {
+        if (!p->files[i].in_use) {
+            p->files[i].in_use = 1;  // Mark as allocated (caller fills in vnode)
+            return i;
+        }
+    }
+
+    return -EMFILE;
+}
+
+static int fd_close(struct process *p, int fd) {
+    if (!p || fd < 0) return -EBADF;
+
+    // Use fd_table if available
+    if (p->fd_table) {
+        struct file_descriptor *f = fd_table_get(p->fd_table, fd);
+        if (!f) return -EBADF;
+        fd_table_close(p->fd_table, fd);
+        return 0;
+    }
+
+    // Fall back to old files[] array
+    if (fd >= MAX_OPEN_FILES) return -EBADF;
+
+    struct file_descriptor *f = &p->files[fd];
+    if (!f->in_use) return -EBADF;
+
+    vnode_put(f->vn);
+    f->vn = 0;
+    f->in_use = 0;
+    f->position = 0;
+    f->writable = 0;
+
+    return 0;
+}
+
 // Copies up to out_size-1 bytes from a user-supplied (pointer, len)
 // pair into a NUL-terminated kernel buffer. Shared by every syscall
 // that takes a path (SPAWN/OPEN/MKDIR/UNLINK).
@@ -133,13 +189,12 @@ static int64_t syscall_dispatch_inner(int64_t num, int64_t a1, int64_t a2, int64
             int fd = (int)a1;
             const char *buf = (const char *)(uintptr_t)a2;
             uint64_t len = (uint64_t)a3;
-            if (fd < 0 || fd >= MAX_OPEN_FILES) {
+
+            struct file_descriptor *f = fd_get(current_proc(), fd);
+            if (!f || !f->writable) {
                 return -EBADF;
             }
-            struct file_descriptor *f = &current_proc()->files[fd];
-            if (!f->in_use || !f->writable) {
-                return -EBADF;
-            }
+
             fs_lock_acquire();
             int64_t n = f->vn->mount->ops->write(f->vn, f->position, buf, (uint32_t)len);
             if (n < 0) {
@@ -154,13 +209,12 @@ static int64_t syscall_dispatch_inner(int64_t num, int64_t a1, int64_t a2, int64
             int fd = (int)a1;
             char *buf = (char *)(uintptr_t)a2;
             uint64_t len = (uint64_t)a3;
-            if (fd < 0 || fd >= MAX_OPEN_FILES) {
+
+            struct file_descriptor *f = fd_get(current_proc(), fd);
+            if (!f) {
                 return -EBADF;
             }
-            struct file_descriptor *f = &current_proc()->files[fd];
-            if (!f->in_use) {
-                return -EBADF;
-            }
+
             int64_t n = f->vn->mount->ops->read(f->vn, f->position, buf, (uint32_t)len);
             if (n < 0) { return n; }
             f->position += (uint32_t)n;
@@ -185,12 +239,7 @@ static int64_t syscall_dispatch_inner(int64_t num, int64_t a1, int64_t a2, int64
             int flags = (int)a3;
 
             struct process *task = current_proc();
-            // Slots 0-2 are the standard streams, opened at process
-            // creation; ordinary opens start above them.
-            int slot = -1;
-            for (int i = 3; i < MAX_OPEN_FILES; i++) {
-                if (!task->files[i].in_use) { slot = i; break; }
-            }
+            int slot = fd_alloc(task);
             if (slot < 0) { return -EMFILE; }
 
             fs_lock_acquire();
@@ -220,8 +269,11 @@ static int64_t syscall_dispatch_inner(int64_t num, int64_t a1, int64_t a2, int64
 
             fs_lock_release();
 
-            struct file_descriptor *f = &task->files[slot];
-            f->in_use = 1;
+            struct file_descriptor *f = fd_get(task, slot);
+            if (!f) {
+                vnode_put(vn);
+                return -EBADF;
+            }
             f->vn = vn;   // the reference vfs_resolve/vnode_get took is now the fd's
             f->writable = (flags & (O_WRONLY | O_RDWR)) != 0;
             f->position = (flags & O_APPEND) ? vn->size : 0;
@@ -229,17 +281,7 @@ static int64_t syscall_dispatch_inner(int64_t num, int64_t a1, int64_t a2, int64
         }
         case SYS_CLOSE: {
             int fd = (int)a1;
-            if (fd < 0 || fd >= MAX_OPEN_FILES) {
-                return -EBADF;
-            }
-            struct file_descriptor *f = &current_proc()->files[fd];
-            if (!f->in_use) {
-                return -EBADF;
-            }
-            vnode_put(f->vn);
-            f->vn = 0;
-            f->in_use = 0;
-            return 0;
+            return fd_close(current_proc(), fd);
         }
         case SYS_MKDIR: {
             char path_buf[64];
@@ -271,13 +313,12 @@ static int64_t syscall_dispatch_inner(int64_t num, int64_t a1, int64_t a2, int64
             int fd = (int)a1;
             int64_t offset = a2;
             int whence = (int)a3;
-            if (fd < 0 || fd >= MAX_OPEN_FILES) {
+
+            struct file_descriptor *f = fd_get(current_proc(), fd);
+            if (!f) {
                 return -EBADF;
             }
-            struct file_descriptor *f = &current_proc()->files[fd];
-            if (!f->in_use) {
-                return -EBADF;
-            }
+
             int64_t base;
             switch (whence) {
                 case SEEK_SET: base = 0; break;
@@ -323,10 +364,10 @@ static int64_t syscall_dispatch_inner(int64_t num, int64_t a1, int64_t a2, int64
             int fd = (int)a1;
             struct dirent *out = (struct dirent *)(uintptr_t)a2;
             int count = (int)a3;
-            if (fd < 0 || fd >= MAX_OPEN_FILES || count <= 0) { return -EBADF; }
+            if (count <= 0) { return -EBADF; }
 
-            struct file_descriptor *f = &current_proc()->files[fd];
-            if (!f->in_use) { return -EBADF; }
+            struct file_descriptor *f = fd_get(current_proc(), fd);
+            if (!f) { return -EBADF; }
             if (f->vn->type != VNODE_DIR) { return -ENOTDIR; }
 
             // position doubles as the directory cursor for a dir fd,
