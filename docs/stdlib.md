@@ -292,3 +292,43 @@ context switch:
 
 **AVX-512 is not supported**, and no interface exists to enable it.
 
+
+## SMP visibility: `sysconf` and `sched_getcpu`
+
+NeoOS runs on up to 128 CPUs (`MAX_CPUS`), and two POSIX calls expose
+that to a program:
+
+```c
+#include <unistd.h>
+
+long sysconf(int name);   // _SC_NPROCESSORS_ONLN, _SC_NPROCESSORS_CONF
+int  sched_getcpu(void);  // index of the CPU the caller is running on
+```
+
+`sysconf` returns the number of CPUs that came online during boot; a
+CPU the kernel failed to start is logged and excluded rather than
+counted. `sched_getcpu` returns a **dense index** in `0 ..
+sysconf(_SC_NPROCESSORS_ONLN) - 1`, never a Local APIC id — APIC ids
+are sparse and can exceed the CPU count on real hardware.
+
+`_SC_NPROCESSORS_CONF` and `_SC_NPROCESSORS_ONLN` are the values Linux
+uses (83 and 84), so a program compiled against glibc or musl headers
+sees the same constants.
+
+### Divergences from Linux
+
+- **`_SC_NPROCESSORS_CONF` always equals `_SC_NPROCESSORS_ONLN`.**
+  NeoOS has no CPU hotplug, so there is no such thing as a configured
+  but offline CPU. On Linux the two can differ.
+- **No NUMA node.** Linux's `getcpu(2)` also reports a node id, and
+  `sched_getcpu` is layered on it. NeoOS has no NUMA, so no node is
+  reported; a port that wants one should assume node 0.
+- **These are real syscalls here.** On Linux both are library code over
+  the vDSO and sysfs. NeoOS answers them from the kernel under its own
+  syscall numbers. This is invisible to a caller using the functions,
+  and only matters to a program issuing raw syscalls.
+- **`sched_getcpu` is a snapshot, not a lease.** The value can be stale
+  the instant it is read, exactly as on Linux. It is fit for statistics
+  and affinity hints, not for indexing per-CPU data without a lock.
+- **No `sched_setaffinity`.** There is no way to pin a thread to a CPU
+  yet, so a program cannot make `sched_getcpu` stable.

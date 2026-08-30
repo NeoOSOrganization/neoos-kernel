@@ -28,6 +28,8 @@
 #define SYS_THREAD_SELF   20
 #define SYS_RT_SIGACTION  21
 #define SYS_RT_SIGPROCMASK 22
+#define SYS_CPU_COUNT      40
+#define SYS_GETCPU         41
 #define SYS_RT_SIGPENDING 24
 #define SYS_RT_SIGSUSPEND 25
 #define SYS_SIGALTSTACK   28
@@ -94,6 +96,24 @@ int64_t lseek(int fd, int64_t offset, int whence) {
 
 int getpid(void) {
     return (int)syscall0(SYS_GETPID);
+}
+
+// POSIX shapes over the NeoOS syscalls. Linux implements both in libc
+// (sysfs and the vDSO); NeoOS answers them from the kernel directly.
+// The NUMA node sched_getcpu's Linux cousin getcpu(2) can report is
+// always 0 here -- NeoOS has no NUMA. Recorded in docs/stdlib.md.
+long sysconf(int name) {
+    switch (name) {
+    case _SC_NPROCESSORS_ONLN:
+    case _SC_NPROCESSORS_CONF:
+        return (long)syscall0(SYS_CPU_COUNT);
+    default:
+        return -1;
+    }
+}
+
+int sched_getcpu(void) {
+    return (int)syscall0(SYS_GETCPU);
 }
 
 void yield(void) {

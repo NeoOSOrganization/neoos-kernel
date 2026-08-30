@@ -39,6 +39,14 @@ int close(int fd);
 int64_t lseek(int fd, int64_t offset, int whence);
 
 int getpid(void);
+
+// sysconf() names. Values match Linux's <bits/confname.h> so a ported
+// program compiled against glibc/musl headers sees the same constants.
+#define _SC_NPROCESSORS_CONF  83
+#define _SC_NPROCESSORS_ONLN  84
+
+long sysconf(int name);
+int  sched_getcpu(void);
 void yield(void);
 
 // Builds a fresh process directly from the ELF executable at `path`

@@ -9,6 +9,8 @@
 #include "signal.h"
 #include "timer.h"
 #include "mm/vma.h"
+#include "cpu_local.h"
+#include "smp.h"
 
 #define MSR_EFER   0xC0000080
 #define MSR_STAR   0xC0000081
@@ -58,6 +60,12 @@
 #define SYS_GETSID        36
 #define SYS_TKILL         30
 #define SYS_TGKILL        31
+// SMP visibility. Linux exposes these through sysconf(3) and
+// sched_getcpu(3), which are library calls over sysfs/vDSO rather than
+// syscalls of their own -- NeoOS gives them real syscall numbers, and
+// the library presents the POSIX shapes on top. See docs/stdlib.md.
+#define SYS_CPU_COUNT     40
+#define SYS_GETCPU        41
 
 // Mirrors lib/include/fcntl.h's O_* values exactly -- the two trees
 // don't share headers, so these must be kept in sync by hand.
@@ -187,6 +195,10 @@ static int64_t syscall_dispatch_inner(int64_t num, int64_t a1, int64_t a2, int64
         }
         case SYS_GETPID:
             return current_proc()->pid;
+        case SYS_CPU_COUNT:
+            return smp_online_count();
+        case SYS_GETCPU:
+            return (int)(this_cpu() - &cpus[0]);
         case SYS_YIELD:
             schedule();
             return 0;
