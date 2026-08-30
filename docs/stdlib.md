@@ -465,3 +465,68 @@ link.
   thread does. POSIX says `pthread_exit` from `main` keeps the process
   alive until every thread finishes, which is the same outcome here by
   a different route.
+
+## Pipes
+
+```c
+#include <unistd.h>
+int pipe(int fds[2]);
+int pipe2(int fds[2], int flags);   /* O_NONBLOCK, O_CLOEXEC */
+```
+
+`fds[0]` is the read end, `fds[1]` the write end. Both are ordinary
+file descriptors: `read`, `write` and `close` work on them unchanged,
+and `fork` gives the child its own reference on the same pipe.
+
+The three rules that matter:
+
+- **A read from an empty pipe blocks** until data arrives, or returns
+  **0** once every write end has been closed. Buffered bytes are still
+  readable after the writer closes — closing the write end means
+  end-of-stream, not discard.
+- **A write to a pipe with no read ends left raises `SIGPIPE`** and
+  returns `-EPIPE`. A write that had already transferred some bytes
+  reports those instead, as POSIX requires.
+- **A blocked reader is woken when the last writer closes**, not only
+  when data arrives; otherwise the EOF above would be unreachable from
+  the state it exists for. The same in reverse for a writer blocked on
+  a full pipe whose last reader goes away.
+
+`lseek` on a pipe returns `-ESPIPE`. Reading the write end or writing
+the read end returns `-EBADF`.
+
+### Divergences from Linux
+
+- **Capacity is 4096 bytes**, one page. Linux's default is 65536. This
+  is observable only as the point at which a writer blocks, and as the
+  size of the largest write that is guaranteed atomic. POSIX's floor
+  (`PIPE_BUF`, 512) is comfortably met.
+- **No `F_SETPIPE_SZ`**, and no `fcntl` at all, so the capacity cannot
+  be changed at run time.
+- **`O_CLOEXEC` is accepted and ignored.** NeoOS's `exec` does not walk
+  the fd table closing anything yet, so there is nothing for the flag
+  to do. It is accepted rather than rejected so that code written for
+  Linux compiles and behaves identically in the single case that
+  matters today (no exec between the pipe and its use).
+- **Named pipes (FIFOs) do not exist**; there is no `mkfifo` and no
+  filesystem node type for one.
+- **`pipe()` is library code over `pipe2()`**, exactly as musl does it
+  on architectures where Linux dropped the legacy call.
+
+## File descriptors are objects, not vnodes
+
+An fd now carries an operations table rather than pointing straight at
+a filesystem vnode, which is what lets a pipe be read and written by
+the same `read`/`write`/`close` calls. Two consequences are visible
+from userland:
+
+- **A vnode-backed fd is readable regardless of its open mode.**
+  `O_WRONLY` does not currently prevent a `read`. This has always been
+  true in NeoOS and is recorded here rather than quietly changed:
+  tightening it would break existing programs for no benefit yet. Only
+  pipes distinguish the two directions.
+- **`fork` still copies each descriptor by value**, so the file
+  position is not shared between parent and child (see `fork` above).
+  What IS shared is the underlying object: both sides hold a reference
+  on the same pipe, and the pipe's end counts are what decide EOF and
+  `SIGPIPE`, not the number of file descriptors.

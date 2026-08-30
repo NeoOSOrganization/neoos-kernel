@@ -45,6 +45,7 @@
 #define SYS_TKILL         30
 #define SYS_TGKILL        31
 #define SYS_FUTEX         42
+#define SYS_PIPE2         43
 
 static inline int64_t syscall0(int64_t num) {
     int64_t ret;
@@ -285,3 +286,14 @@ int futex_wait_timeout(int *uaddr, int expected, const struct timespec *rel) {
 int futex_wake(int *uaddr, int count) {
     return (int)futex(uaddr, FUTEX_WAKE | FUTEX_PRIVATE_FLAG, count, 0);
 }
+
+// ----------------------------------------------------------------- pipes
+
+int pipe2(int fds[2], int flags) {
+    return (int)syscall2(SYS_PIPE2, (int64_t)(uint64_t)(uintptr_t)fds, flags);
+}
+
+// Linux dropped the zero-argument pipe(2) on newer architectures and
+// musl supplies it over pipe2 there. Same arrangement here: one
+// syscall, and the legacy spelling is library code.
+int pipe(int fds[2]) { return pipe2(fds, 0); }

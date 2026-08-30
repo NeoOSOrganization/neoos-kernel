@@ -59,10 +59,28 @@ uint32_t vfs_vnode_in_use_count(void) {
     return vnode_slab_in_use_count();
 }
 
+// The one lock serialising filesystem OPERATIONS, as distinct from
+// mount_lock, which guards the mount table itself.
+//
+// It lives here rather than in syscall.c, where it started, because it
+// is no longer the syscall layer's alone: kernel/file.c's vnode file
+// operations take it too, and a pipe's must NOT -- holding a
+// filesystem-wide mutex across a blocking pipe read would stall every
+// other process's I/O behind one reader with nothing to read.
+//
+// A sleeping mutex, not a spinlock: every critical section it guards
+// performs disk I/O, and spinning through that would burn the whole
+// time slice.
+static struct mutex fs_lock;
+
+void vfs_lock(void)   { mutex_lock(&fs_lock); }
+void vfs_unlock(void) { mutex_unlock(&fs_lock); }
+
 void vfs_init(void) {
     for (int i = 0; i < MAX_MOUNTS; i++) {
         mounts[i].in_use = 0;
     }
+    mutex_init(&fs_lock, LOCK_RANK_MOUNTTABLE, "fs");
     spin_init(&mount_lock, LOCK_RANK_MOUNTTABLE, "mounttable");
     for (int i = 0; i < VNODE_BUCKETS; i++) {
         buckets[i] = 0;

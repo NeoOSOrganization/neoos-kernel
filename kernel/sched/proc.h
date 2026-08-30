@@ -30,11 +30,24 @@ struct syscall_frame {
 enum thread_state { THREAD_UNUSED, THREAD_READY, THREAD_RUNNING,
                     THREAD_BLOCKED, THREAD_STOPPED, THREAD_ZOMBIE };
 
+struct file_ops;
+
 struct file_descriptor {
     int in_use;
+    // What this fd is, and what it is attached to. `ops` is
+    // &vnode_file_ops for a file on a filesystem and something else for
+    // a pipe or a port; `priv` is that implementation's object. See
+    // kernel/file.h.
+    const struct file_ops *ops;
+    void *priv;
     struct vnode *vn;   // reference held; released by close/process exit
     uint32_t position;  // per-fd, NOT shared across fork -- see docs/stdlib.md
     int writable;
+    // Split out from `writable` for pipes, where the two ends of one
+    // object differ. A vnode-backed fd is readable regardless of its
+    // open mode, which is how NeoOS has always behaved -- O_WRONLY does
+    // not currently prevent a read. Recorded in docs/stdlib.md.
+    int readable;
 };
 
 struct thread;

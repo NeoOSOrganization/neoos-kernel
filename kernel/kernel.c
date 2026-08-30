@@ -28,6 +28,8 @@
 #include "tlb.h"
 #include "smp.h"
 #include "futex.h"
+#include "file.h"
+#include "pipe.h"
 
 void kmain(void *multiboot_info) {
     serial_init();
@@ -142,6 +144,8 @@ void kmain(void *multiboot_info) {
     syscall_init();
     syscall_table_selftest();
     futex_init();
+    file_selftest();
+    pipe_selftest();
 
     // BEFORE the spawns, and before any kernel thread exists.
     //
@@ -176,6 +180,7 @@ void kmain(void *multiboot_info) {
     spawn("/BIN/MMAPTEST.ELF");
     spawn("/BIN/SMPTEST.ELF");
     spawn("/BIN/IPCTEST.ELF");
+    spawn("/BIN/PIPETEST.ELF");
 
     // After the spawns so the selftest's own kernel threads draw ids
     // above the real processes', keeping pids stable across boots.

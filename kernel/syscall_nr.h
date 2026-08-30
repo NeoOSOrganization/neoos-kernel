@@ -67,8 +67,13 @@
 // higher-level POSIX synchronisation primitive is built on it, so it is
 // the one that had to be Linux-shaped down to the last return value.
 #define SYS_FUTEX           42
+// POSIX pipe2. Linux's pipe(2) is the same call with flags == 0, so
+// only the two-argument form exists here and the library supplies
+// pipe() on top -- exactly how musl does it on architectures where
+// Linux dropped the legacy call.
+#define SYS_PIPE2           43
 
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX             43
+#define SYS_MAX             44
 
 #endif

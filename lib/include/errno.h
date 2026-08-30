@@ -38,5 +38,6 @@
 #define EISCONN 106
 #define EMSGSIZE 90
 #define EOVERFLOW 75
+#define ESPIPE  29
 
 #endif

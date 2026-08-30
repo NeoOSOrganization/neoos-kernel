@@ -40,6 +40,17 @@ int64_t lseek(int fd, int64_t offset, int whence);
 
 int getpid(void);
 
+// Creates a pipe: fds[0] is the read end, fds[1] the write end.
+// Returns 0, or a negative errno.h code.
+//
+// A read from an empty pipe blocks until data arrives, or returns 0
+// once every write end is closed. A write blocks while the pipe is
+// full, and raises SIGPIPE (returning -EPIPE if it transferred
+// nothing) once every read end is closed. `flags` takes O_NONBLOCK,
+// which makes both ends return -EAGAIN rather than blocking.
+int pipe(int fds[2]);
+int pipe2(int fds[2], int flags);
+
 // sysconf() names. Values match Linux's <bits/confname.h> so a ported
 // program compiled against glibc/musl headers sees the same constants.
 #define _SC_NPROCESSORS_CONF  83

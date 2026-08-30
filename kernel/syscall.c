@@ -9,9 +9,12 @@
 #include "signal.h"
 #include "timer.h"
 #include "mm/vma.h"
+#include "mm/paging.h"
 #include "cpu_local.h"
 #include "smp.h"
 #include "futex.h"
+#include "file.h"
+#include "pipe.h"
 
 #define MSR_EFER   0xC0000080
 #define MSR_STAR   0xC0000081
@@ -55,12 +58,10 @@ static inline void wrmsr(uint32_t msr, uint64_t value) {
     __asm__ volatile ("wrmsr" :: "c"(msr), "a"(lo), "d"(hi));
 }
 
-// A sleeping mutex, not a spinlock: every critical section it guards
-// performs disk I/O, and spinning through that would burn the whole
-// time slice. Rank MOUNTTABLE per the roadmap's lock hierarchy.
-static struct mutex fs_lock;
-#define fs_lock_acquire() mutex_lock(&fs_lock)
-#define fs_lock_release() mutex_unlock(&fs_lock)
+// The filesystem lock now lives in kernel/fs/vfs.c, because
+// kernel/file.c's vnode operations take it too and a pipe's must not.
+#define fs_lock_acquire() vfs_lock()
+#define fs_lock_release() vfs_unlock()
 
 // Every fd access in this file goes through these three, so the
 // backing store is named in exactly one place.
@@ -144,35 +145,20 @@ static int64_t sys_exit(struct syscall_args *a) {
     return 0; // unreachable -- process_exit never returns
 }
 
+// The four fd operations are now four lines each. Whether the target
+// is a file, a pipe or (later) a socket is the file layer's business;
+// none of them can grow a special case for one kind of object without
+// that being conspicuous.
 static int64_t sys_write(struct syscall_args *a) {
-    const char *buf = (const char *)(uintptr_t)a->a2;
-    uint64_t len = (uint64_t)a->a3;
-
     struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
-    if (!f || !f->writable) { return -EBADF; }
-
-    fs_lock_acquire();
-    int64_t n = f->vn->mount->ops->write(f->vn, f->position, buf, (uint32_t)len);
-    if (n < 0) {
-        fs_lock_release();
-        return n;
-    }
-    f->position += (uint32_t)n;
-    fs_lock_release();
-    return n;
+    if (!f) { return -EBADF; }
+    return file_write(f, (const void *)(uintptr_t)a->a2, (uint64_t)a->a3);
 }
 
 static int64_t sys_read(struct syscall_args *a) {
-    char *buf = (char *)(uintptr_t)a->a2;
-    uint64_t len = (uint64_t)a->a3;
-
     struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
     if (!f) { return -EBADF; }
-
-    int64_t n = f->vn->mount->ops->read(f->vn, f->position, buf, (uint32_t)len);
-    if (n < 0) { return n; }
-    f->position += (uint32_t)n;
-    return n;
+    return file_read(f, (void *)(uintptr_t)a->a2, (uint64_t)a->a3);
 }
 
 static int64_t sys_getpid(struct syscall_args *a) {
@@ -255,7 +241,13 @@ static int64_t sys_open(struct syscall_args *a) {
         return -EBADF;
     }
     f->vn = vn;   // the reference vfs_resolve/vnode_get took is now the fd's
+    f->ops = &vnode_file_ops;
     f->writable = (flags & (O_WRONLY | O_RDWR)) != 0;
+    // Readable regardless of the open mode, which is what NeoOS has
+    // always done -- O_WRONLY does not prevent a read. Recorded in
+    // docs/stdlib.md rather than quietly changed here, since tightening
+    // it would break existing programs for no benefit this milestone.
+    f->readable = 1;
     f->position = (flags & O_APPEND) ? vn->size : 0;
     return slot;
 }
@@ -293,22 +285,9 @@ static int64_t sys_unlink(struct syscall_args *a) {
 }
 
 static int64_t sys_lseek(struct syscall_args *a) {
-    int64_t offset = a->a2;
-    int whence = (int)a->a3;
-
     struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
     if (!f) { return -EBADF; }
-
-    int64_t base;
-    if (whence == SEEK_SET)      { base = 0; }
-    else if (whence == SEEK_CUR) { base = (int64_t)f->position; }
-    else if (whence == SEEK_END) { base = (int64_t)f->vn->size; }
-    else                         { return -EINVAL; }
-
-    int64_t new_position = base + offset;
-    if (new_position < 0) { return -EINVAL; }
-    f->position = (uint32_t)new_position;
-    return new_position;
+    return file_lseek(f, a->a2, (int)a->a3);
 }
 
 static int64_t sys_fork(struct syscall_args *a) {
@@ -343,27 +322,27 @@ static int64_t sys_umount(struct syscall_args *a) {
 }
 
 static int64_t sys_getdents(struct syscall_args *a) {
-    struct dirent *out = (struct dirent *)(uintptr_t)a->a2;
     int count = (int)a->a3;
     if (count <= 0) { return -EBADF; }
-
     struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
     if (!f) { return -EBADF; }
-    if (f->vn->type != VNODE_DIR) { return -ENOTDIR; }
+    return file_getdents(f, (struct dirent *)(uintptr_t)a->a2, count);
+}
 
-    // position doubles as the directory cursor for a dir fd, so
-    // repeated calls walk forward exactly like read() does on a file.
-    fs_lock_acquire();
-    int written = 0;
-    while (written < count) {
-        if (f->vn->mount->ops->readdir(f->vn, f->position, &out[written]) != 0) {
-            break; // past the last entry
-        }
-        f->position++;
-        written++;
+static int64_t sys_pipe2(struct syscall_args *a) {
+    int *user_fds = (int *)(uintptr_t)a->a1;
+    if (!user_fds) { return -EFAULT; }
+    if (!user_range_writable((uint64_t)(uintptr_t)user_fds, 2 * sizeof(int))) {
+        return -EFAULT;
     }
-    fs_lock_release();
-    return written;
+    int fds[2];
+    int rc = pipe_create(fds, (int)a->a2);
+    if (rc != 0) { return rc; }
+    // Written only after both ends exist, so a failure leaves the
+    // caller's array untouched rather than half-filled.
+    user_fds[0] = fds[0];
+    user_fds[1] = fds[1];
+    return 0;
 }
 
 static int64_t sys_thread_create(struct syscall_args *a) {
@@ -658,6 +637,7 @@ static const struct syscall_desc syscall_table[SYS_MAX] = {
     [SYS_CPU_COUNT]       = { sys_cpu_count,       "cpu_count" },
     [SYS_GETCPU]          = { sys_getcpu,          "getcpu" },
     [SYS_FUTEX]           = { sys_futex,           "futex" },
+    [SYS_PIPE2]           = { sys_pipe2,           "pipe2" },
 };
 
 // Asserts what the table's shape is supposed to guarantee. Cheap, and
@@ -715,7 +695,6 @@ int64_t syscall_dispatch(int64_t num, int64_t a1, int64_t a2, int64_t a3,
 }
 
 void syscall_init(void) {
-    mutex_init(&fs_lock, LOCK_RANK_MOUNTTABLE, "fs");
     syscall_init_this_cpu();
     serial_write_string("[syscall] SYSCALL/SYSRET configured\n");
 }

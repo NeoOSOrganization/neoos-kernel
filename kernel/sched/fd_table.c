@@ -2,6 +2,7 @@
 #include "proc.h"
 #include "../mm/heap.h"
 #include "../fs/vfs.h"
+#include "../file.h"
 #include "../serial.h"
 #include "../errno.h"
 
@@ -13,13 +14,24 @@ static inline unsigned fd_slot(int fd) {
     return (unsigned)fd % FD_TABLE_SLOTS;
 }
 
+static void slot_reset(struct file_descriptor *f) {
+    f->in_use   = 0;
+    // Reset to the vnode implementation rather than to null: a freshly
+    // allocated slot is a plain file until something says otherwise,
+    // and every existing caller of fd_table_alloc/put assumes exactly
+    // that. A pipe overwrites it.
+    f->ops      = &vnode_file_ops;
+    f->priv     = 0;
+    f->vn       = 0;
+    f->position = 0;
+    f->writable = 0;
+    // Vnode-backed fds have always been readable regardless of open
+    // mode; only pipes distinguish the two ends. See docs/stdlib.md.
+    f->readable = 1;
+}
+
 static void slots_clear(struct file_descriptor *slots, int n) {
-    for (int i = 0; i < n; i++) {
-        slots[i].in_use   = 0;
-        slots[i].vn       = 0;
-        slots[i].position = 0;
-        slots[i].writable = 0;
-    }
+    for (int i = 0; i < n; i++) { slot_reset(&slots[i]); }
 }
 
 // Returns the bucket's level-2 slot array, allocating it on first use.
@@ -95,10 +107,8 @@ int fd_table_alloc(struct fd_table *table) {
         for (unsigned slot_idx = first; slot_idx < FD_TABLE_SLOTS; slot_idx++) {
             if (slots[slot_idx].in_use) { continue; }
 
-            slots[slot_idx].in_use   = 1;  // caller fills in vnode/position
-            slots[slot_idx].vn       = 0;
-            slots[slot_idx].position = 0;
-            slots[slot_idx].writable = 0;
+            slot_reset(&slots[slot_idx]);
+            slots[slot_idx].in_use = 1;   // caller fills in the object
             b->slot_count++;
 
             // A hint only; a stale value costs a wasted scan, never
@@ -125,28 +135,25 @@ void fd_table_close(struct fd_table *table, int fd) {
         return;
     }
 
-    uint64_t flags = spin_lock_irqsave(&b->lock);
+    // The descriptor is COPIED out and the slot cleared under the
+    // lock; the object's reference is dropped afterwards, outside it.
+    // vnode_put writes the inode back through the filesystem, which
+    // takes lower-ranked locks and can sleep, and a pipe's close wakes
+    // whoever was blocked on it -- neither is safe under a bucket lock.
+    struct file_descriptor closing;
+    int had = 0;
 
-    struct vnode *vn = 0;
+    uint64_t flags = spin_lock_irqsave(&b->lock);
     struct file_descriptor *f = &b->slots[fd_slot(fd)];
     if (f->in_use) {
-        vn = f->vn;
-        f->in_use   = 0;
-        f->vn       = 0;
-        f->position = 0;
-        f->writable = 0;
+        closing = *f;
+        had = 1;
+        slot_reset(f);
         b->slot_count--;
     }
-
     spin_unlock_irqrestore(&b->lock, flags);
 
-    // Deliberately outside the bucket lock: vnode_put writes the inode
-    // back through the filesystem, which takes locks of LOWER rank
-    // (BLOCKDEV, DRIVER) and can sleep. Dropping the last reference
-    // while holding a rank-9 spinlock would trip the rank checker.
-    if (vn) {
-        vnode_put(vn);
-    }
+    if (had) { file_close(&closing); }
 }
 
 // Direct fd setter, used at process creation for fds 0-2. Must not be
@@ -169,9 +176,9 @@ int fd_table_put(struct fd_table *table, int fd, struct vnode *vn, int writable)
 
     int placed = 0;
     if (!slots[slot_idx].in_use) {
+        slot_reset(&slots[slot_idx]);
         slots[slot_idx].in_use   = 1;
         slots[slot_idx].vn       = vn;
-        slots[slot_idx].position = 0;
         slots[slot_idx].writable = writable;
         b->slot_count++;
         placed = 1;
@@ -200,10 +207,7 @@ void fd_table_free(struct fd_table *table) {
         if (!slots) { continue; }
 
         for (int slot_idx = 0; slot_idx < FD_TABLE_SLOTS; slot_idx++) {
-            if (slots[slot_idx].in_use && slots[slot_idx].vn) {
-                vnode_put(slots[slot_idx].vn);
-                slots[slot_idx].vn = 0;
-            }
+            if (slots[slot_idx].in_use) { file_close(&slots[slot_idx]); }
         }
         kfree(slots);
     }
@@ -239,12 +243,13 @@ int fd_table_dup(struct fd_table *dst, struct fd_table *src) {
             dst_slots[slot_idx] = *s;   // position included: the child
                                         // inherits the offset, then the
                                         // two diverge (docs/stdlib.md)
-            // The copy duplicates the vnode POINTER, so the child owes
-            // the cache its own reference; without this the first close
-            // on either side would free a vnode the other still holds.
-            if (dst_slots[slot_idx].vn) {
-                dst_slots[slot_idx].vn->refcount++;
-            }
+            // The copy duplicates the OBJECT POINTER, so the child owes
+            // it a reference of its own. Without this the first close on
+            // either side frees something the other still holds -- and
+            // for a pipe it would also miscount the ends, so the child
+            // closing its copy would look like the last writer going
+            // away.
+            file_dup(&dst_slots[slot_idx]);
             dst_b->slot_count++;
         }
 

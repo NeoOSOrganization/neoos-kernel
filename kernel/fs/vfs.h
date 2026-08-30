@@ -67,6 +67,14 @@ struct vfs_mount {
 };
 
 void vfs_init(void);
+
+// Serialises filesystem OPERATIONS (as opposed to the mount table,
+// which mount_lock guards). A sleeping mutex: everything it protects
+// performs disk I/O. Held by the vnode file operations in
+// kernel/file.c and by the path-taking syscalls; deliberately NOT held
+// by anything that can block indefinitely, such as a pipe read.
+void vfs_lock(void);
+void vfs_unlock(void);
 void vfs_selftest(void);
 
 // Number of vnode pool slots currently claimed. A quiesced system
