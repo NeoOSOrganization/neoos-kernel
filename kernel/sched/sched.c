@@ -50,7 +50,37 @@ static struct thread *ready_pop(struct cpu *c) {
     return t;
 }
 
+// Blocks until no CPU is executing on `t`'s kernel stack any more.
+//
+// THE INVARIANT: a thread must not be placed on a run queue while a CPU
+// is still switching away from it. context_switch writes saved_rsp as
+// its FIRST action, so a thread published before that point is visible
+// with a stale saved_rsp -- and a second CPU that picks it up starts
+// executing on a kernel stack the first CPU has not finished with. That
+// corrupts the heap within milliseconds (observed as a page fault
+// inside kmalloc at cr2=0x100000000).
+//
+// schedule() solves this for the thread it is switching away from by
+// deferring the requeue to sched_post_switch(). But a thread can also
+// be made runnable by somebody ELSE -- a waitq wake, a timeout, SIGCONT
+// -- on another CPU entirely, while it is still on its way into
+// schedule(). That waker cannot defer; it has to wait.
+//
+// The wait is bounded: the owning CPU only has to finish a context
+// switch, and it holds no lock a caller here could be waiting on
+// (schedule() panics if entered with any lock held). A wait that never
+// ends therefore means a design error -- somebody is trying to make a
+// RUNNING thread runnable -- so say that instead of hanging silently.
+static void wait_off_cpu(struct thread *t) {
+    for (uint64_t i = 0; i < 100000000ULL; i++) {
+        if (__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE) == 0) { return; }
+        __asm__ volatile ("pause");
+    }
+    lock_panic("thread still on-cpu; cannot be made runnable", "sched/on_cpu", 0);
+}
+
 void enqueue_ready(struct thread *t) {
+    wait_off_cpu(t);
     struct cpu *c = this_cpu();
     uint64_t f = spin_lock_irqsave(&c->ready_lock);
     ready_push(c, t);
@@ -67,9 +97,47 @@ struct thread *dequeue_ready(void) {
 
 void thread_enqueue_ready(struct thread *t) { enqueue_ready(t); }
 
+// The one way to make a parked thread runnable. Returns 1 if THIS
+// caller performed the transition.
+//
+// Two things have to be true at once, and neither survives on its own:
+//
+//   - the thread must have finished leaving its CPU (wait_off_cpu),
+//     or it lands on a run queue with a stale saved_rsp;
+//   - exactly ONE waker may enqueue it. Several can race for the same
+//     sleeper -- waitq_wake_one and a SIGKILL arriving together, say --
+//     and before this was a compare-exchange both would "succeed",
+//     putting one thread on two run queues, after which two CPUs run
+//     it on one kernel stack.
+//
+// The CAS is what makes the pairing safe: no waker may touch `state`
+// until on_cpu is clear, so schedule()'s own hand-off in
+// sched_post_switch() reads a state no waker has raced it for, and
+// among the wakers themselves only the winner enqueues.
+int thread_wake(struct thread *t, enum thread_state from) {
+    // Checked BEFORE the wait, not just by the CAS. A thread that is
+    // still RUNNING is not parked and never will be on our account, so
+    // wait_off_cpu() would spin on it until it gave up and panicked.
+    // Once the state does read `from`, the thread is committed to
+    // leaving its CPU and the wait is short.
+    if (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) != from) { return 0; }
+    wait_off_cpu(t);
+    enum thread_state expected = from;
+    if (!__atomic_compare_exchange_n(&t->state, &expected, THREAD_READY,
+                                     0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        return 0;
+    }
+    t->blocked_on = 0;
+    enqueue_ready(t);
+    return 1;
+}
+
+void thread_wait_off_cpu(struct thread *t) { wait_off_cpu(t); }
+
 // Enqueue onto a SPECIFIC CPU's queue rather than this one. Used at
 // thread creation to spread new work, and by the selftests.
 void enqueue_ready_on(int cpu_index, struct thread *t) {
+    wait_off_cpu(t);
     struct cpu *c = &cpus[cpu_index];
     uint64_t f = spin_lock_irqsave(&c->ready_lock);
     ready_push(c, t);
@@ -152,6 +220,44 @@ void idle_init_for(int cpu_index) {
 
 void idle_init(void) { idle_init_for(0); }
 
+// Releases the thread this CPU switched away from, and only then makes
+// it runnable. Runs as the INCOMING thread, which is the earliest point
+// at which the outgoing thread's context is definitely saved and its
+// kernel stack definitely idle.
+//
+// Called from three kinds of place, which between them cover every way
+// a CPU can arrive on a new thread:
+//   - the top of schedule(), for a thread resumed by an earlier switch;
+//   - immediately after context_switch() returns, for the common case;
+//   - the head of each trampoline, for a brand-new thread, which starts
+//     at its trampoline and never reaches the post-switch path.
+//
+// The order inside matters. on_cpu is cleared BEFORE the requeue: clear
+// it afterwards and a CPU that picks the thread up in between would set
+// on_cpu itself, only for this stale store to clear it again while that
+// CPU is running the thread. Reading `s` before the clear is safe
+// because nothing else may touch a thread's state while on_cpu is set.
+void sched_post_switch(void) {
+    struct cpu *c = this_cpu();
+    struct thread *p = c->prev_pending;
+    if (!p) { return; }
+    c->prev_pending = 0;
+
+    enum thread_state s = p->state;
+    __atomic_store_n(&p->on_cpu, 0, __ATOMIC_RELEASE);
+
+    // The idle thread is this CPU's alone and is never queued anywhere;
+    // schedule() falls back to c->idle instead of dequeuing it.
+    if (p == c->idle) { return; }
+
+    if (s == THREAD_READY) {
+        enqueue_ready(p);
+    }
+    // THREAD_BLOCKED: parked on a wait queue, and its waker is free to
+    // enqueue it now that on_cpu is clear. THREAD_ZOMBIE: published by
+    // thread_exit_self. Nothing to do for either.
+}
+
 // Restores EFLAGS.IF to whatever it was on entry to schedule(). Split
 // out because schedule() has three exits (no-task, same-task, and the
 // far side of a context switch, possibly milliseconds later in a
@@ -201,6 +307,10 @@ void schedule(void) {
 
     struct cpu *c = this_cpu();
 
+    // Before looking for work: whoever this CPU switched away from last
+    // is now fully saved, and may be handed on.
+    sched_post_switch();
+
     struct thread *next = dequeue_ready();
     if (!next) {
         struct thread *cur = c->current;
@@ -212,12 +322,20 @@ void schedule(void) {
     }
 
     struct thread *prev = c->current;
-    if (prev && prev->state == THREAD_RUNNING && prev != c->idle) {
-        prev->state = THREAD_READY;
-        enqueue_ready(prev);
+
+    // The invariant wait_off_cpu() protects, asserted from the other
+    // side: a runnable thread must not still be executing anywhere. If
+    // this ever fires, something published a thread before its context
+    // was saved -- exactly the bug that made work stealing corrupt the
+    // heap. Far better to name it here than to discover it as a
+    // mangled free list ten milliseconds later.
+    if (next != prev && __atomic_load_n(&next->on_cpu, __ATOMIC_ACQUIRE)) {
+        lock_panic("scheduling a thread that is still on another cpu",
+                   "sched/on_cpu", 0);
     }
 
     next->state = THREAD_RUNNING;
+    __atomic_store_n(&next->on_cpu, 1, __ATOMIC_RELAXED);
     c->current = next;
     c->tss->rsp0    = next->kernel_stack_top;
     c->kernel_stack = next->kernel_stack_top;
@@ -241,6 +359,16 @@ void schedule(void) {
         return;
     }
 
+    // Handed over ONLY once a context switch is certain. Setting this
+    // before the `prev == next` early return above would leave a
+    // still-RUNNING thread in prev_pending, and the next release would
+    // put it on a run queue while it is executing -- precisely the race
+    // this mechanism exists to prevent.
+    if (prev) {
+        if (prev->state == THREAD_RUNNING) { prev->state = THREAD_READY; }
+        c->prev_pending = prev;
+    }
+
     static uint64_t discarded_rsp; // used the first time schedule() is ever called, from kmain
     if (prev) {
         cpu_state_save(prev->xstate);
@@ -249,6 +377,10 @@ void schedule(void) {
     context_switch(prev ? &prev->saved_rsp : &discarded_rsp, &next->saved_rsp);
 
     // Reached only when THIS task is scheduled back in, which may be
-    // much later; `flags` is the IF state from its own entry above.
+    // much later and -- once threads migrate -- on a DIFFERENT CPU, so
+    // sched_post_switch() re-reads this_cpu() rather than reusing `c`.
+    sched_post_switch();
+
+    // `flags` is the IF state from this task's own entry above.
     schedule_restore_if(flags);
 }

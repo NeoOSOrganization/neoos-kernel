@@ -192,9 +192,13 @@ void signal_wake_for_delivery(struct thread *t) {
     // unconditionally and let the sleeper re-check.
     if (t->proc) { waitq_wake_all(&t->proc->sig_waiters); }
     if (t->state == THREAD_BLOCKED && signal_next_deliverable(t)) {
+        // waitq_remove first, so the thread is off the wait queue before
+        // it can be picked up from a run queue. thread_wake then decides
+        // who actually gets to enqueue it: a concurrent waitq_wake_one
+        // may be doing the same thing to the same sleeper, and only one
+        // of the two may win.
         waitq_remove(t);
-        t->state = THREAD_READY;
-        thread_enqueue_ready(t);
+        thread_wake(t, THREAD_BLOCKED);
     }
 }
 
@@ -331,10 +335,7 @@ void signal_do_continue(struct process *p) {
 
     for (struct thread *t = p->threads; t; t = t->proc_next) {
         sigset_del(&t->pending, SIGSTOP);
-        if (t->state == THREAD_STOPPED) {
-            t->state = THREAD_READY;
-            thread_enqueue_ready(t);
-        }
+        thread_wake(t, THREAD_STOPPED);
     }
 }
 

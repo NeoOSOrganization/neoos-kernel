@@ -22,6 +22,12 @@ void idle_init(void);
 void idle_init_for(int cpu_index);
 void enqueue_ready_on(int cpu_index, struct thread *t);
 
+// Releases the thread this CPU switched away from. Called from
+// schedule() itself and -- because a brand-new thread starts at a
+// trampoline and never returns through context_switch -- from
+// context_switch.asm and fork_trampoline.asm.
+void sched_post_switch(void);
+
 // Kernel threads park here on exit; the idle thread reclaims them,
 // since they have no parent to reap them and cannot free the stack
 // they are running on.

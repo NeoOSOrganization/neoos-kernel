@@ -43,6 +43,11 @@ struct cpu {
     struct thread    *ready_head;
     struct thread    *ready_tail;
     uint32_t          ready_count;      // list length, for steal victim choice
+    // The thread this CPU has switched AWAY from but not yet released.
+    // Consumed by sched_post_switch(), which runs as the INCOMING
+    // thread; see sched.c for why the release cannot happen any
+    // earlier.
+    struct thread    *prev_pending;
 };
 
 _Static_assert(offsetof(struct cpu, self)             == CPU_SELF,     "CPU_SELF");

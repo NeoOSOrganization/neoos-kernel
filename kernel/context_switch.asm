@@ -15,6 +15,20 @@ section .text
 [bits 64]
 global context_switch
 
+; sched_post_switch (sched.c) releases the thread the CPU switched away
+; from and puts it back on a run queue. schedule() calls it itself on
+; the far side of context_switch -- but a BRAND-NEW thread lands on a
+; trampoline below instead and never reaches that code, so each
+; trampoline calls it too. Without this the outgoing thread sits in
+; cpus[].prev_pending, runnable nowhere, until that CPU next schedules
+; -- which on an AP (no timer interrupt) may be never.
+;
+; The `sub rsp, 8` before each call is alignment, not a slot: every
+; trampoline is entered with RSP ≡ 8 (mod 16), and the SysV ABI wants
+; RSP ≡ 8 (mod 16) at the callee's first instruction, i.e. ≡ 0 at the
+; `call`.
+extern sched_post_switch
+
 context_switch:
     push rbp
     push rbx
@@ -50,6 +64,10 @@ context_switch:
 global kernel_thread_entry_trampoline
 
 kernel_thread_entry_trampoline:
+    sub rsp, 8
+    call sched_post_switch
+    add rsp, 8
+
     pop rax   ; entry function pointer, planted by task_create_kernel_thread
     sti
     call rax
@@ -65,6 +83,10 @@ kernel_thread_entry_trampoline:
 global kernel_thread_trampoline
 
 kernel_thread_trampoline:
+    sub rsp, 8
+    call sched_post_switch
+    add rsp, 8
+
     pop rdi   ; entry_rip, planted by spawn()/thread_create()
     pop rsi   ; user_rsp,  planted by spawn()/thread_create()
     pop rdx   ; arg -- becomes the user entry point's SysV first

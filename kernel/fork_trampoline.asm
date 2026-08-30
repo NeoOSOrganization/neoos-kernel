@@ -10,8 +10,18 @@
 section .text
 [bits 64]
 global fork_trampoline
+; See the note in context_switch.asm: a brand-new thread never returns
+; through context_switch, so the trampoline has to release the thread
+; the CPU switched away from. Called BEFORE the pops below, since it
+; clobbers the caller-saved registers they land in. `sub rsp, 8` is
+; SysV alignment -- this label is entered with RSP ≡ 8 (mod 16).
+extern sched_post_switch
 
 fork_trampoline:
+    sub rsp, 8
+    call sched_post_switch
+    add rsp, 8
+
     ; rbx/rbp/r12-r15 are NOT popped here -- context_switch's own
     ; epilogue (the `pop r15/r14/r13/r12/rbx/rbp` sequence right before
     ; its `ret`) already consumed those stack slots and restored the

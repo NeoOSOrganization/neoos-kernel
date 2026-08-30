@@ -43,6 +43,8 @@ void waitq_lock_selftest(void) {
     serial_write_string("[waitq] lock selftest passed\n");
 }
 
+static void waitq_make_ready(struct thread *t);
+
 static void waitq_enqueue(struct waitq *q, struct thread *t) {
     t->next = 0;
     if (q->tail) { q->tail->next = t; } else { q->head = t; }
@@ -154,24 +156,38 @@ void waitq_timeout_tick(void) {
     if (!timeout_lock_ready || !timeout_list) { return; }
     uint64_t now = timer_ticks();
 
+    // Expired sleepers are unlinked under the lock and woken after it is
+    // dropped. Waking can spin (thread_enqueue_ready waits for the
+    // sleeper to finish leaving its CPU), and spinning while holding
+    // timeout_lock would block every other CPU's timeout_add for the
+    // duration -- for no reason, since the wake needs nothing this list
+    // protects.
+    struct thread *expired = 0;
+
     uint64_t f = spin_lock_irqsave(&timeout_lock);
     struct thread **pp = &timeout_list;
     while (*pp) {
         struct thread *t = *pp;
         if (t->sleep_deadline && now >= t->sleep_deadline) {
             *pp = t->timeout_next;
-            t->timeout_next = 0;
             t->sleep_deadline = 0;
-            if (t->state == THREAD_BLOCKED) {
-                waitq_remove(t);
-                t->state = THREAD_READY;
-                thread_enqueue_ready(t);
-            }
+            t->timeout_next = expired;
+            expired = t;
         } else {
             pp = &t->timeout_next;
         }
     }
     spin_unlock_irqrestore(&timeout_lock, f);
+
+    while (expired) {
+        struct thread *t = expired;
+        expired = t->timeout_next;
+        t->timeout_next = 0;
+        if (t->state == THREAD_BLOCKED) {
+            waitq_remove(t);
+            waitq_make_ready(t);
+        }
+    }
 }
 
 int waitq_sleep_timeout(struct waitq *q, struct spinlock *release,
@@ -186,10 +202,13 @@ int waitq_sleep_timeout(struct waitq *q, struct spinlock *release,
     return expired ? -ETIMEDOUT : 0;
 }
 
+// thread_wake does the BLOCKED -> READY transition atomically, so a
+// sleeper that two wakers reach at once (waitq_wake_one racing a
+// SIGKILL, say) is enqueued exactly once. Its return value is ignored
+// here: losing the race means someone else already woke the thread,
+// which is the outcome either way.
 static void waitq_make_ready(struct thread *t) {
-    t->blocked_on = 0;
-    t->state = THREAD_READY;
-    thread_enqueue_ready(t);
+    thread_wake(t, THREAD_BLOCKED);
 }
 
 // Both wakers dequeue under q->lock and only then make the threads

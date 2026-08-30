@@ -101,6 +101,13 @@ struct thread {
     int tid;                        // 0 == an idle thread (never a pid)
     struct process *proc;           // 0 for the pre-process idle thread
     enum thread_state state;
+    // Non-zero while SOME CPU is still executing on this thread's
+    // kernel stack -- set when a CPU switches to it, cleared only once
+    // the switch AWAY from it has completed and saved_rsp is final.
+    // Nothing may make the thread runnable, or free its stack, while
+    // this is set. See sched_post_switch() and wait_off_cpu() in
+    // sched.c for the whole story.
+    volatile uint32_t on_cpu;
     uint64_t saved_rsp;
     uint64_t kernel_stack_top;
     uint64_t kernel_stack_phys;
@@ -145,6 +152,16 @@ struct thread *thread_alloc_kernel(void (*entry)(void));
 
 // Run-queue insertion, shared with waitq.c's wake path.
 void thread_enqueue_ready(struct thread *t);
+
+// Moves `t` from `from` (THREAD_BLOCKED or THREAD_STOPPED) to
+// THREAD_READY and queues it, waiting first for it to finish leaving
+// whatever CPU it was on. Returns 1 if this caller won the transition,
+// 0 if someone else already did. EVERY wake goes through here.
+int thread_wake(struct thread *t, enum thread_state from);
+
+// Waits until no CPU is executing on `t`'s kernel stack. Needed before
+// freeing that stack; thread_wake() does it for the wake path.
+void thread_wait_off_cpu(struct thread *t);
 
 #define USER_STACK_PAGES 4
 #define USER_STACK_TOP 0x0000700000000000ULL
