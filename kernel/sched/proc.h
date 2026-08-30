@@ -44,6 +44,7 @@ struct file_descriptor {
 struct thread;
 struct sigqueue;
 struct thread_table;  // opaque; defined in thread_table.h
+struct fd_table;      // opaque; defined in fd_table.h
 
 struct process {
     int pid, parent_pid;
@@ -55,7 +56,8 @@ struct process {
     uint64_t pml4_phys;             // 0 = shares the kernel address space
     struct vma *vmas;               // sorted by start, non-overlapping
     uint64_t    mmap_next;          // bump hint for unhinted mmap
-    struct file_descriptor files[MAX_OPEN_FILES];
+    struct fd_table *fd_table;      // 2-level file descriptor table (NEW)
+    struct file_descriptor files[MAX_OPEN_FILES];  // DEPRECATED: kept for transition
     struct thread *threads;         // live threads, via thread->proc_next
     struct thread *zombies;         // exited, unjoined; freed at reap
     struct thread_table *thread_table;  // per-process thread hash table (NEW)

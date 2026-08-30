@@ -5,6 +5,7 @@
 #include "../errno.h"
 #include "../serial.h"
 #include "../sched/proc.h"
+#include "../sched/fd_table.h"
 
 static struct vfs_mount mounts[MAX_MOUNTS];
 static struct vnode vnodes[MAX_VNODES];
@@ -343,10 +344,15 @@ int vfs_open_into(const char *path, struct process *p, int fd, int writable) {
     int err = 0;
     struct vnode *vn = vfs_resolve(path, &err);
     if (!vn) { return err; }
-    p->files[fd].in_use = 1;
-    p->files[fd].vn = vn;
-    p->files[fd].position = 0;
-    p->files[fd].writable = writable;
+
+    // Use old files[] array for now (fd_table integration will come later)
+    if (fd < MAX_OPEN_FILES) {
+        p->files[fd].in_use = 1;
+        p->files[fd].vn = vn;
+        p->files[fd].position = 0;
+        p->files[fd].writable = writable;
+    }
+
     return 0;
 }
 

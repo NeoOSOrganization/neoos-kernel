@@ -5,6 +5,7 @@
 #include "sched.h"
 #include "proc_table.h"
 #include "thread_table.h"
+#include "fd_table.h"
 #include "../mm/pmm.h"
 #include "../mm/paging.h"
 #include "../mm/heap.h"
@@ -37,9 +38,15 @@ static struct process *proc_alloc(void) {
     if (!p) { return 0; }
     for (unsigned i = 0; i < sizeof(struct process); i++) { ((uint8_t *)p)[i] = 0; }
 
+    // Allocate per-process file descriptor table
+    struct fd_table *ft = (struct fd_table *)kmalloc(sizeof(struct fd_table));
+    if (!ft) { kfree(p); return 0; }
+    fd_table_init(ft);
+    p->fd_table = ft;
+
     // Allocate per-process thread table
     struct thread_table *tt = (struct thread_table *)kmalloc(sizeof(struct thread_table));
-    if (!tt) { kfree(p); return 0; }
+    if (!tt) { kfree(ft); kfree(p); return 0; }
     thread_table_init(tt);
     p->thread_table = tt;
 
