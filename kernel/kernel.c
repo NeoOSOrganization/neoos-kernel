@@ -30,6 +30,8 @@
 #include "futex.h"
 #include "file.h"
 #include "pipe.h"
+#include "net/net.h"
+#include "net/socket.h"
 
 void kmain(void *multiboot_info) {
     serial_init();
@@ -146,6 +148,10 @@ void kmain(void *multiboot_info) {
     futex_init();
     file_selftest();
     pipe_selftest();
+    net_init();
+    net_selftest();
+    socket_init();
+    socket_selftest();
 
     // BEFORE the spawns, and before any kernel thread exists.
     //
@@ -182,6 +188,7 @@ void kmain(void *multiboot_info) {
     spawn("/BIN/IPCTEST.ELF");
     spawn("/BIN/PIPETEST.ELF");
     spawn("/BIN/TLSTEST.ELF");
+    spawn("/BIN/NETTEST.ELF");
 
     // After the spawns so the selftest's own kernel threads draw ids
     // above the real processes', keeping pids stable across boots.

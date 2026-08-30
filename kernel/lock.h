@@ -45,7 +45,14 @@
 // once, so the order between them is arbitrary.
 #define LOCK_RANK_FUTEX       9
 #define LOCK_RANK_PIPE       10
-#define LOCK_RANK_PORT       11
+// One rank for the socket layer's per-object guards and one for its
+// global bound-socket table. Two, not one, because demux walks the
+// table and then locks the socket it found.
+// Two ranks, not one: UDP demux walks the bound-socket table and then
+// locks the socket it found, so the table must rank strictly outside
+// the object. Equal ranks are an inversion to the checker, and rightly.
+#define LOCK_RANK_SOCKTABLE  11
+#define LOCK_RANK_SOCKET     12
 // The timed-sleep list. It was rank THREAD (2), which was fine while
 // waitq_sleep_timeout's only caller held no lock -- but any of the IPC
 // guards above hands itself to waitq_sleep_timeout as `release`, and
@@ -53,26 +60,26 @@
 // descending acquire and an instant panic. It belongs here, directly
 // under WAITQ, for the same reason WAITQ is where it is: it is taken on
 // the way into a sleep, under whatever guard the sleeper was holding.
-#define LOCK_RANK_TIMEOUT    12
+#define LOCK_RANK_TIMEOUT    13
 // Per-wait-queue. Above every lock legally held across waitq_sleep() (a
 // mutex passes its own guard in as `release`, carrying the mutex's
 // rank), and below RUNQUEUE, since the sleep path reaches schedule()
 // after the queue is updated.
-#define LOCK_RANK_WAITQ      13
-#define LOCK_RANK_RUNQUEUE   14
-#define LOCK_RANK_FDTABLE    15  // file descriptor table (per-bucket locks, after VFS)
-#define LOCK_RANK_HEAP       16
-#define LOCK_RANK_PMM        17
+#define LOCK_RANK_WAITQ      14
+#define LOCK_RANK_RUNQUEUE   15
+#define LOCK_RANK_FDTABLE    16  // file descriptor table (per-bucket locks, after VFS)
+#define LOCK_RANK_HEAP       17
+#define LOCK_RANK_PMM        18
 // The signal-queue pool: a leaf allocator taken while a process's
 // sig_lock (rank 1) is held, and holding nothing itself. It sits
 // innermost rather than beside sig_lock because equal ranks are an
 // inversion -- acquisition must be strictly ascending.
-#define LOCK_RANK_SIGQUEUE   18
+#define LOCK_RANK_SIGQUEUE   19
 // TLB shootdown bookkeeping: the deferred-free queue is filled from
 // paging_unmap_from, which runs UNDER a process's mm_lock (rank 3), so
 // it must rank strictly below it. It is a leaf -- tlb_flush_deferred
 // releases it before calling pmm_free.
-#define LOCK_RANK_TLB        19
+#define LOCK_RANK_TLB        20
 // Leaf lock: rank above every other, so it is always legal to take and
 // can be acquired from anywhere -- including while holding any other
 // lock. Whatever holds it must never acquire another lock.

@@ -89,6 +89,26 @@ static inline int64_t syscall4(int64_t num, int64_t a1, int64_t a2,
     return ret;
 }
 
+// Six arguments: the fifth and sixth go in r8 and r9, which is where
+// syscall_entry.asm expects them (mmap, sendto and recvfrom are the
+// only calls that need them). Exported unmangled rather than static
+// inline because lib/socket.c is a separate translation unit.
+long __neoos_syscall6(long n, long a, long b, long c, long d, long e, long f) {
+    long ret;
+    register long r10 __asm__("r10") = d;
+    register long r8  __asm__("r8")  = e;
+    register long r9  __asm__("r9")  = f;
+    __asm__ volatile ("syscall"
+                      : "=a"(ret)
+                      : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8), "r"(r9)
+                      : "rcx", "r11", "memory");
+    return ret;
+}
+
+long __neoos_syscall3(long n, long a, long b, long c) {
+    return (long)syscall3(n, a, b, c);
+}
+
 void exit(int code) {
     syscall1(SYS_EXIT, code);
     __builtin_unreachable();

@@ -75,8 +75,16 @@
 // arch_prctl(ARCH_SET_FS/ARCH_GET_FS). Linux's codes and semantics; it
 // is how every x86-64 libc installs the thread pointer.
 #define SYS_ARCH_PRCTL      44
+// BSD sockets. Linux gives each its own number on x86-64 (rather than
+// the socketcall multiplexer it uses on i386), and so does NeoOS.
+#define SYS_SOCKET          45
+#define SYS_BIND            46
+#define SYS_CONNECT         47
+#define SYS_SENDTO          48
+#define SYS_RECVFROM        49
+#define SYS_GETSOCKNAME     50
 
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX             45
+#define SYS_MAX             51
 
 #endif

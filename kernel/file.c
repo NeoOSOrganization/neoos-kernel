@@ -8,6 +8,7 @@
 
 #include "file.h"
 #include "pipe.h"
+#include "net/socket.h"
 #include "sched/proc.h"
 #include "fs/vfs.h"
 #include "errno.h"
@@ -157,6 +158,10 @@ void file_selftest(void) {
     }
     if (!ops_complete(pipe_file_ops())) {
         serial_write_string("[file] selftest FAILED: pipe_file_ops has a null op\n");
+        return;
+    }
+    if (!ops_complete(socket_file_ops())) {
+        serial_write_string("[file] selftest FAILED: socket_file_ops has a null op\n");
         return;
     }
     serial_write_string("[file] file-ops selftest passed\n");

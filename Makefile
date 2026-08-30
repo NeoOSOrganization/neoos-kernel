@@ -7,11 +7,11 @@ ASFLAGS := -f elf64
 BUILD_DIR := build
 ISO_DIR := iso
 
-C_SOURCES := $(wildcard kernel/*.c) $(wildcard kernel/mm/*.c) $(wildcard kernel/fs/*.c) $(wildcard kernel/sched/*.c) $(wildcard kernel/sync/*.c)
+C_SOURCES := $(wildcard kernel/*.c) $(wildcard kernel/mm/*.c) $(wildcard kernel/fs/*.c) $(wildcard kernel/sched/*.c) $(wildcard kernel/sync/*.c) $(wildcard kernel/net/*.c)
 # Every kernel header, as a coarse prerequisite for every object. Without
 # this, editing a .h leaves stale .o files behind and a genuinely broken
 # tree can appear to build clean.
-C_HEADERS := $(wildcard kernel/*.h) $(wildcard kernel/mm/*.h) $(wildcard kernel/fs/*.h) $(wildcard kernel/sched/*.h) $(wildcard kernel/sync/*.h)
+C_HEADERS := $(wildcard kernel/*.h) $(wildcard kernel/mm/*.h) $(wildcard kernel/fs/*.h) $(wildcard kernel/sched/*.h) $(wildcard kernel/sync/*.h) $(wildcard kernel/net/*.h)
 C_OBJECTS := $(patsubst kernel/%.c,$(BUILD_DIR)/%.o,$(C_SOURCES))
 ASM_OBJECTS := $(BUILD_DIR)/boot.o $(BUILD_DIR)/gdt_flush.o $(BUILD_DIR)/isr_stubs.o $(BUILD_DIR)/context_switch.o $(BUILD_DIR)/syscall_entry.o $(BUILD_DIR)/fork_trampoline.o $(BUILD_DIR)/sigframe.o $(BUILD_DIR)/ap_trampoline.o
 
@@ -170,7 +170,11 @@ $(USERLAND_BUILD)/TLSTEST.ELF: $(USERLAND_DIR)/tlstest.c $(USERLAND_DIR)/user.ld
 	mkdir -p $(USERLAND_BUILD)
 	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/tlstest.c -L$(LIB_BUILD) -lneoos
 
-$(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_BUILD)/PARENT.ELF $(USERLAND_BUILD)/LOOPER.ELF $(USERLAND_BUILD)/YIELDER.ELF $(USERLAND_BUILD)/FAULTER.ELF $(USERLAND_BUILD)/FILEIO.ELF $(USERLAND_BUILD)/SSE_TEST.ELF $(USERLAND_BUILD)/FORKTEST.ELF $(USERLAND_BUILD)/EXECTARG.ELF $(USERLAND_BUILD)/MOUNTTST.ELF $(USERLAND_BUILD)/VFSTEST.ELF $(USERLAND_BUILD)/THRDTEST.ELF $(USERLAND_BUILD)/SIGTEST.ELF $(USERLAND_BUILD)/AVXTEST.ELF $(USERLAND_BUILD)/MMAPTEST.ELF $(USERLAND_BUILD)/SMPTEST.ELF $(USERLAND_BUILD)/IPCTEST.ELF $(USERLAND_BUILD)/PIPETEST.ELF $(USERLAND_BUILD)/TLSTEST.ELF
+$(USERLAND_BUILD)/NETTEST.ELF: $(USERLAND_DIR)/nettest.c $(USERLAND_DIR)/user.ld $(LIB_BUILD)/crt0.o $(LIB_BUILD)/libneoos.a
+	mkdir -p $(USERLAND_BUILD)
+	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/nettest.c -L$(LIB_BUILD) -lneoos
+
+$(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_BUILD)/PARENT.ELF $(USERLAND_BUILD)/LOOPER.ELF $(USERLAND_BUILD)/YIELDER.ELF $(USERLAND_BUILD)/FAULTER.ELF $(USERLAND_BUILD)/FILEIO.ELF $(USERLAND_BUILD)/SSE_TEST.ELF $(USERLAND_BUILD)/FORKTEST.ELF $(USERLAND_BUILD)/EXECTARG.ELF $(USERLAND_BUILD)/MOUNTTST.ELF $(USERLAND_BUILD)/VFSTEST.ELF $(USERLAND_BUILD)/THRDTEST.ELF $(USERLAND_BUILD)/SIGTEST.ELF $(USERLAND_BUILD)/AVXTEST.ELF $(USERLAND_BUILD)/MMAPTEST.ELF $(USERLAND_BUILD)/SMPTEST.ELF $(USERLAND_BUILD)/IPCTEST.ELF $(USERLAND_BUILD)/PIPETEST.ELF $(USERLAND_BUILD)/TLSTEST.ELF $(USERLAND_BUILD)/NETTEST.ELF
 	mkdir -p $(DISK_SRC)/DIR
 	printf 'Hello from NeoOS FAT16!\n' > $(DISK_SRC)/HELLO.TXT
 	head -c 8192 /dev/zero | tr '\0' 'N' > $(DISK_SRC)/BIGFILE.TXT
@@ -202,6 +206,7 @@ $(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_B
 	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/IPCTEST.ELF ::BIN/IPCTEST.ELF
 	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/PIPETEST.ELF ::BIN/PIPETEST.ELF
 	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/TLSTEST.ELF ::BIN/TLSTEST.ELF
+	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/NETTEST.ELF ::BIN/NETTEST.ELF
 
 # 64MB, not 32: FAT32 needs at least 65525 clusters, and mkfs.fat warns
 # that a 32MB image falls below that. Depends on $(DISK_IMG) only so
@@ -253,7 +258,8 @@ REQUIRED_MARKERS := \
 	"[smptest] ALL PASSED" \
 	"[ipctest] ALL PASSED" \
 	"[pipetest] ALL PASSED" \
-	"[tlstest] ALL PASSED"
+	"[tlstest] ALL PASSED" \
+	"[nettest] ALL PASSED"
 
 # The fat16 WRITE selftest creates /NEWDIR and /RT.TXT on the real disk
 # image, and the image persists between runs -- so on the second boot

@@ -39,5 +39,9 @@
 #define EMSGSIZE 90
 #define EOVERFLOW 75
 #define ESPIPE  29
+#define ENETUNREACH 101
+#define EADDRNOTAVAIL 99
+#define EDESTADDRREQ 89
+#define ENOTSOCK 88
 
 #endif

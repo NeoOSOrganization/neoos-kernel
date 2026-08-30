@@ -15,6 +15,7 @@
 #include "futex.h"
 #include "file.h"
 #include "pipe.h"
+#include "net/socket.h"
 
 #define MSR_EFER   0xC0000080
 #define MSR_STAR   0xC0000081
@@ -623,6 +624,42 @@ static int64_t sys_futex(struct syscall_args *a) {
                     (const struct k_timespec *)(uintptr_t)a->a4);
 }
 
+static int64_t sys_socket(struct syscall_args *a) {
+    return socket_create((int)a->a1, (int)a->a2, (int)a->a3);
+}
+
+static int64_t sys_bind(struct syscall_args *a) {
+    return socket_bind((int)a->a1, (const struct k_sockaddr *)(uintptr_t)a->a2,
+                       (uint32_t)a->a3);
+}
+
+static int64_t sys_connect(struct syscall_args *a) {
+    return socket_connect((int)a->a1, (const struct k_sockaddr *)(uintptr_t)a->a2,
+                          (uint32_t)a->a3);
+}
+
+static int64_t sys_getsockname(struct syscall_args *a) {
+    return socket_getsockname((int)a->a1, (struct k_sockaddr *)(uintptr_t)a->a2,
+                              (uint32_t *)(uintptr_t)a->a3);
+}
+
+// sendto and recvfrom take SIX arguments, like mmap: the fifth and
+// sixth arrive in r8 and r9, which syscall_entry.asm has already pushed
+// into the frame before its argument shuffle.
+static int64_t sys_sendto(struct syscall_args *a) {
+    return socket_sendto((int)a->a1, (const void *)(uintptr_t)a->a2,
+                         (uint64_t)a->a3, (int)a->a4,
+                         (const struct k_sockaddr *)(uintptr_t)a->frame->r8,
+                         (uint32_t)a->frame->r9);
+}
+
+static int64_t sys_recvfrom(struct syscall_args *a) {
+    return socket_recvfrom((int)a->a1, (void *)(uintptr_t)a->a2,
+                           (uint64_t)a->a3, (int)a->a4,
+                           (struct k_sockaddr *)(uintptr_t)a->frame->r8,
+                           (uint32_t *)(uintptr_t)a->frame->r9);
+}
+
 // The table. Designated initialisers, so the number beside each entry
 // IS the index -- a reordering of these lines cannot renumber a
 // syscall, which a positional array would allow. Entries omitted here
@@ -682,6 +719,12 @@ static const struct syscall_desc syscall_table[SYS_MAX] = {
     [SYS_FUTEX]           = { sys_futex,           "futex" },
     [SYS_PIPE2]           = { sys_pipe2,           "pipe2" },
     [SYS_ARCH_PRCTL]      = { sys_arch_prctl,      "arch_prctl" },
+    [SYS_SOCKET]          = { sys_socket,          "socket" },
+    [SYS_BIND]            = { sys_bind,            "bind" },
+    [SYS_CONNECT]         = { sys_connect,         "connect" },
+    [SYS_SENDTO]          = { sys_sendto,          "sendto" },
+    [SYS_RECVFROM]        = { sys_recvfrom,        "recvfrom" },
+    [SYS_GETSOCKNAME]     = { sys_getsockname,     "getsockname" },
 };
 
 // Asserts what the table's shape is supposed to guarantee. Cheap, and

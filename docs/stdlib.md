@@ -607,3 +607,70 @@ int arch_prctl(int code, unsigned long addr);   /* ARCH_SET_FS, ARCH_GET_FS */
 `mmap_raw`/`munmap_raw` the rest of this library's convention uses.
 Only anonymous private mappings are supported: a non-negative `fd` or a
 non-zero offset returns `MAP_FAILED`.
+
+## Sockets: `<sys/socket.h>`, `<netinet/in.h>`, `<arpa/inet.h>`
+
+```c
+int socket(int domain, int type, int protocol);
+int bind(int fd, const struct sockaddr *addr, socklen_t len);
+int connect(int fd, const struct sockaddr *addr, socklen_t len);
+int getsockname(int fd, struct sockaddr *addr, socklen_t *len);
+int64_t sendto(int fd, const void *buf, uint64_t len, int flags,
+               const struct sockaddr *dest, socklen_t dest_len);
+int64_t recvfrom(int fd, void *buf, uint64_t len, int flags,
+                 struct sockaddr *src, socklen_t *src_len);
+int64_t send(int fd, const void *buf, uint64_t len, int flags);
+int64_t recv(int fd, void *buf, uint64_t len, int flags);
+uint16_t htons(uint16_t); uint32_t htonl(uint32_t);   /* and ntoh* */
+uint32_t inet_addr(const char *);
+char    *inet_ntoa_r(uint32_t addr_n, char *out);
+```
+
+A socket is an ordinary file descriptor: `close` works, `fork`
+inherits it, and on a **connected** socket so do `read` and `write`,
+which are `recv` and `send` with no address — exactly as POSIX defines
+them.
+
+`struct sockaddr_in` is Linux's x86-64 layout byte for byte: 16 bytes,
+family at offset 0, port at 2, address at 4, eight bytes of padding.
+The kernel asserts those offsets at boot, because getting one wrong is
+invisible until a ported program's port lands in the wrong half of a
+word.
+
+Underneath is a real IPv4/UDP path over a loopback device: every
+datagram carries an IPv4 header with a verified checksum and a UDP
+header with a verified pseudo-header checksum, and is demultiplexed by
+port. It is not a shortcut between two buffers.
+
+### Divergences, and what is simply absent
+
+- **One interface, and it is loopback.** Only `127.0.0.0/8` and
+  `INADDR_ANY` have a route; anything else is `-ENETUNREACH`. There is
+  no NIC driver, no link layer, no ARP, no routing table.
+- **No TCP.** `socket(AF_INET, SOCK_STREAM, ...)` returns
+  `-EPROTONOSUPPORT` rather than quietly giving a datagram socket: a
+  program handed message boundaries where it expects a stream corrupts
+  its own protocol, and a clean refusal is far better than that. So
+  there is no `listen`, `accept` or `shutdown` either.
+- **AF_INET only.** No `AF_UNIX`, no `AF_INET6`.
+- **No `MSG_*` flags at all**, and the header deliberately does not
+  define them. `flags` must be 0. In particular there is no
+  `MSG_DONTWAIT` and no `MSG_PEEK`, and `MSG_TRUNC` is not available to
+  report a truncated datagram — `recvfrom` returns what it delivered,
+  and the rest of the message is discarded.
+- **No `setsockopt`/`getsockopt`**, so no `SO_REUSEADDR`, no
+  `SO_RCVBUF`, no timeouts. The receive buffer is 64KiB per socket and
+  a datagram that does not fit is dropped, as UDP permits.
+- **No `select`/`poll`/`epoll`.** A socket can only be read by
+  blocking in `recvfrom`, so a program that must wait on several at
+  once needs a thread per socket.
+- **No ICMP.** There is no `ping` and no port-unreachable reply: a
+  datagram sent to a port nobody has bound is silently dropped.
+- **No raw sockets**, which is also why the absent ICMP cannot be
+  noticed from userland.
+- **Errors are returned directly as negative values**, per this
+  library's convention: `socket()` returns `-EAFNOSUPPORT`, not `-1`
+  with `errno`.
+- **`inet_ntoa` is spelled `inet_ntoa_r`** and takes the output buffer.
+  The standard one returns a pointer to a static buffer, which is not
+  thread-safe; NeoOS has threads and no reason to reproduce that.
