@@ -9,6 +9,7 @@
 #include "../fs/vfs.h"
 #include "../mm/pmm.h"
 #include "../mm/vma.h"
+#include "../sync/rcu.h"
 
 // 16 entries indexed DIRECTLY by fd. /dev/CONSOLE is a real vnode
 // opened on 0, 1 and 2 at process creation, so the fd IS the index.
@@ -77,7 +78,15 @@ struct process {
     struct waitq child_waiters;     // parents blocked in wait4
     struct waitq exit_waiters;      // threads blocked in wait_for_pid
     struct waitq join_waiters;      // threads blocked in thread_join
-    struct process *next;           // global process list
+
+    // Hash table linkage (NEW: replacing global linked list)
+    struct process *proc_next_hash; // hash bucket chain (RCU-protected)
+
+    // RCU deferred cleanup (NEW: for safe deallocation)
+    struct rcu_head rcu;           // for synchronize_rcu() cleanup
+
+    // Legacy (DEPRECATED: will remove in Phase 2)
+    struct process *next;           // global process list (being replaced)
 };
 
 struct thread {

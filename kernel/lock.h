@@ -4,6 +4,16 @@
 #include <stdint.h>
 #include "waitq.h"
 
+/*
+ * Container_of macro: Given a pointer to a member of a struct,
+ * calculate the pointer to the containing struct.
+ *
+ * Usage: struct rcu_head *rh = ...;
+ *        struct process *p = container_of(rh, struct process, rcu);
+ */
+#define container_of(ptr, type, member) \
+    ((type *)((char *)(ptr) - __builtin_offsetof(type, member)))
+
 // Lock ranks from docs/superpowers/specs/2026-08-27-roadmap-architecture-design.md.
 // Acquisition must be strictly ascending: a lock may only be taken
 // while every lock already held has a STRICTLY LOWER rank. Rank 0 is
