@@ -90,8 +90,10 @@ void process_init(void) {
 
     signal_queue_init();
     proc_list  = 0;
-    ready_head = 0;
-    ready_tail = 0;
+    // Phase 7: Per-CPU ready queues (removed global ready_head/ready_tail init)
+    // Now initialized per-CPU
+    this_cpu()->ready_head = 0;
+    this_cpu()->ready_tail = 0;
     this_cpu()->current = 0;
     idle_init();
     serial_write_string("[process] initialized\n");

@@ -14,9 +14,7 @@ extern struct process  *proc_list;
 extern struct spinlock  proc_lock;
 int alloc_id(void);
 
-// sched.c
-extern struct thread *ready_head;
-extern struct thread *ready_tail;
+// sched.c (Phase 7: Per-CPU ready queues, no global ready_head/ready_tail)
 void enqueue_ready(struct thread *t);
 struct thread *dequeue_ready(void);
 void dequeue_specific(struct thread *t);

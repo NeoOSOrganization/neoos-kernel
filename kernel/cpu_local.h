@@ -32,6 +32,10 @@ struct cpu {
     uint32_t          lapic_id;
     int               held_depth;
     uint8_t           held_ranks[LOCK_MAX_HELD];
+
+    // Per-CPU ready queue (Phase 7 optimization)
+    struct thread    *ready_head;       // NEW: per-CPU thread queue head
+    struct thread    *ready_tail;       // NEW: per-CPU thread queue tail
 };
 
 _Static_assert(offsetof(struct cpu, self)             == CPU_SELF,     "CPU_SELF");

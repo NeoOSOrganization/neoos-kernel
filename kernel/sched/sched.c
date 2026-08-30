@@ -20,25 +20,27 @@ extern void kernel_thread_entry_trampoline(void);
 extern void kernel_thread_trampoline(void);
 extern void fork_trampoline(void);
 
-struct thread *ready_head;
-struct thread *ready_tail;
+// Phase 7: Per-CPU ready queues (removed global ready_head/ready_tail)
+// Each CPU now manages its own ready queue via this_cpu()->ready_head/tail
 
 void enqueue_ready(struct thread *t) {
+    struct cpu *c = this_cpu();
     t->next = 0;
-    if (ready_tail) {
-        ready_tail->next = t;
+    if (c->ready_tail) {
+        c->ready_tail->next = t;
     } else {
-        ready_head = t;
+        c->ready_head = t;
     }
-    ready_tail = t;
+    c->ready_tail = t;
 }
 
 struct thread *dequeue_ready(void) {
-    struct thread *t = ready_head;
+    struct cpu *c = this_cpu();
+    struct thread *t = c->ready_head;
     if (t) {
-        ready_head = t->next;
-        if (!ready_head) {
-            ready_tail = 0;
+        c->ready_head = t->next;
+        if (!c->ready_head) {
+            c->ready_tail = 0;
         }
         t->next = 0;
     }
@@ -51,12 +53,13 @@ void thread_enqueue_ready(struct thread *t) { enqueue_ready(t); }
 // idle_init, which has to un-enqueue the idle thread that
 // thread_alloc_kernel just queued.
 void dequeue_specific(struct thread *t) {
-    struct thread **pp = &ready_head;
+    struct cpu *c = this_cpu();
+    struct thread **pp = &c->ready_head;
     struct thread *prev = 0;
     while (*pp && *pp != t) { prev = *pp; pp = &(*pp)->next; }
     if (*pp) {
         *pp = t->next;
-        if (ready_tail == t) { ready_tail = prev; }
+        if (c->ready_tail == t) { c->ready_tail = prev; }
     }
     t->next = 0;
 }
