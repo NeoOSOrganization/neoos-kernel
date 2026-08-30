@@ -48,6 +48,13 @@ struct cpu {
     // thread; see sched.c for why the release cannot happen any
     // earlier.
     struct thread    *prev_pending;
+    // Ticks left in the running thread's time slice. Per-CPU because it
+    // is a property of what THIS CPU is running; see timer_handler.
+    uint32_t          timeslice_remaining;
+    // Local timer interrupts taken. Only the selftest reads it, and it
+    // is the one direct evidence that this CPU is actually being
+    // preempted rather than merely looking busy.
+    volatile uint64_t timer_ticks_local;
 };
 
 _Static_assert(offsetof(struct cpu, self)             == CPU_SELF,     "CPU_SELF");

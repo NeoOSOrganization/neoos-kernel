@@ -21,7 +21,8 @@ global context_switch
 ; trampoline below instead and never reaches that code, so each
 ; trampoline calls it too. Without this the outgoing thread sits in
 ; cpus[].prev_pending, runnable nowhere, until that CPU next schedules
-; -- which on an AP (no timer interrupt) may be never.
+; -- a full time slice later at best, and never at all if the new thread
+; goes to userland and stays there.
 ;
 ; The `sub rsp, 8` before each call is alignment, not a slot: every
 ; trampoline is entered with RSP ≡ 8 (mod 16), and the SysV ABI wants

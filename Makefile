@@ -228,6 +228,7 @@ BOOT_MARKER  ?= NeoOS: interrupts enabled, starting scheduler
 # `make test` still said PASS. grep -F because "[vfstest]" is a character
 # class to a regex, and would never match the literal brackets.
 REQUIRED_MARKERS := \
+	"[smp] local timer selftest passed" \
 	"[vfstest] ALL PASSED" \
 	"[avxtest] ALL PASSED" \
 	"[mmaptest] ALL PASSED" \

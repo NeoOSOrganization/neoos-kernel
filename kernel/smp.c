@@ -13,6 +13,7 @@
 #include "sched/proc.h"
 #include "sched/sched.h"
 #include "syscall.h"
+#include "timer.h"
 
 // Dense CPU index -> lapic id. cpus[] in cpu_local.h is indexed the same
 // way. NEVER index anything by lapic_id directly: APIC ids are sparse
@@ -107,7 +108,8 @@ void ap_main(int index) {
     lapic_init_this_cpu();
     cpu_init();               // SSE/xstate on this CPU
     syscall_init_this_cpu();  // EFER.SCE/STAR/LSTAR/SFMASK are per-CPU MSRs
-    idle_init_for(index);     // must run ON this CPU: uses this_cpu()'s queue
+    timer_init_this_cpu();    // the LAPIC timer is per-CPU too; no AP preemption without it
+    idle_init_for(index);
 
     __atomic_store_n(&cpus[index].online, 1u, __ATOMIC_RELEASE);
     __atomic_fetch_add(&online_count, 1, __ATOMIC_ACQ_REL);
@@ -189,9 +191,8 @@ volatile uint64_t ipi_reschedule_count;
 
 // The handler does nothing but acknowledge. Waking the target is the
 // INTERRUPT's job: it breaks the idle loop's `hlt`, and the loop reaches
-// schedule() on its next pass. Without this an AP that has parked in
-// idle can never be given work -- APs get no timer interrupt, since the
-// IOAPIC routes only to the BSP.
+// schedule() on its next pass. An AP parked in idle would otherwise
+// wait for its next local timer tick -- correct, but up to 10ms late.
 void ipi_reschedule_handler(void) {
     __atomic_fetch_add(&ipi_reschedule_count, 1, __ATOMIC_ACQ_REL);
     lapic_send_eoi();

@@ -10,6 +10,37 @@
 #include "tss.h"
 #include "gdt.h"
 
+// Every CPU must be taking its OWN local timer interrupt. Without that
+// an AP never preempts anything: a compute-bound thread that reached one
+// would run to completion, so there would be no point migrating work
+// there. The LAPIC timer is a per-CPU device and was armed only on the
+// BSP until timer_init_this_cpu existed -- a gap invisible from the
+// serial log, since the BSP kept ticking exactly as before.
+// Polled from the idle loop rather than run inline in kmain: the BSP
+// reaches kmain's selftests with interrupts still disabled, so it could
+// not observe its own timer there, and enabling them would let the first
+// tick schedule() away from kmain's stack for good.
+//
+// Reports once, and only on success. A CPU whose timer never fires
+// therefore produces NO line at all -- which is why the pass marker is
+// in the Makefile's REQUIRED_MARKERS, where a missing suite is a
+// failure rather than a silence.
+void smp_timer_selftest_check(void) {
+    static int reported;
+    if (reported) { return; }
+
+    int online = smp_online_count();
+    for (int i = 0; i < online; i++) {
+        if (__atomic_load_n(&cpus[i].timer_ticks_local, __ATOMIC_ACQUIRE) == 0) {
+            return;
+        }
+    }
+    reported = 1;
+    serial_write_string("[smp] local timer selftest passed, cpus=");
+    serial_write_hex64((uint64_t)online);
+    serial_write_string("\n");
+}
+
 void runqueue_lock_selftest(void) {
     struct cpu *c = this_cpu();
     if (c->ready_lock.rank != LOCK_RANK_RUNQUEUE) {

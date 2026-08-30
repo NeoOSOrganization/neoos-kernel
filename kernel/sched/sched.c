@@ -144,8 +144,8 @@ void enqueue_ready_on(int cpu_index, struct thread *t) {
     spin_unlock_irqrestore(&c->ready_lock, f);
     // Sent AFTER the unlock: the target may be spinning on this very lock
     // with interrupts disabled and could not take the IPI. Without this
-    // poke a target parked in idle's `sti; hlt` never learns it has work
-    // -- APs receive no timer interrupt.
+    // poke a target parked in idle's `sti; hlt` waits for its next local
+    // timer tick before noticing the work.
     smp_send_reschedule(cpu_index);
 }
 
@@ -187,13 +187,14 @@ static void idle_entry(void) {
             z = next;
         }
         smp_parallel_selftest_check();
+        smp_timer_selftest_check();
 
-        // The idle thread must schedule() for ITSELF. On the BSP the
-        // timer interrupt preempts idle and calls schedule() on its
-        // behalf, which is why this was never needed before -- but the
-        // IOAPIC routes the timer only to the BSP, so an AP's idle thread
-        // would otherwise wake from the reschedule IPI, loop, and halt
-        // again without ever picking up the work the IPI was announcing.
+        // The idle thread schedules for ITSELF rather than relying on
+        // being preempted. Every CPU has a local timer now, so this is
+        // no longer load-bearing the way it was when only the BSP was
+        // preempted -- but an AP woken by a reschedule IPI would
+        // otherwise loop and halt again, waiting up to a full tick to
+        // pick up the work the IPI was announcing.
         schedule();
 
         __asm__ volatile ("sti; hlt");
