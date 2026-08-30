@@ -3,6 +3,7 @@
 // code is unchanged, only relocated.
 
 #include "sched.h"
+#include "proc_table.h"
 #include "../mm/pmm.h"
 #include "../mm/paging.h"
 #include "../mm/heap.h"
@@ -20,28 +21,22 @@ extern void kernel_thread_entry_trampoline(void);
 extern void kernel_thread_trampoline(void);
 extern void fork_trampoline(void);
 
-
+// DEPRECATED: Replaced by proc_table (hash-based with RCU)
+// Keeping for backwards compatibility during transition
 struct process *proc_list;
 struct spinlock proc_lock;
 
-
-// Starts at 0 so the idle thread -- created first, by idle_init() --
-// naturally takes id 0, which is reserved for idle threads and is
-// never a valid pid. The first real process therefore gets pid 1.
-static int next_id = 0;
-
+// Allocate a new PID (uses new proc_table allocator)
 int alloc_id(void) {
-    uint64_t f = spin_lock_irqsave(&proc_lock);
-    int id = next_id++;
-    spin_unlock_irqrestore(&proc_lock, f);
-    return id;
+    return proc_table_alloc_pid();
 }
 
 static struct process *proc_alloc(void) {
     struct process *p = (struct process *)kmalloc(sizeof(struct process));
     if (!p) { return 0; }
     for (unsigned i = 0; i < sizeof(struct process); i++) { ((uint8_t *)p)[i] = 0; }
-    p->pid   = alloc_id();
+
+    p->pid   = alloc_id();  // Uses new proc_table_alloc_pid()
     p->state = PROC_ALIVE;
     p->vmas      = 0;
     p->mmap_next = MMAP_BASE;
@@ -55,22 +50,30 @@ static struct process *proc_alloc(void) {
     p->pgid = p->pid;
     p->sid  = p->pid;
 
+    // Insert into new hash-based process table
+    proc_table_insert(p->pid, p);
+
+    // DEPRECATED: Keep old proc_list updated during transition
     uint64_t f = spin_lock_irqsave(&proc_lock);
     p->next   = proc_list;
     proc_list = p;
     spin_unlock_irqrestore(&proc_lock, f);
+
     return p;
 }
 
 struct process *proc_find(int pid) {
-    for (struct process *p = proc_list; p; p = p->next) {
-        if (p->pid == pid) { return p; }
-    }
-    return 0;
+    // Use new hash-based lookup (O(1) average vs O(n) before)
+    return proc_table_lookup(pid);
 }
 
 void process_init(void) {
+    // Initialize new hash-based process table
+    proc_table_init();
+
+    // DEPRECATED: Keep old proc_list for transition
     spin_init(&proc_lock, LOCK_RANK_PROCTABLE, "proc_list");
+
     signal_queue_init();
     proc_list  = 0;
     ready_head = 0;
@@ -589,13 +592,17 @@ static void proc_reap(struct process *p) {
     }
     p->zombies = 0;
 
+    // Remove from new hash-based process table (uses RCU deferred cleanup)
+    proc_table_remove(p);
+
+    // DEPRECATED: Also remove from old proc_list during transition
     uint64_t f = spin_lock_irqsave(&proc_lock);
     struct process **pp = &proc_list;
     while (*pp && *pp != p) { pp = &(*pp)->next; }
     if (*pp) { *pp = p->next; }
     spin_unlock_irqrestore(&proc_lock, f);
 
-    kfree(p);
+    // Note: p is freed via RCU callback from proc_table_remove, not here
 }
 
 // POSIX-shaped, and what musl's waitpid maps onto. NeoOS's own wait()

@@ -12,9 +12,9 @@ void proc_table_init(void) {
         global_proc_table.buckets[i].head = 0;
     }
 
-    // Initialize process count
+    // Initialize process count (higher rank: acquired after bucket locks)
     global_proc_table.process_count = 0;
-    spin_init(&global_proc_table.count_lock, LOCK_RANK_PROCTABLE, "proc_count");
+    spin_init(&global_proc_table.count_lock, LOCK_RANK_PROCESS, "proc_count");
 
     // Initialize PID allocator
     pid_allocator_init(&global_proc_table.pid_alloc);
