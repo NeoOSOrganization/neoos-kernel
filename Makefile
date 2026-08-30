@@ -7,11 +7,11 @@ ASFLAGS := -f elf64
 BUILD_DIR := build
 ISO_DIR := iso
 
-C_SOURCES := $(wildcard kernel/*.c) $(wildcard kernel/mm/*.c) $(wildcard kernel/fs/*.c) $(wildcard kernel/sched/*.c)
+C_SOURCES := $(wildcard kernel/*.c) $(wildcard kernel/mm/*.c) $(wildcard kernel/fs/*.c) $(wildcard kernel/sched/*.c) $(wildcard kernel/sync/*.c)
 # Every kernel header, as a coarse prerequisite for every object. Without
 # this, editing a .h leaves stale .o files behind and a genuinely broken
 # tree can appear to build clean.
-C_HEADERS := $(wildcard kernel/*.h) $(wildcard kernel/mm/*.h) $(wildcard kernel/fs/*.h) $(wildcard kernel/sched/*.h)
+C_HEADERS := $(wildcard kernel/*.h) $(wildcard kernel/mm/*.h) $(wildcard kernel/fs/*.h) $(wildcard kernel/sched/*.h) $(wildcard kernel/sync/*.h)
 C_OBJECTS := $(patsubst kernel/%.c,$(BUILD_DIR)/%.o,$(C_SOURCES))
 ASM_OBJECTS := $(BUILD_DIR)/boot.o $(BUILD_DIR)/gdt_flush.o $(BUILD_DIR)/isr_stubs.o $(BUILD_DIR)/context_switch.o $(BUILD_DIR)/syscall_entry.o $(BUILD_DIR)/fork_trampoline.o $(BUILD_DIR)/sigframe.o
 
