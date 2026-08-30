@@ -110,15 +110,22 @@ static void idle_entry(void) {
     }
 }
 
-void idle_init(void) {
+// One idle thread per CPU. Each CPU calls this FOR ITSELF: both
+// thread_alloc_kernel and dequeue_specific operate on this_cpu()'s
+// queue, so calling it on another CPU's behalf would enqueue and
+// dequeue on the wrong list.
+//
+// The reserved tid is -(index+1) rather than 0 so idle threads stay
+// distinguishable from each other -- and from real threads -- in the
+// serial log.
+void idle_init_for(int cpu_index) {
     struct thread *t = thread_alloc_kernel(idle_entry);
-    // Reserved: idle threads are never a valid pid. thread_alloc()
-    // already handed out id 0 here, since idle_init() runs before any
-    // other allocation -- see next_id's initialiser.
-    t->tid = 0;
+    t->tid = -(cpu_index + 1);
     dequeue_specific(t);   // never on the ready queue; schedule() falls back to it
-    this_cpu()->idle = t;
+    cpus[cpu_index].idle = t;
 }
+
+void idle_init(void) { idle_init_for(0); }
 
 // Restores EFLAGS.IF to whatever it was on entry to schedule(). Split
 // out because schedule() has three exits (no-task, same-task, and the

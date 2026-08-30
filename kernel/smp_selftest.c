@@ -64,3 +64,30 @@ void cpu_local_selftest(void) {
     }
     serial_write_string("[cpu] local selftest passed\n");
 }
+
+void smp_online_selftest(void) {
+    int discovered = smp_cpu_count();
+    int online     = smp_online_count();
+    // The assertion that fails on the pre-SMP kernel: an application
+    // processor must actually have come online.
+    if (online < 2) {
+        serial_write_string("[smp] selftest FAILED: no application processor came online\n");
+        return;
+    }
+    if (online > discovered) {
+        serial_write_string("[smp] selftest FAILED: more online than discovered\n");
+        return;
+    }
+    // Each online CPU must have its own idle thread and its own TSS.
+    for (int i = 0; i < online; i++) {
+        if (!cpus[i].idle) {
+            serial_write_string("[smp] selftest FAILED: cpu without an idle thread\n");
+            return;
+        }
+        if (cpus[i].tss != &tss[i]) {
+            serial_write_string("[smp] selftest FAILED: cpu not bound to its own tss\n");
+            return;
+        }
+    }
+    serial_write_string("[smp] online selftest passed\n");
+}

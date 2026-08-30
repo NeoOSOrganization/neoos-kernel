@@ -13,7 +13,7 @@ C_SOURCES := $(wildcard kernel/*.c) $(wildcard kernel/mm/*.c) $(wildcard kernel/
 # tree can appear to build clean.
 C_HEADERS := $(wildcard kernel/*.h) $(wildcard kernel/mm/*.h) $(wildcard kernel/fs/*.h) $(wildcard kernel/sched/*.h) $(wildcard kernel/sync/*.h)
 C_OBJECTS := $(patsubst kernel/%.c,$(BUILD_DIR)/%.o,$(C_SOURCES))
-ASM_OBJECTS := $(BUILD_DIR)/boot.o $(BUILD_DIR)/gdt_flush.o $(BUILD_DIR)/isr_stubs.o $(BUILD_DIR)/context_switch.o $(BUILD_DIR)/syscall_entry.o $(BUILD_DIR)/fork_trampoline.o $(BUILD_DIR)/sigframe.o
+ASM_OBJECTS := $(BUILD_DIR)/boot.o $(BUILD_DIR)/gdt_flush.o $(BUILD_DIR)/isr_stubs.o $(BUILD_DIR)/context_switch.o $(BUILD_DIR)/syscall_entry.o $(BUILD_DIR)/fork_trampoline.o $(BUILD_DIR)/sigframe.o $(BUILD_DIR)/ap_trampoline.o
 
 .PHONY: all build iso run test fresh-disks clean disk-image
 
@@ -48,6 +48,10 @@ $(BUILD_DIR)/fork_trampoline.o: kernel/fork_trampoline.asm
 $(BUILD_DIR)/sigframe.o: kernel/sigframe.asm
 	mkdir -p $(BUILD_DIR)
 	$(AS) $(ASFLAGS) kernel/sigframe.asm -o $(BUILD_DIR)/sigframe.o
+
+$(BUILD_DIR)/ap_trampoline.o: kernel/ap_trampoline.asm
+	mkdir -p $(BUILD_DIR)
+	$(AS) $(ASFLAGS) kernel/ap_trampoline.asm -o $(BUILD_DIR)/ap_trampoline.o
 
 $(BUILD_DIR)/%.o: kernel/%.c $(C_HEADERS)
 	mkdir -p $(dir $@)

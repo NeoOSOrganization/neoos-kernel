@@ -16,5 +16,12 @@ uint32_t smp_lapic_for_index(int index);           // 0xFFFFFFFF if out of range
 void     smp_topology_selftest(void);
 void     runqueue_lock_selftest(void);
 void     cpu_local_selftest(void);
+void     smp_online_selftest(void);
+
+// Application-processor bringup. Call after every subsystem an AP can
+// touch is initialised and locked.
+void     smp_start_aps(void);
+int      smp_online_count(void);
+void     ap_main(int index);
 
 #endif

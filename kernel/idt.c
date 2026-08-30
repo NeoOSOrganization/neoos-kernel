@@ -37,6 +37,12 @@ void idt_init(void) {
         idt_set_gate(vector, isr_stub_table[vector], GDT_KERNEL_CODE_SELECTOR, ist, 0x8E);
     }
 
+    idt_load();
+}
+
+// Loads the SHARED IDT on the calling CPU. The table itself is built
+// once by idt_init; an AP only needs its own lidt.
+void idt_load(void) {
     struct idt_ptr idtr = {
         .limit = sizeof(idt_entries) - 1,
         .base = (uint64_t)&idt_entries,

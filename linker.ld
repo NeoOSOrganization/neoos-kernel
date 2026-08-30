@@ -39,6 +39,16 @@ SECTIONS
         *(.boot.bss)
     }
 
+    /* The AP trampoline. Lives in the LOW half so its symbols carry
+       physical addresses the BSP can memcpy from -- smp_start_aps copies
+       it to 0x8000, where the APs actually execute it. Its own internal
+       references are all computed from AP_BASE, never from these
+       link-time addresses. */
+    .ap_trampoline ALIGN(4K) :
+    {
+        *(.ap_trampoline)
+    }
+
     /* High half: the C kernel (gdt_flush.asm and isr.asm's default
        .text included) and everything it calls. Linked at
        KERNEL_VIRT_BASE, loaded contiguously in physical memory right

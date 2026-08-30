@@ -19,6 +19,8 @@ void enqueue_ready(struct thread *t);
 struct thread *dequeue_ready(void);
 void dequeue_specific(struct thread *t);
 void idle_init(void);
+void idle_init_for(int cpu_index);
+void enqueue_ready_on(int cpu_index, struct thread *t);
 
 // Kernel threads park here on exit; the idle thread reclaims them,
 // since they have no parent to reap them and cannot free the stack
