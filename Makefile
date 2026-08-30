@@ -15,7 +15,7 @@ C_HEADERS := $(wildcard kernel/*.h) $(wildcard kernel/mm/*.h) $(wildcard kernel/
 C_OBJECTS := $(patsubst kernel/%.c,$(BUILD_DIR)/%.o,$(C_SOURCES))
 ASM_OBJECTS := $(BUILD_DIR)/boot.o $(BUILD_DIR)/gdt_flush.o $(BUILD_DIR)/isr_stubs.o $(BUILD_DIR)/context_switch.o $(BUILD_DIR)/syscall_entry.o $(BUILD_DIR)/fork_trampoline.o $(BUILD_DIR)/sigframe.o
 
-.PHONY: all build iso run clean disk-image
+.PHONY: all build iso run test fresh-disks clean disk-image
 
 all: build
 
@@ -193,8 +193,45 @@ $(DISK2_IMG): $(DISK_IMG)
 
 disk-image: $(DISK_IMG) $(DISK2_IMG)
 
+SMP_CPUS ?= 4
+QEMU_COMMON := -cpu Nehalem -smp $(SMP_CPUS) -boot order=d \
+	-cdrom $(BUILD_DIR)/neoos.iso \
+	-drive file=$(DISK_IMG),format=raw -drive file=$(DISK2_IMG),format=raw \
+	-no-reboot
+
 run: iso disk-image
-	qemu-system-x86_64 -cpu Nehalem -boot order=d -cdrom $(BUILD_DIR)/neoos.iso -drive file=$(DISK_IMG),format=raw -drive file=$(DISK2_IMG),format=raw
+	qemu-system-x86_64 $(QEMU_COMMON)
+
+# Headless boot with COM1 captured to a file. Fails if any selftest
+# reported FAILED, or if the boot never reached the marker (a hang or a
+# triple fault). BOOT_TIMEOUT is generous: bringing up APs plus every
+# selftest is slower than a plain boot.
+#
+# The kernel never powers the machine off, so QEMU is ALWAYS killed by
+# the timeout -- that is the expected exit path, not a failure, which is
+# why the qemu line is prefixed with `-`.
+BOOT_TIMEOUT ?= 60
+BOOT_MARKER  ?= NeoOS: interrupts enabled, starting scheduler
+
+# The fat16 WRITE selftest creates /NEWDIR and /RT.TXT on the real disk
+# image, and the image persists between runs -- so on the second boot
+# mkdir(/NEWDIR) fails with "already exists" and every later `make test`
+# reports a failure that has nothing to do with the change under test.
+# Rebuilding the images makes each test run start from a known state.
+fresh-disks:
+	rm -f $(DISK_IMG) $(DISK2_IMG)
+
+test: fresh-disks iso disk-image
+	@mkdir -p $(BUILD_DIR)
+	-@timeout $(BOOT_TIMEOUT) qemu-system-x86_64 $(QEMU_COMMON) \
+		-display none -serial file:$(BUILD_DIR)/serial.log > /dev/null 2>&1
+	@echo "--- serial log: $(BUILD_DIR)/serial.log ---"
+	@if grep -q 'FAILED' $(BUILD_DIR)/serial.log; then \
+		echo "TEST FAILURES:"; grep 'FAILED' $(BUILD_DIR)/serial.log; exit 1; fi
+	@if ! grep -q '$(BOOT_MARKER)' $(BUILD_DIR)/serial.log; then \
+		echo "BOOT DID NOT COMPLETE (no marker: '$(BOOT_MARKER)')"; \
+		tail -30 $(BUILD_DIR)/serial.log; exit 1; fi
+	@echo "PASS: no FAILED lines, boot reached the scheduler"
 
 clean:
 	rm -rf $(BUILD_DIR) $(ISO_DIR)
