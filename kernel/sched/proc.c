@@ -26,6 +26,24 @@ extern void kernel_thread_entry_trampoline(void);
 extern void kernel_thread_trampoline(void);
 extern void fork_trampoline(void);
 
+// Count of live user processes -- those that have been created and have
+// not yet run process_exit(). kmain() seeds it with 1 (its own
+// reference, dropped just before schedule()) so a fast child exiting on
+// another CPU mid-boot cannot drive it to zero prematurely. The drop
+// that reaches zero powers the machine off; until M2 gives us an init
+// that calls reboot(2), this is how a headless run ends.
+static int user_proc_count;
+
+void user_proc_started(void) {
+    __atomic_add_fetch(&user_proc_count, 1, __ATOMIC_ACQ_REL);
+}
+
+void user_proc_exited(void) {
+    if (__atomic_sub_fetch(&user_proc_count, 1, __ATOMIC_ACQ_REL) == 0) {
+        kernel_shutdown();   // does not return
+    }
+}
+
 // Allocate a new PID (uses new proc_table allocator)
 int alloc_id(void) {
     return proc_table_alloc_pid();
@@ -417,6 +435,7 @@ struct process *spawn_argv(const char *path, const struct spawn_args *args) {
     vfs_open_into("/dev/CONSOLE", p, 1, 1);
     vfs_open_into("/dev/CONSOLE", p, 2, 1);
 
+    user_proc_started();
     enqueue_ready(t);
     return p;
 }
@@ -633,6 +652,7 @@ struct thread *fork_task(struct syscall_frame *frame) {
         ((uint8_t *)child->xstate)[i] = ((uint8_t *)current_thread()->xstate)[i];
     }
 
+    user_proc_started();
     enqueue_ready(child);
     return child;
 }
@@ -824,6 +844,11 @@ void process_exit(int code) {
         // is freed by a concurrent same-process thread_join between the
         // snapshot and the kill.
         for (int i = 0; i < nv; i++) { thread_kill(victims[i]); thread_put(victims[i]); }
+
+        // Runs once per process (guarded by p->exiting). If this was the
+        // last live user process, kernel_shutdown() powers the machine
+        // off here and never returns; otherwise teardown continues.
+        user_proc_exited();
     }
 
     thread_exit_self(code);

@@ -327,15 +327,15 @@ run: iso disk-image
 
 # Headless boot with COM1 captured to a file. Fails if any selftest
 # reported FAILED, or if the boot never reached the marker (a hang or a
-# triple fault). BOOT_TIMEOUT is generous: bringing up APs plus every
-# selftest is slower than a plain boot.
+# triple fault).
 #
-# The kernel powers off via ACPI (port 0x604) when init exits, triggering
-# QEMU to exit immediately via -machine shutdown=now. This allows make test
-# to return as soon as all tests complete instead of waiting for timeout.
-# The qemu line is prefixed with `-` to ignore the exit code (timeout was the
-# expected exit path before shutdown support was added).
-BOOT_TIMEOUT ?= 150
+# The kernel powers off via ACPI (outw 0x2000 -> 0x604) as soon as the
+# last user process exits (kernel/sched/proc.c:user_proc_exited), so a
+# healthy run exits QEMU in ~15s. BOOT_TIMEOUT is now the HANG detector,
+# not the normal exit path -- if it fires, something deadlocked. The
+# qemu line keeps its leading `-` so a genuine timeout is still surfaced
+# by the marker check rather than aborting the recipe.
+BOOT_TIMEOUT ?= 60
 BOOT_MARKER  ?= NeoOS: interrupts enabled, starting scheduler
 
 # A suite that never RUNS is not a pass. Grepping only for FAILED lets a

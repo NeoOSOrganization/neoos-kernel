@@ -38,15 +38,19 @@
 #include "lib/rand.h"
 
 void kernel_shutdown(void) {
-    serial_write_string("\n[kernel] all tests complete, shutting down\n");
+    serial_write_string("\n[kernel] last user process exited, powering off\n");
     cli();
 
-    // Power off via ACPI reset register (port 0x604, value 0x06 = shutdown)
-    // This works in QEMU and on real hardware with ACPI support.
-    // If ACPI is not available, fall back to infinite halt.
-    __asm__ volatile ("outb %0, %1" : : "a"((unsigned char)0x06), "d"((unsigned short)0x604));
+    // ACPI S5 (soft-off): SLP_EN | SLP_TYP=0 written as a WORD to
+    // PM1a_CNT. QEMU's default PIIX4/ICH9 chipset puts PM1a_CNT at
+    // 0x604 and treats this exact write as poweroff; 0xB004 is the
+    // older Bochs/QEMU port kept as a fallback. The previous byte
+    // write of 0x06 to 0x604 did nothing, which is why every headless
+    // run used to sit until the timeout killed it.
+    __asm__ volatile ("outw %0, %1" : : "a"((unsigned short)0x2000), "d"((unsigned short)0x604));
+    __asm__ volatile ("outw %0, %1" : : "a"((unsigned short)0x2000), "d"((unsigned short)0xB004));
 
-    // Fallback if ACPI power-off doesn't work
+    // Fallback if neither port powered the machine off.
     for (;;) { __asm__ volatile ("hlt"); }
 }
 
@@ -203,6 +207,12 @@ void kmain(void *multiboot_info) {
     tlb_shootdown_selftest();
     panic_stop_selftest();
 
+    // Hold one reference across the whole spawn sequence: a test that
+    // exits fast on another CPU must not drive the live-process count to
+    // zero (which powers the machine off) before the boot has finished
+    // launching everything. Released just before schedule().
+    user_proc_started();
+
     struct process *parent_task = spawn("/BIN/PARENT.ELF");
     if (!parent_task) {
         serial_write_string("[process] spawn FAILED for /BIN/PARENT.ELF\n");
@@ -241,6 +251,11 @@ void kmain(void *multiboot_info) {
 
     serial_write_string("NeoOS: interrupts enabled, starting scheduler\n");
     __asm__ volatile ("sti");
+
+    // Drop kmain's spawn-sequence reference. If every test somehow
+    // already finished, this is the drop that powers off; normally the
+    // real processes are still running and it just balances the count.
+    user_proc_exited();
 
     schedule(); // never returns in practice -- control passes permanently into the task system
     for (;;) {
