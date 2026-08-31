@@ -99,6 +99,14 @@
 // CPU and from the panic path, never nested. A 4 MiB scroll on a raced
 // cursor is a wild pointer, so the lock is not optional here.
 #define LOCK_RANK_FBCON     254
+// The dynamic devfs table (/dev/pts/N registration). Held only for a
+// scan or an entry insert/remove, never nested, taken from open() and
+// from pty teardown.
+#define LOCK_RANK_DEVFS     253
+// The pty pool's allocation lock. Held only to claim or release a slot;
+// a slave's line-discipline lock (LOCK_RANK_TTY) is taken separately,
+// never nested under this one.
+#define LOCK_RANK_PTY       252
 
 #define LOCK_MAX_HELD 8
 

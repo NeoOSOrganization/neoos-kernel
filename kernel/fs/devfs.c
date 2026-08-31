@@ -7,6 +7,7 @@
 #include "dev/tty.h"
 #include "dev/evdev.h"
 #include "dev/fb.h"
+#include "dev/pty.h"
 #include <stddef.h>
 
 // Forward declarations of file_ops implementations
@@ -118,8 +119,85 @@ static const struct devfs_dev devices[] = {
     // Appended AFTER input/* so the hardcoded inode ids in devfs_lookup /
     // devfs_readdir for the input dir (5) and event0 (6) do not shift.
     { "fb0",     VNODE_DEVICE, &fb_file_ops,  fb_open },
+    { "ptmx",    VNODE_DEVICE, NULL,          ptmx_open },
+    // Static parent for the dynamic /dev/pts/N entries (Task 6/7).
+    { "pts",     VNODE_DIR,    NULL,          NULL },
 };
 #define DEVFS_COUNT (sizeof(devices) / sizeof(devices[0]))
+#define DEVFS_PTS_INODE  DEVFS_COUNT      // "pts" is the last entry -> inode_id == DEVFS_COUNT
+
+// ---- dynamic entries (/dev/pts/N) --------------------------------------
+#include "sync/lock.h"
+static int name_eq(const char *a, const char *b);
+#define DEVFS_DYN_MAX  32
+#define DEVFS_DYN_BASE 1000              // synthetic inode ids start here
+
+static struct {
+    char  path[24];                     // e.g. "pts/3"
+    const struct file_ops *ops;
+    void *priv;
+    int (*open)(struct file_descriptor *f);
+    struct devfs_dev dev;                // synthesized; fs_private points here
+    int   used;
+} dyn[DEVFS_DYN_MAX];
+static struct spinlock dyn_lock;
+static int dyn_lock_ready;
+
+static int dyn_open(struct file_descriptor *f) {
+    int slot = (int)(f->vn->inode_id - DEVFS_DYN_BASE);
+    if (slot < 0 || slot >= DEVFS_DYN_MAX || !dyn[slot].used) { return -ENOENT; }
+    f->ops  = dyn[slot].ops;
+    f->priv = dyn[slot].priv;
+    if (dyn[slot].open) { return dyn[slot].open(f); }
+    return 0;
+}
+
+int devfs_register(const char *path, const struct file_ops *ops, void *priv,
+                   int (*open)(struct file_descriptor *f)) {
+    if (!dyn_lock_ready) { spin_init(&dyn_lock, LOCK_RANK_DEVFS, "devfs-dyn"); dyn_lock_ready = 1; }
+    uint64_t fl = spin_lock_raw(&dyn_lock);
+    int free_slot = -1;
+    for (int i = 0; i < DEVFS_DYN_MAX; i++) {
+        if (dyn[i].used && name_eq(dyn[i].path, path)) { spin_unlock_raw(&dyn_lock, fl); return -EEXIST; }
+        if (!dyn[i].used && free_slot < 0) { free_slot = i; }
+    }
+    if (free_slot < 0) { spin_unlock_raw(&dyn_lock, fl); return -ENOSPC; }
+    int j = 0;
+    while (path[j] && j < (int)sizeof(dyn[free_slot].path) - 1) { dyn[free_slot].path[j] = path[j]; j++; }
+    dyn[free_slot].path[j] = 0;
+    dyn[free_slot].ops  = ops;
+    dyn[free_slot].priv = priv;
+    dyn[free_slot].open = open;
+    dyn[free_slot].dev  = (struct devfs_dev){ dyn[free_slot].path, VNODE_DEVICE, ops, dyn_open };
+    dyn[free_slot].used = 1;
+    spin_unlock_raw(&dyn_lock, fl);
+    return 0;
+}
+
+void devfs_unregister(const char *path) {
+    if (!dyn_lock_ready) { return; }
+    uint64_t fl = spin_lock_raw(&dyn_lock);
+    for (int i = 0; i < DEVFS_DYN_MAX; i++) {
+        if (dyn[i].used && name_eq(dyn[i].path, path)) { dyn[i].used = 0; break; }
+    }
+    spin_unlock_raw(&dyn_lock, fl);
+}
+
+// name is the leaf under /dev/pts. Returns the synthetic inode id or 0.
+static uint64_t dyn_lookup_pts(const char *leaf) {
+    if (!dyn_lock_ready) { return 0; }
+    char want[24] = "pts/";
+    int k = 4;
+    while (leaf[k - 4] && k < (int)sizeof(want) - 1) { want[k] = leaf[k - 4]; k++; }
+    want[k] = 0;
+    uint64_t id = 0;
+    uint64_t fl = spin_lock_raw(&dyn_lock);
+    for (int i = 0; i < DEVFS_DYN_MAX; i++) {
+        if (dyn[i].used && name_eq(dyn[i].path, want)) { id = DEVFS_DYN_BASE + i; break; }
+    }
+    spin_unlock_raw(&dyn_lock, fl);
+    return id;
+}
 
 // Root entry (reserved, not in the devices table)
 static const struct devfs_dev root_dev = {
@@ -161,6 +239,15 @@ static int devfs_read_inode(struct vfs_mount *m, uint64_t inode_id, struct vnode
         out->fs_private = (void *)&root_dev;
         return 0;
     }
+    // Dynamic /dev/pts/N entries.
+    if (inode_id >= DEVFS_DYN_BASE) {
+        int slot = (int)(inode_id - DEVFS_DYN_BASE);
+        if (slot < 0 || slot >= DEVFS_DYN_MAX || !dyn[slot].used) { return -ENOENT; }
+        out->type = VNODE_DEVICE;
+        out->size = 0;
+        out->fs_private = (void *)&dyn[slot].dev;
+        return 0;
+    }
     // inode_id 1+ are device entries
     if (inode_id > DEVFS_COUNT) { return -ENOENT; }
     const struct devfs_dev *dev = &devices[inode_id - 1];
@@ -182,6 +269,13 @@ static int devfs_lookup(struct vnode *dir, const char *name, uint64_t *out_inode
             *out_inode_id = 6;  // input/event0 is at devices[5], which is inode_id 6 (1-indexed)
             return 0;
         }
+        return -ENOENT;
+    }
+
+    // Inside /dev/pts: dynamic entries.
+    if (dir && dir->inode_id == DEVFS_PTS_INODE) {
+        uint64_t id = dyn_lookup_pts(name);
+        if (id) { *out_inode_id = id; return 0; }
         return -ENOENT;
     }
 
@@ -255,6 +349,25 @@ static int devfs_readdir(struct vnode *dir, uint32_t index, struct vfs_dirent *o
         out->type = DT_CHR;
         out->ino = 6;  // input/event0 is at devices[5], inode_id 6
         return 0;
+    }
+
+    // /dev/pts: the used dynamic slots, in slot order.
+    if (dir && dir->inode_id == DEVFS_PTS_INODE) {
+        uint32_t seen = 0;
+        for (int i = 0; i < DEVFS_DYN_MAX; i++) {
+            if (!dyn[i].used) { continue; }
+            if (seen == index) {
+                const char *leaf = dyn[i].path + 4;   // skip "pts/"
+                int k = 0;
+                while (leaf[k] && k < VFS_NAME_MAX - 1) { out->name[k] = leaf[k]; k++; }
+                out->name[k] = 0;
+                out->type = DT_CHR;
+                out->ino  = DEVFS_DYN_BASE + i;
+                return 0;
+            }
+            seen++;
+        }
+        return -ENOENT;
     }
 
     // Root level listing (dir->inode_id == 0 or dir is NULL)
@@ -336,8 +449,31 @@ const struct vfs_ops devfs_ops = {
 int devfs_vnode_is_tty(struct vnode *vn) {
     if (!vn || vn->type != VNODE_DEVICE) { return 0; }
     if (vn->inode_id == 0) { return 0; }  // Root is not a device
-    uint64_t dev_idx = vn->inode_id - 1;  // Convert inode_id to devices array index
+    if (vn->inode_id >= DEVFS_DYN_BASE) { return 1; }  // a pts slave is a tty
+    uint64_t dev_idx = vn->inode_id - 1;
     if (dev_idx >= DEVFS_COUNT) { return 0; }
     return name_eq(devices[dev_idx].name, "CONSOLE") ||
            name_eq(devices[dev_idx].name, "TTY");
+}
+
+void devfs_selftest(void) {
+    static const struct file_ops dummy = { .name = "devfs-dummy" };
+    if (devfs_register("pts/7", &dummy, (void *)0x1234, 0) != 0) {
+        serial_write_string("[devfs] selftest FAILED: register\n"); return;
+    }
+    if (devfs_register("pts/7", &dummy, 0, 0) != -EEXIST) {
+        serial_write_string("[devfs] selftest FAILED: duplicate register allowed\n");
+        devfs_unregister("pts/7"); return;
+    }
+    struct vnode d; d.inode_id = DEVFS_PTS_INODE;
+    uint64_t id = 0;
+    if (devfs_lookup(&d, "7", &id) != 0 || id < DEVFS_DYN_BASE) {
+        serial_write_string("[devfs] selftest FAILED: lookup\n");
+        devfs_unregister("pts/7"); return;
+    }
+    devfs_unregister("pts/7");
+    if (devfs_lookup(&d, "7", &id) == 0) {
+        serial_write_string("[devfs] selftest FAILED: resolves after unregister\n"); return;
+    }
+    serial_write_string("[devfs] selftest passed\n");
 }

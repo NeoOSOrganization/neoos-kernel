@@ -61,7 +61,7 @@ static void tty_set_defaults(struct tty *t) {
 
 void tty_obj_init(struct tty *t, const struct tty_backend *b, void *priv) {
     for (unsigned i = 0; i < sizeof(*t); i++) { ((uint8_t *)t)[i] = 0; }
-    spin_init(&t->lock, LOCK_RANK_TTY, "tty");
+    spin_init(&t->lock, LOCK_RANK_TTY, priv ? "tty-pts" : "tty-con");
     waitq_init(&t->readers);
     waitq_init(&t->out_readers);
     t->backend = b;
@@ -99,6 +99,10 @@ int64_t tty_obj_write(struct tty *t, const void *buf, uint32_t len) {
     uint64_t f = spin_lock_irqsave(&t->lock);
     tty_out_cooked(t, (const char *)buf, len);
     spin_unlock_irqrestore(&t->lock, f);
+    // A pty backend just appended to outq under the lock; wake the
+    // master reader now that it is dropped. Harmless for the console
+    // (out_readers is always empty there).
+    (t->backend_priv ? waitq_wake_all(&t->out_readers) : (void)0);
     return (int64_t)len;
 }
 
@@ -123,7 +127,7 @@ void tty_input_char(struct tty *t, char c) {
     struct termios_k *o = &t->tio;
 
     if (o->c_iflag & ICRNL) { if (c == '\r') { c = '\n'; } }
-    else if (o->c_iflag & IGNCR) { if (c == '\r') { spin_unlock_irqrestore(&t->lock, f); return; } }
+    else if (o->c_iflag & IGNCR) { if (c == '\r') { spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? waitq_wake_all(&t->out_readers) : (void)0); return; } }
     if (o->c_iflag & INLCR) { if (c == '\n') { c = '\r'; } }
 
     // Signal characters are checked BEFORE the canonical/raw split:
@@ -140,7 +144,7 @@ void tty_input_char(struct tty *t, char c) {
             // being typed was for the program just interrupted.
             t->edit_len = 0;
             if (o->c_lflag & ECHO) { tty_echo(t, '^'); tty_echo(t, (char)('@' + c)); tty_echo(t, '\n'); }
-            spin_unlock_irqrestore(&t->lock, f);
+            spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? waitq_wake_all(&t->out_readers) : (void)0);
             // Signalling is done with the tty lock DROPPED: delivery
             // takes the proc_table bucket lock and per-process p->lock,
             // both of which rank above this one, and a wake can spin
@@ -155,7 +159,7 @@ void tty_input_char(struct tty *t, char c) {
         // Raw mode: every byte is immediately readable, no editing.
         ready_push(t, c);
         if (o->c_lflag & ECHO) { tty_echo(t, c); }
-        spin_unlock_irqrestore(&t->lock, f);
+        spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? waitq_wake_all(&t->out_readers) : (void)0);
         waitq_wake_all(&t->readers);
         return;
     }
@@ -168,7 +172,7 @@ void tty_input_char(struct tty *t, char c) {
             // leaving it there with the cursor sitting on top.
             if (o->c_lflag & ECHOE) { tty_echo(t, '\b'); tty_echo(t, ' '); tty_echo(t, '\b'); }
         }
-        spin_unlock_irqrestore(&t->lock, f);
+        spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? waitq_wake_all(&t->out_readers) : (void)0);
         return;
     }
 
@@ -177,7 +181,7 @@ void tty_input_char(struct tty *t, char c) {
             while (t->edit_len > 0) { tty_echo(t, '\b'); tty_echo(t, ' '); tty_echo(t, '\b'); t->edit_len--; }
         }
         t->edit_len = 0;
-        spin_unlock_irqrestore(&t->lock, f);
+        spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? waitq_wake_all(&t->out_readers) : (void)0);
         return;
     }
 
@@ -187,7 +191,7 @@ void tty_input_char(struct tty *t, char c) {
         // a reader.
         if (t->edit_len == 0) { t->saw_eof = 1; }
         else { line_commit(t); }
-        spin_unlock_irqrestore(&t->lock, f);
+        spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? waitq_wake_all(&t->out_readers) : (void)0);
         waitq_wake_all(&t->readers);
         return;
     }
@@ -196,7 +200,7 @@ void tty_input_char(struct tty *t, char c) {
         if (t->edit_len < TTY_BUF) { t->edit[t->edit_len++] = c; }
         if (o->c_lflag & ECHO) { tty_echo(t, '\n'); }
         line_commit(t);
-        spin_unlock_irqrestore(&t->lock, f);
+        spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? waitq_wake_all(&t->out_readers) : (void)0);
         waitq_wake_all(&t->readers);
         return;
     }
@@ -205,7 +209,7 @@ void tty_input_char(struct tty *t, char c) {
         t->edit[t->edit_len++] = c;
         if (o->c_lflag & ECHO) { tty_echo(t, c); }
     }
-    spin_unlock_irqrestore(&t->lock, f);
+    spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? waitq_wake_all(&t->out_readers) : (void)0);
 }
 
 int64_t tty_obj_read(struct tty *t, void *buf, uint32_t len, int nonblock) {
@@ -216,13 +220,16 @@ int64_t tty_obj_read(struct tty *t, void *buf, uint32_t len, int nonblock) {
     for (;;) {
         if (t->ready_len > 0) { break; }
         if (t->saw_eof) { t->saw_eof = 0; spin_unlock_irqrestore(&t->lock, f); return 0; }
+        if (t->hung_up) { spin_unlock_irqrestore(&t->lock, f); return 0; }
         if (nonblock) { spin_unlock_irqrestore(&t->lock, f); return -EAGAIN; }
 
-        // Nothing to read: block. waitq_sleep releases the lock for us
-        // and returns holding nothing, which is why the loop retakes it.
+        // waitq_sleep drops t->lock, sleeps, and returns HOLDING it again
+        // -- both on a normal wake and after a signal. So the loop does
+        // NOT retake it; a -EINTR just needs one unlock. (Same shape as
+        // pipe_read; the old console-only tty_read got this wrong and
+        // re-locked, which was a latent self-deadlock a pty read hits.)
         int rc = waitq_sleep(&t->readers, &t->lock);
-        if (rc != 0) { return rc; }   // interrupted by a signal -> -EINTR
-        f = spin_lock_irqsave(&t->lock);
+        if (rc != 0) { spin_unlock_irqrestore(&t->lock, f); return rc; }
     }
 
     uint32_t n = 0;
@@ -313,6 +320,7 @@ int tty_obj_poll(struct tty *t, int events) {
     uint64_t f = spin_lock_irqsave(&t->lock);
     int mask = POLLOUT;
     if (t->ready_len > 0 || t->saw_eof) { mask |= POLLIN; }
+    if (t->hung_up) { mask |= POLLIN | POLLHUP; }
     spin_unlock_irqrestore(&t->lock, f);
     return mask & events;
 }

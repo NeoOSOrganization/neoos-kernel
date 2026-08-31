@@ -161,8 +161,10 @@ int64_t file_bind_vnode_ops(struct file_descriptor *f) {
     f->ops = &vnode_file_ops;
     if (f->vn && f->vn->type == VNODE_DEVICE) {
         const struct devfs_dev *dev = (const struct devfs_dev *)f->vn->fs_private;
-        if (dev && dev->fops) {
-            f->ops = dev->fops;
+        if (dev) {
+            if (dev->fops) { f->ops = dev->fops; }
+            // dev->open may set f->ops itself (/dev/ptmx picks between
+            // master and slave, /dev/pts/N comes from a registration).
             if (dev->open) { return dev->open(f); }
         }
     }

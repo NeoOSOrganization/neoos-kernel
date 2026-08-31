@@ -24,6 +24,14 @@ void lock_panic(const char *msg, const char *a, const char *b) {
     panic_puts(a ? a : "(null)");
     panic_puts(" holding=");
     panic_puts(b ? b : "(none)");
+    panic_puts("\n[lock] held stack:");
+    {
+        struct cpu *c = this_cpu();
+        for (int i = 0; i < c->held_depth; i++) {
+            panic_puts(" ");
+            panic_puts(c->held_names[i] ? c->held_names[i] : "?");
+        }
+    }
     panic_puts("\n");
     for (;;) { __asm__ volatile ("hlt"); }
 }

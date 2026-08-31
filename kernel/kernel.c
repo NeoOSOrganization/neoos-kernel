@@ -2,6 +2,7 @@
 #include "dev/vga.h"
 #include "dev/fb.h"
 #include "dev/fbcon.h"
+#include "dev/pty.h"
 #include "dev/console.h"
 #include "dev/serial.h"
 #include "arch/tss.h"
@@ -35,6 +36,7 @@
 #include "smp/smp.h"
 #include "ipc/futex.h"
 #include "fs/file.h"
+#include "fs/devfs.h"
 #include "ipc/pipe.h"
 #include "net/net.h"
 #include "net/socket.h"
@@ -128,6 +130,7 @@ void kmain(void *multiboot_info) {
     // zero", so it needs a tick counter that already means something.
     tty_init();
     tty_selftest();
+    pty_init();
     keyboard_decode_selftest();
     rtc_init();
     rtc_selftest();
@@ -181,6 +184,7 @@ void kmain(void *multiboot_info) {
     vfs_mount_fs(0,     "/tmp", "ramfs");
     vfs_mount_fs("hd1", "/mnt", "fat");
     vfs_selftest();
+    devfs_selftest();
 
     // Hits are sector reads the drive never saw. The ratio is the whole
     // point of the cache, so it goes in the boot log where a regression
@@ -255,6 +259,7 @@ void kmain(void *multiboot_info) {
     spawn("/BIN/MMAPTEST.ELF");
     spawn("/BIN/FBTEST.ELF");
     spawn("/BIN/POLLTEST.ELF");
+    spawn("/BIN/PTYTEST.ELF");
     spawn("/BIN/SMPTEST.ELF");
     spawn("/BIN/EVTEST.ELF");
     spawn("/BIN/IPCTEST.ELF");

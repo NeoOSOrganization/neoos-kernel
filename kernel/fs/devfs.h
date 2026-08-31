@@ -22,4 +22,14 @@ struct devfs_dev {
 // tty from /dev/NULL, and the device table is private to devfs.c.
 int devfs_vnode_is_tty(struct vnode *vn);
 
+// Runtime device registration. `path` is relative to /dev and may
+// contain one slash ("pts/3"); the parent directory must already be a
+// static entry. On open, f->ops is set to `ops`, f->priv to `priv`,
+// and `open(f)` (if non-null) is called. Returns 0, -EEXIST, -ENOSPC.
+int  devfs_register(const char *path, const struct file_ops *ops, void *priv,
+                    int (*open)(struct file_descriptor *f));
+void devfs_unregister(const char *path);
+
+void devfs_selftest(void);
+
 #endif

@@ -102,6 +102,7 @@ struct tty {
     struct winsize_k win;
     int      fg_pgid;
     int      sid;
+    int      hung_up;              // pty master closed -> slave reads see EOF
 
     const struct tty_backend *backend;
     void *backend_priv;
