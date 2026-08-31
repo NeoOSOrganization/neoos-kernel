@@ -138,40 +138,33 @@ static void signal_stop_cont_interlock(struct process *p, int sig) {
     }
 }
 
-int signal_send_thread(struct thread *t, int sig, struct siginfo *info) {
-    if (sig <= 0 || sig >= NSIG) { return -EINVAL; }
-    struct process *p = t->proc;
-    if (!p) { return -ESRCH; }
-    signal_stop_cont_interlock(p, sig);
-    if (signal_is_ignored(p, sig)) { return 0; }
-
-    uint64_t f = spin_lock_irqsave(&p->lock);
+// Caller holds t->proc->lock and has done the range / interlock /
+// ignored checks. The pending-set update, the RT payload enqueue, the
+// target selection and the wake all happen under that one lock -- the
+// wake path is deadlock-safe held this way (thread_wake early-returns
+// unless the target's state already equals the parked state it waits
+// for, and a thread in thread_exit_self is a ZOMBIE).
+static int signal_send_thread_locked(struct thread *t, int sig, struct siginfo *info) {
     if (sig >= SIGRTMIN && info) {
         int rc = queue_append(&t->queued, info);
-        if (rc != 0) { spin_unlock_irqrestore(&p->lock, f); return rc; }
+        if (rc != 0) { return rc; }
     }
     sigset_add(&t->pending, sig);
-    spin_unlock_irqrestore(&p->lock, f);
-
     signal_wake_for_delivery(t);
     return 0;
 }
 
-int signal_send_process(struct process *p, int sig, struct siginfo *info) {
-    if (sig <= 0 || sig >= NSIG) { return -EINVAL; }
-    signal_stop_cont_interlock(p, sig);
-    if (signal_is_ignored(p, sig)) { return 0; }
-
-    uint64_t f = spin_lock_irqsave(&p->lock);
+static int signal_send_process_locked(struct process *p, int sig, struct siginfo *info) {
     if (sig >= SIGRTMIN && info) {
         int rc = queue_append(&p->queued, info);
-        if (rc != 0) { spin_unlock_irqrestore(&p->lock, f); return rc; }
+        if (rc != 0) { return rc; }
     }
     sigset_add(&p->pending, sig);
-    spin_unlock_irqrestore(&p->lock, f);
 
     // Deliver to any one thread that does not block it; prefer one that
     // is already awake so a sleeping thread is not woken unnecessarily.
+    // The walk is safe because p->lock -- which guards p->threads -- is
+    // held.
     struct thread *target = 0;
     for (struct thread *t = p->threads; t; t = t->proc_next) {
         if (!sigset_test(t->blocked, sig)) {
@@ -181,6 +174,30 @@ int signal_send_process(struct process *p, int sig, struct siginfo *info) {
     }
     if (target) { signal_wake_for_delivery(target); }
     return 0;
+}
+
+int signal_send_thread(struct thread *t, int sig, struct siginfo *info) {
+    if (sig <= 0 || sig >= NSIG) { return -EINVAL; }
+    struct process *p = t->proc;
+    if (!p) { return -ESRCH; }
+    signal_stop_cont_interlock(p, sig);
+    if (signal_is_ignored(p, sig)) { return 0; }
+
+    uint64_t f = spin_lock_irqsave(&p->lock);
+    int rc = signal_send_thread_locked(t, sig, info);
+    spin_unlock_irqrestore(&p->lock, f);
+    return rc;
+}
+
+int signal_send_process(struct process *p, int sig, struct siginfo *info) {
+    if (sig <= 0 || sig >= NSIG) { return -EINVAL; }
+    signal_stop_cont_interlock(p, sig);
+    if (signal_is_ignored(p, sig)) { return 0; }
+
+    uint64_t f = spin_lock_irqsave(&p->lock);
+    int rc = signal_send_process_locked(p, sig, info);
+    spin_unlock_irqrestore(&p->lock, f);
+    return rc;
 }
 
 // A thread with a deliverable signal must reach a delivery point. If it
@@ -294,12 +311,16 @@ void signal_do_stop(struct thread *t, int sig) {
     struct process *p = t->proc;
     (void)sig;
 
+    // p->lock guards p->threads; the wake path is deadlock-safe held
+    // this way (see signal_send_thread_locked).
+    uint64_t wf = spin_lock_irqsave(&p->lock);
     for (struct thread *o = p->threads; o; o = o->proc_next) {
         if (o != t && o->state != THREAD_ZOMBIE && o->state != THREAD_STOPPED) {
             sigset_add(&o->pending, SIGSTOP);
             signal_wake_for_delivery(o);
         }
     }
+    spin_unlock_irqrestore(&p->lock, wf);
 
     uint64_t f = spin_lock_irqsave(&p->lock);
     if (!t->stopping) {
@@ -374,13 +395,15 @@ void signal_do_continue(struct process *p) {
         sigset_del(&t->pending, SIGSTOP);
         t->stopping = 0;
     }
-    spin_unlock_irqrestore(&p->lock, f);
-
-    // Outside the lock: thread_wake can spin waiting for a thread to
-    // finish leaving its CPU, and it takes a run queue lock.
+    // The wake walk is now under p->lock too: it guards p->threads, and
+    // thread_wake only spins (wait_off_cpu) on a thread whose state
+    // already reads THREAD_STOPPED -- one that has published the state
+    // in signal_do_stop and released p->lock on its way to schedule(),
+    // so it is not blocked on this lock.
     for (struct thread *t = p->threads; t; t = t->proc_next) {
         thread_wake(t, THREAD_STOPPED);
     }
+    spin_unlock_irqrestore(&p->lock, f);
 }
 
 // ---------------------------------------------------------------- delivery

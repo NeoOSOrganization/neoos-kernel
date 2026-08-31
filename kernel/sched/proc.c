@@ -686,21 +686,29 @@ int signal_kill(int pid, int sig, struct siginfo *info) {
 
 int signal_tkill(int tgid, int tid, int sig, struct siginfo *info) {
     if (sig < 0 || sig >= NSIG) { return -EINVAL; }
+
+    // Find the target thread under its process's p->lock (which guards
+    // p->threads) and take a reference on it, so it cannot be freed by
+    // a concurrent thread_join between here and the delivery. Then drop
+    // every lock and deliver through the normal signal_send_thread --
+    // which takes p->lock itself, so there is no lock held across it
+    // and no recursion.
+    struct thread *victim = 0;
     uint64_t f = spin_lock_irqsave(&proc_lock);
-    for (struct process *p = proc_list; p; p = p->next) {
+    for (struct process *p = proc_list; p && !victim; p = p->next) {
         if (tgid > 0 && p->pid != tgid) { continue; }
-        // FIXME(Task 4): this walks p->threads under proc_lock, not
-        // p->lock -- under-locked now that thread membership moved to
-        // p->lock. The signal-send rework restructures this to find the
-        // target and deliver under one p->lock hold.
+        uint64_t pf = spin_lock_irqsave(&p->lock);
         for (struct thread *t = p->threads; t; t = t->proc_next) {
-            if (t->tid != tid) { continue; }
-            spin_unlock_irqrestore(&proc_lock, f);
-            return sig ? signal_send_thread(t, sig, info) : 0;
+            if (t->tid == tid) { thread_get(t); victim = t; break; }
         }
+        spin_unlock_irqrestore(&p->lock, pf);
     }
     spin_unlock_irqrestore(&proc_lock, f);
-    return -ESRCH;
+
+    if (!victim) { return -ESRCH; }
+    int rc = sig ? signal_send_thread(victim, sig, info) : 0;
+    thread_put(victim);
+    return rc;
 }
 
 void proc_get(struct process *p) { p->live_threads++; }
