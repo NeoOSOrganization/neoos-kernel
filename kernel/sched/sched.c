@@ -240,8 +240,7 @@ static void idle_entry(void) {
             // four. Wait for it to actually leave.
             thread_wait_off_cpu(z);
             pmm_free(z->kernel_stack_phys, KERNEL_STACK_ORDER);
-            kfree(z->xstate);
-            kfree(z);
+            thread_put(z);   // the kzombies list's reference
             z = next;
         }
         smp_parallel_selftest_check();

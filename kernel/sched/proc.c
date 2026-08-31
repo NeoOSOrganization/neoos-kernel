@@ -789,10 +789,13 @@ void process_exit(int code) {
         uint64_t sf = spin_lock_irqsave(&p->lock);
         for (struct thread *t = p->threads;
              t && nv < MAX_THREADS_PER_PROC; t = t->proc_next) {
-            if (t != self) { victims[nv++] = t; }
+            if (t != self) { thread_get(t); victims[nv++] = t; }
         }
         spin_unlock_irqrestore(&p->lock, sf);
-        for (int i = 0; i < nv; i++) { thread_kill(victims[i]); }
+        // Refs held across the SIGKILL close the window where a sibling
+        // is freed by a concurrent same-process thread_join between the
+        // snapshot and the kill.
+        for (int i = 0; i < nv; i++) { thread_kill(victims[i]); thread_put(victims[i]); }
     }
 
     thread_exit_self(code);
@@ -822,8 +825,7 @@ static void proc_reap(struct process *p) {
         // stack. See the same wait in idle_entry's kzombies drain.
         thread_wait_off_cpu(z);
         pmm_free(z->kernel_stack_phys, KERNEL_STACK_ORDER);
-        kfree(z->xstate);
-        kfree(z);
+        thread_put(z);   // the thread list's reference; frees struct + xstate
         z = next;
     }
 

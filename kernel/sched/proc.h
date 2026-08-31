@@ -133,6 +133,14 @@ struct process {
 
 struct thread {
     int tid;                        // 0 == an idle thread (never a pid)
+    // References to this struct. Starts at 1 (the process's thread
+    // list). A transient holder that keeps a `struct thread *` past
+    // releasing p->lock -- signal delivery, process_exit's sibling
+    // snapshot -- takes one with thread_get() and drops it with
+    // thread_put(). The struct + xstate are freed when this hits zero;
+    // the kernel stack is freed earlier, by whoever drains the zombie
+    // list, and is NOT gated on this count (that is what on_cpu is for).
+    uint32_t ref;
     // set_tid_address's "clear child tid" pointer. Recorded because
     // musl sets it before main; NOT acted on at exit -- see
     // sys_set_tid_address for why, and docs/stdlib.md for the
@@ -284,6 +292,12 @@ int64_t wait_for_pid(int pid);
 // out of stack slots, or out of memory.
 void thread_kill(struct thread *t);
 struct thread *thread_create(uint64_t entry, uint64_t arg);
+
+// Reference counting for `struct thread` (see the `ref` field). Take a
+// ref before keeping a thread pointer past the lock that pins it;
+// thread_put frees the struct + xstate on the last drop.
+void thread_get(struct thread *t);
+void thread_put(struct thread *t);
 
 // Waits for `tid` (a thread of the calling process) to exit, reclaims
 // its stacks and struct, and stores its exit code. Returns 0, -ESRCH,

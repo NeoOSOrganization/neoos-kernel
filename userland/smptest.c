@@ -80,6 +80,48 @@ static int check_thread_migration(long online) {
     return 1;
 }
 
+// Hammers the thread create/exit/join paths: many rounds of "create N,
+// they all exit at once, join all N". This is the load that turned up
+// the thread-list under-locking (a join scanning both lists while a
+// sibling was mid-flight between them returned -ESRCH) and now also
+// exercises the struct-thread reference count and the per-process lock.
+// A leak shows up as create failing partway once the 16-slot table
+// fills and never drains.
+#define STRESS_ROUNDS  40
+#define STRESS_THREADS 8
+
+static void stress_worker(void *arg) {
+    for (volatile int i = 0; i < (int)(long)arg; i++) { }
+    thread_exit(0);
+}
+
+static int check_join_stress(void) {
+    for (int r = 0; r < STRESS_ROUNDS; r++) {
+        thread_t t[STRESS_THREADS];
+        for (int i = 0; i < STRESS_THREADS; i++) {
+            if (thread_create(&t[i], stress_worker, (void *)(long)(i * 37)) != 0) {
+                printf("[smptest] FAILED: stress thread_create round %d idx %d\n", r, i);
+                return 0;
+            }
+        }
+        for (int i = 0; i < STRESS_THREADS; i++) {
+            int code = -1;
+            int rc = thread_join(t[i], &code);
+            if (rc != 0) {
+                printf("[smptest] FAILED: stress thread_join round %d idx %d rc=%d\n", r, i, rc);
+                return 0;
+            }
+            if (code != 0) {
+                printf("[smptest] FAILED: stress bad exit code round %d idx %d code=%d\n", r, i, code);
+                return 0;
+            }
+        }
+    }
+    printf("[smptest] join stress passed (%d rounds x %d threads)\n",
+           STRESS_ROUNDS, STRESS_THREADS);
+    return 1;
+}
+
 // Exercises the SMP visibility calls from ring 3. The point is that a
 // user program can see the machine's CPU count and which CPU it is on
 // through POSIX-shaped calls, not a raw syscall number.
@@ -114,6 +156,7 @@ int main(int argc, char **argv) {
     printf("[smptest] cpus=%d, running on cpu %d\n", (int)online, cpu);
 
     if (!check_thread_migration(online)) { return 1; }
+    if (!check_join_stress()) { return 1; }
 
     printf("[smptest] ALL PASSED\n");
     return 0;

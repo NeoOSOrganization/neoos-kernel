@@ -55,6 +55,19 @@ struct process *current_proc(void) {
 // fxsave, 64 for xsave. heap.c's struct heap_page is 64-byte aligned
 // specifically so every kmalloc slot satisfies both; see the comment
 // there.
+void thread_get(struct thread *t) {
+    __atomic_add_fetch(&t->ref, 1, __ATOMIC_ACQ_REL);
+}
+
+void thread_put(struct thread *t) {
+    if (__atomic_sub_fetch(&t->ref, 1, __ATOMIC_ACQ_REL) != 0) { return; }
+    // The kernel stack and stack slot were released before this final
+    // put, by whoever drained the zombie list (thread_join, proc_reap,
+    // idle_entry). Only the struct and its extended-state buffer remain.
+    kfree(t->xstate);
+    kfree(t);
+}
+
 struct thread *thread_alloc(struct process *p) {
     struct thread *t = (struct thread *)kmalloc(sizeof(struct thread));
     if (!t) { return 0; }
@@ -74,6 +87,7 @@ struct thread *thread_alloc(struct process *p) {
     // thread goes through alloc_id() unconditionally.
     int tid = (p && !p->threads) ? p->pid : alloc_id();
     t->tid        = tid;
+    t->ref        = 1;   // the thread list's reference (kzombies list for p==0)
     t->proc       = p;
     t->state      = THREAD_READY;
     t->stack_slot = -1;
@@ -311,8 +325,7 @@ int thread_join(int tid, int *out_code) {
             thread_wait_off_cpu(z);
             thread_stack_free(p, z->stack_slot);
             pmm_free(z->kernel_stack_phys, KERNEL_STACK_ORDER);
-            kfree(z->xstate);
-            kfree(z);
+            thread_put(z);   // the thread list's reference; frees struct + xstate
             return 0;
         }
 
