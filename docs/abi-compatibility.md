@@ -281,8 +281,10 @@ rely on a blocking `read`. See `docs/stdlib.md` for the lock-rank reason.
 4. **10ms clock resolution and no absolute timeouts** — why
    `sem_timedwait` and `pthread_cond_timedwait` diverge into
    relative-timeout spellings, and why `stat` times are all 0.
-5. **No `poll`/`select`** — anything waiting on more than one fd; the
-   most conspicuous gap after the socket work.
+5. **`poll`/`select` are a subset** (M1a): `POLLIN/OUT/ERR/HUP/NVAL`
+   only, no `epoll`, no `ppoll`/`pselect6` sigmask, `nfds` capped at 16,
+   10 ms timeout resolution. Enough for a two-fd event loop, not for a
+   server.
 6. **No `dup`/`dup2`, no `F_DUPFD`** — shell redirection.
 7. **No `getuid`/`uname`/`umask`/`chmod`/`rename`/`rmdir`/`ftruncate`**
    — Tier 2 of `docs/porting-coreutils.md`: makes the tools honest
@@ -294,6 +296,13 @@ rely on a blocking `read`. See `docs/stdlib.md` for the lock-rank reason.
 the working directory, `writev`/`ioctl`/`clock_gettime`, TLS and the
 auxv, and — a FAT constraint rather than an ABI one — the 13-character
 filename limit, now VFAT long names.
+
+**New in M1a (console plumbing):** a Linux-shaped `/dev/fb0` (`mmap` +
+`FBIOGET_VSCREENINFO`/`FSCREENINFO`, no mode setting), a `poll`/`select`
+subset (above), and a PTY subsystem (`/dev/ptmx`, `/dev/pts/N`,
+`TIOCGPTN`; `grantpt`/`unlockpt` no-ops; `TIOCSWINSZ` stored but no
+`SIGWINCH`; no `SIGHUP` on master close — session hang-up and job
+control are M2). Full detail and every divergence in `docs/stdlib.md`.
 
 ## 10. Summary
 

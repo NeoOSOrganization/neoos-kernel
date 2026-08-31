@@ -20,10 +20,14 @@ is independently shippable.
       ├─ B. NX / W^X enforcement               ← DONE (commits 9cabab4..d872e7c)
       ├─ C. ASLR                               ← builds on B and on AT_RANDOM
       │
-      ├─ M1a/M2/M1b. Userspace console + init   ← inserted after brainstorm
-      │      2026-08-31; spec 2026-08-31-m1a-console-plumbing-design.md.
-      │      M1a: /dev/fb0, poll/select, PTY. M2: init (PID 1). M1b: the
-      │      framebuffer terminal. poll/select from M1a also unblocks TCP.
+      ├─ M1a. Console plumbing              ← DONE (commits 627a113..8045377)
+      │      /dev/fb0 + fbcon, poll/select, PTY, allocatable struct tty,
+      │      devfs_register. plan 2026-09-01-m1a-console-plumbing.md.
+      │      poll/select also unblocks TCP.
+      ├─ M2. init (PID 1)                   ← next: /ETC/INITTAB, reboot(2),
+      │      orphan reaping, tests run through init.
+      ├─ M1b. Framebuffer terminal          ← xterm-ish VT + scrollback +
+      │      NokiaPure-as-PSF; the kernel out of the printing business.
       │
       ├─ D. x2APIC                             ← isolated; unblocks >255 CPUs later
       ├─ E. FDC (floppy) driver                ← isolated; smallest new driver

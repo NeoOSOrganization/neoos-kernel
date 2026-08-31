@@ -1131,3 +1131,89 @@ not exist in production builds, where both functions return `-ENOSYS`.
 - `neoos_test_migration_count()` — returns the total number of user-thread
   migrations across all CPUs since boot. Used to verify the kernel's work-stealing
   scheduler is exercised. Returns -ENOSYS in production builds.
+
+## M1a: framebuffer, `poll`/`select`, and pseudo-terminals
+
+The console-plumbing milestone (`docs/superpowers/specs/2026-08-31-m1a-console-plumbing-design.md`).
+
+### `/dev/fb0` and `<linux/fb.h>`
+
+A linear 32-bpp framebuffer, requested from GRUB via a Multiboot2 tag.
+On a machine that refuses the mode, `open("/dev/fb0")` returns `-ENODEV`
+and the kernel console stays in VGA text mode.
+
+```c
+int fd = open("/dev/fb0", O_RDWR);
+struct fb_var_screeninfo v; ioctl(fd, FBIOGET_VSCREENINFO, &v);  // xres, yres, bits_per_pixel, red/green/blue bitfields
+struct fb_fix_screeninfo f; ioctl(fd, FBIOGET_FSCREENINFO, &f);  // smem_start, smem_len, line_length
+void *p = mmap(0, f.line_length * v.yres, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+```
+
+`struct fb_var_screeninfo` / `struct fb_fix_screeninfo` match Linux's
+x86-64 layout. Byte `read`/`write`/`lseek` on the fd also work.
+
+**DIVERGENCE.**
+- **No mode setting.** `FBIOPUT_VSCREENINFO` returns `-EINVAL` unless
+  the requested mode equals the current one. The mode is fixed at boot.
+- **32-bpp packed RGB only.** No 8/16/24-bpp, no palette, no panning,
+  no acceleration ioctls.
+- **The framebuffer is shared with the in-kernel console.** Until M1b's
+  userspace terminal takes over, `fbcon` is actively drawing on it, so a
+  userland program that mmaps `/dev/fb0` and the kernel will both write
+  pixels. M1b resolves this by moving all rendering to userspace.
+
+### `poll` / `select`
+
+```c
+#include <poll.h>
+int poll(struct pollfd *fds, unsigned long nfds, int timeout_ms);
+int select(int nfds, fd_set *rd, fd_set *wr, fd_set *ex, struct timeval *tv);
+```
+
+`struct pollfd` and the `POLL*` values are Linux's. Both block until a
+polled fd is ready or the timeout elapses, waking on any system-wide
+readiness change.
+
+**DIVERGENCE.**
+- **Flag subset:** `POLLIN`, `POLLOUT`, `POLLERR`, `POLLHUP`, `POLLNVAL`.
+  No `POLLPRI`, `POLLRDHUP`, `POLLRDNORM`/`POLLWRNORM`.
+- **No `epoll`.** No `ppoll` / `pselect6` signal mask (the arg is
+  accepted and ignored).
+- **`nfds` caps:** `poll` at 16; `select` translates at most 16 set
+  bits. `EINVAL` past that. (Enough for the M1b terminal, which polls
+  two.)
+- **Timeout resolution is one 10 ms tick.**
+- **The wake is a global broadcast:** every `poll`/`select` caller wakes
+  on *any* pipe/socket/tty/evdev readiness change and re-scans its own
+  fds. Correct, and free at NeoOS's process count; a scaling concern a
+  later milestone can address with per-object registration.
+
+### Pseudo-terminals: `/dev/ptmx`, `/dev/pts/N`
+
+```c
+int m = posix_openpt(O_RDWR);           // == open("/dev/ptmx", O_RDWR)
+grantpt(m); unlockpt(m);                // no-ops, return 0
+int n; ptsname_r(m, buf, len);          // "/dev/pts/<n>", n from ioctl(m, TIOCGPTN)
+int s = open(buf, O_RDWR);              // the slave: a full line-discipline tty
+```
+
+The master (`m`) is a raw byte stream: `read(m)` returns what a program
+running on the slave printed (with `ONLCR` applied), `write(m)` feeds
+the slave's line discipline as if typed (echo, canonical assembly, the
+signal characters). `TCGETS`/`TCSETS`/`TIOCGWINSZ` on the slave behave
+as on the console tty; on a pipe they return `-ENOTTY`, so `isatty()` is
+correct.
+
+**DIVERGENCE.**
+- **`grantpt` / `unlockpt` are no-ops.** NeoOS has no pts permission or
+  lock model; the slave is openable immediately.
+- **`TIOCSWINSZ` stores the size but sends no `SIGWINCH`.** The M1a
+  terminal is fixed-size; M2 wires session hang-up and resize signals.
+- **`close(master)` sends no `SIGHUP`** to the slave's foreground group
+  — a blocked slave `read` just returns EOF. Again M2's job.
+- **16 ptys**, allocated from a fixed pool; the 17th `open("/dev/ptmx")`
+  returns `-ENFILE`.
+- **`/dev/pts` is dynamic devfs, not a `devpts` mount.**
+
+The evdev "`read` never blocks" note above is now backed by working
+`poll`/`select` — a reader waits with those.
