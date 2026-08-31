@@ -87,6 +87,26 @@ Not new engineering, but it gates the milestone.
 Each item is independently committable and ships with a test that
 fails on the pre-fix kernel.
 
+### 4.0 Reconciliation with the working tree (added 2026-08-31)
+
+Baselining the catalogue against the actual uncommitted tree before
+planning found two items already handled:
+
+- **§4.3 (`stat` timestamps) — ALREADY DONE.** `struct vnode` carries
+  `mtime`/`atime`/`ctime`, `fatfs_read_inode` decodes the DOS
+  date/time fields via `fat_datetime_to_epoch`, and `vfs_stat_vnode`
+  copies them through. No Phase 14 task; it ships in the Phase 13
+  commit. `stattest` should still gain the assertion in §4.3 as
+  regression cover.
+- **§4.5 (`smptest` asserts) — DELIBERATELY NOT WANTED.** The kernel's
+  `smp_steal_selftest_check` already hard-asserts the real invariant
+  (`[smp] steal selftest FAILED: no USER thread ever migrated`), and
+  that marker is required by `make test`. `smptest`'s "reported, not
+  asserted" is a documented decision to avoid spurious failures when
+  no CPU is idle. No task; leave it.
+
+The remaining real items are **§4.1, §4.2, §4.4, §4.6, §4.7**.
+
 ### 4.1 `O_CREAT` has the wrong value
 
 `O_CREAT` is `0x100`; Linux x86-64 is `0x40`. A binary compiled against
