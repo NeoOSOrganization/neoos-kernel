@@ -395,6 +395,8 @@ test: fresh-disks iso disk-image
 		echo "--- still-running qemu processes ---"; \
 		pgrep -a qemu-system-x86_64 || echo "(none)"; \
 		exit 1; fi
+	@if grep -q 'PANIC' $(BUILD_DIR)/serial.log; then \
+		echo "KERNEL PANIC:"; grep 'PANIC' $(BUILD_DIR)/serial.log; exit 1; fi
 	@if grep -q 'FAILED' $(BUILD_DIR)/serial.log; then \
 		echo "TEST FAILURES:"; grep 'FAILED' $(BUILD_DIR)/serial.log; exit 1; fi
 	@if ! grep -q '$(BOOT_MARKER)' $(BUILD_DIR)/serial.log; then \
