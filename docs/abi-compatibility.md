@@ -6,6 +6,18 @@ RTC, Tier-0 syscalls).
 **Previous:** 2026-08-30, close of Phase 10 (SMP).
 **Refreshed:** at the end of every milestone, per `CLAUDE.md`.
 
+**Phase 13.5 / 13.6 (SMP hardening — no ABI impact).** The SMP race
+fixes and the object-lifetime / lock-detangle milestone changed no
+struct that crosses to userland and no syscall semantics.
+`thread_join`, `kill`, `tgkill`/`tkill` and `wait4` behave exactly as
+before — they are now *correct* under concurrent access rather than
+returning a spurious `-ESRCH` or racing a free. `proc_list`, the global
+`proc_lock`, and the kernel's dead RCU are gone; all internal.
+`docs/superpowers/specs/2026-08-31-post-smp-roadmap.md` tracks the
+milestones that *will* touch the ABI (NX/W^X rejects `PROT_WRITE|
+PROT_EXEC`; ASLR changes layout + `AT_RANDOM` backing; an OSS
+`/dev/dsp` audio ABI) — each records its divergences when it lands.
+
 ## 1. Scope
 
 Internals are ours; the ABI is not. Kernel data structures, internal

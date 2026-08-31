@@ -2,6 +2,34 @@
 
 ---
 
+## UPDATE (2026-08-31, third session): the milestone is COMPLETE
+
+Everything the second session flagged as "not done / not mechanical" is
+done. Full write-up: `docs/optimization-summary.md` → "Phase 13.6";
+design + plan under `docs/superpowers/`
+(`2026-08-31-smp-lifetime-and-lock-detangle*`).
+
+- The `signal.c` thread-list walks are guarded by `p->lock`.
+- The signal-send path is split into thin public + static `_locked`
+  inner forms; `signal_tkill` no longer recurses.
+- `struct thread` and `struct process` are reference-counted.
+- `proc_table_for_each_ref` (streaming, ref'd) replaces every
+  `proc_list` scan; **`proc_list` / `proc_lock` / RCU are deleted.**
+- Processes no longer leak on exit.
+
+Commits `948fba3`, `58d7976`, `d53adf7`, `cd0e44c`, `2a5d88b`,
+`3d9d5e2`. Gauntlet green through every one (via the parallel
+`pgauntlet.sh` harness, CONC=3).
+
+**Residual:** the net socket-lifetime bug (`recv_one` readers hold no
+ref on their socket) — same class, ~20 lines, not yet fixed. Then
+resume the Phase 14 plan at Task 2.
+
+Post-SMP milestone roadmap:
+`docs/superpowers/specs/2026-08-31-post-smp-roadmap.md`.
+
+---
+
 ## UPDATE (2026-08-31, second session): gauntlet is 15/15 green
 
 Races #1, #2, #3 and the `stack_slots` under-locking are **fixed and

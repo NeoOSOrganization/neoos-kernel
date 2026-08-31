@@ -402,6 +402,39 @@ same knot.
   freed by a concurrent same-process `thread_join` in that window is a
   narrow UAF. Closing it needs the same thread-refcount work.
 
+### Phase 13.6: object lifetime + the proc_lock / sig_lock detangle
+
+All three "found, not fixed" items above are now fixed. Design:
+`docs/superpowers/specs/2026-08-31-smp-lifetime-and-lock-detangle-design.md`;
+plan: `docs/superpowers/plans/2026-08-31-smp-lifetime-and-lock-detangle.md`.
+
+| Commit | What |
+|---|---|
+| `948fba3` | `sig_lock` → `p->lock` (the per-process lock now guards signal state **and** `p->threads`/`p->zombies`/`live_threads`); `refcount` → `live_threads`; `kzombies` moves to its own `kzombies_lock`; the five fix-#3 sites re-point from the global `proc_lock` to `p->lock`. |
+| `58d7976` | `struct thread` reference count (`thread_get`/`thread_put`). Struct + xstate freed at ref 0; the kernel stack still earlier (gated on `on_cpu`). `process_exit` refs each sibling across the SIGKILL — closes the snapshot UAF. `smptest` gains a 40×8 create/exit/join stress loop. |
+| `d53adf7` | Signal senders split into a thin public wrapper (range / interlock / ignored checks, then take `p->lock`) and a static `_locked` inner (pending update, sibling walk, wake — all under the one lock). `signal_do_stop` / `signal_do_continue` walk `p->threads` under `p->lock`. `signal_tkill` finds its target under `p->lock`, `thread_get`s it, and delivers with no lock held — no recursion into `signal_send_thread`. The wake path is deadlock-safe held under `p->lock`: `thread_wake` early-returns unless the target's state already equals the parked state it waits for, and a thread in `thread_exit_self` is a `ZOMBIE`. |
+| `cd0e44c` | `struct process` reference count (`proc_get`/`proc_put`); the old live-thread count keeps its behaviour as `proc_get_live`/`proc_put_live`. `proc_table_lookup` / `proc_find` take the bucket lock and return a ref'd pointer; every caller `proc_put`s. |
+| `2a5d88b` | `proc_table_for_each_ref` — a streaming iterator that hands the callback a ref'd process with no lock held, resuming per bucket by a generation stamp. `signal_kill` group path, `signal_tkill`, and `wait4`'s child scan are rewritten over it. **`proc_list`, `proc_lock`, `struct process::next` deleted** — the hash table is the only process store. `proc_reap` gains a `p->reaped` guard so two concurrent waiters cannot double-free. `fork_test` asserts pid visibility. |
+| `3d9d5e2` | **RCU deleted.** `rcu.c`/`.h` gone; `call_rcu` in the tables replaced by the reference counts; `rcu_dereference`/`assign` → plain acquire/release atomics; `struct rcu_head` removed from both structs. Processes no longer leak on exit. |
+
+The `proc_lock` / `proc_table`-bucket / `sig_lock` knot is cut: there is
+no global process lock, no lock is held across signal delivery, and
+object lifetime is reference-counted rather than resting on an RCU that
+never ran. Gauntlet green through every commit.
+
+**Residual (Phase 13.6 → follow-ons):**
+
+- **Net socket lifetime.** A blocked reader in `socket.c:recv_one`
+  holds no reference on its socket; `sock_close`/`sock_free` on another
+  thread can free `s->lock`/`s->readers` under `waitq_sleep`'s
+  re-acquire. Seen once as `[lock] PANIC: schedule() with a spinlock
+  held ... holding=socktable` under heavy parallel load. Same class,
+  ~20 lines (`sock_get`/`sock_put` + a ref across the wait). Not yet
+  done.
+- The per-process lock is now coarse (signal state + thread
+  membership). Splitting it is a Phase 15 concern, only if contention
+  shows up (it will not at 4 CPUs).
+
 ---
 
 ## Key Design Decisions
@@ -476,21 +509,25 @@ on to the ABI/userland milestones tracked in `docs/abi-compatibility.md`
 and `docs/porting-coreutils.md`.
 
 Carried forward as known work, not yet done:
-- `proc_list` and `proc_lock` still shadow the hash table as a
-  "transition" path, and the process scan in `proc.c` is still linear
-  (`wait4` walks it lock-free). Plan Task 6. Blocked on designing the
-  `proc_lock` / `proc_table`-bucket / `sig_lock` relationship -- see
-  Phase 13.5.
-- The per-process thread list is read without `proc_lock` in
-  `kernel/ipc/signal.c` (`signal_send_process`, `signal_do_stop`,
-  `signal_do_continue`) -- same knot. See Phase 13.5.
-- RCU is inert (`rcu_init` / `synchronize_rcu` never called); the
-  Phase 3/4 hash tables are half-migrated and their `call_rcu` cleanups
-  never run. Processes leak on exit. See Phase 13.5.
 - The block cache is write-through, so FAT entry updates still do a
   full sector read-modify-write to disk per entry.
+- Net socket lifetime: a blocked `recv_one` reader holds no ref on its
+  socket (Phase 13.6 residual).
+- The per-process lock is coarse (signal state + thread membership);
+  split only if contention appears (Phase 15).
+- Post-SMP milestones planned, not started: NX/W^X, ASLR, x2APIC, an
+  FDC driver, an audio stack. See
+  `docs/superpowers/specs/2026-08-31-post-smp-roadmap.md`.
 
 Closed since this list was last written:
+- `proc_list` / `proc_lock` deleted; the hash table is the sole
+  process store; `wait4` no longer scans a list (Phase 13.6).
+- The `signal.c` thread-list walks are guarded (`p->lock`); the
+  signal-send path is split into `_locked` inner forms (Phase 13.6).
+- RCU deleted; object lifetime is reference-counted; processes no
+  longer leak on exit (Phase 13.6).
+- SMP races landing Phase 13: tlb.c deferred-free, serial interleaving,
+  thread-list under-locking, stack-slot bitmap (Phase 13.5).
 - Work stealing is enabled (Phase 11).
 - Per-CPU SYSCALL MSRs and per-CPU LAPIC timer (Phase 11).
 - The `signal_do_continue` lost-wakeup race — the stop/continue
