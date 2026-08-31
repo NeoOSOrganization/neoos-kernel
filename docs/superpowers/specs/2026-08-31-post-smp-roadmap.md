@@ -17,8 +17,13 @@ is independently shippable.
       │
       ├─ A. net socket-lifetime fix            (residual from that milestone)
       │
-      ├─ B. NX / W^X enforcement               ← do before ASLR; small, high value
+      ├─ B. NX / W^X enforcement               ← DONE (commits 9cabab4..d872e7c)
       ├─ C. ASLR                               ← builds on B and on AT_RANDOM
+      │
+      ├─ M1a/M2/M1b. Userspace console + init   ← inserted after brainstorm
+      │      2026-08-31; spec 2026-08-31-m1a-console-plumbing-design.md.
+      │      M1a: /dev/fb0, poll/select, PTY. M2: init (PID 1). M1b: the
+      │      framebuffer terminal. poll/select from M1a also unblocks TCP.
       │
       ├─ D. x2APIC                             ← isolated; unblocks >255 CPUs later
       ├─ E. FDC (floppy) driver                ← isolated; smallest new driver
@@ -156,7 +161,7 @@ Specs AND implementation plans are written for every milestone:
 | # | Design spec | Implementation plan |
 |---|---|---|
 | A net socket | (folded — commit `a66e5f7`, DONE) | — |
-| B NX/W^X | `2026-08-31-nx-wxorx-design.md` | `plans/2026-08-31-nx-wxorx.md` |
+| B NX/W^X | `2026-08-31-nx-wxorx-design.md` | `plans/2026-08-31-nx-wxorx.md` — **DONE** (commits `9cabab4`..`d872e7c`) |
 | C ASLR | `2026-08-31-aslr-design.md` | `plans/2026-08-31-aslr.md` |
 | D x2APIC | `2026-08-31-x2apic-design.md` | `plans/2026-08-31-x2apic.md` |
 | E FDC | `2026-08-31-fdc-driver-design.md` | `plans/2026-08-31-fdc-driver.md` |

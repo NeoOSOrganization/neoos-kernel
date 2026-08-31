@@ -146,7 +146,7 @@ that is fine -- musl's mallocng falls back to `mmap`. See
 |--------|---------|
 | `errno` | **Matches** Linux x86_64, now including `EFAULT` 14, `EPIPE` 32, `ESPIPE` 29, `EMSGSIZE` 90, `EAFNOSUPPORT` 97, `EADDRINUSE` 98, `EADDRNOTAVAIL` 99, `ENETUNREACH` 101, `ENOTCONN` 107, `ERANGE` 34, `ENAMETOOLONG` 36. |
 | Signal numbers | **Matches**: SIGKILL 9, SIGSEGV 11, SIGPIPE 13, NSIG 65. |
-| `PROT_*`, `MAP_*` | **Match** for the subset implemented. |
+| `PROT_*`, `MAP_*` | **Match** for the subset implemented. **DIVERGES on W^X:** `mmap`/`mprotect` reject `PROT_WRITE\|PROT_EXEC` with `-EINVAL`, and the ELF loader refuses a `W`+`X` `PT_LOAD` segment. Linux permits W+X (subject to lockdown/SELinux). See §5a. |
 | `AF_INET` (2), `SOCK_DGRAM` (2), `SOCK_STREAM` (1), `INADDR_*` | **Match.** |
 | `AT_*` (auxv) | **Match**: `AT_PHDR` 3, `AT_PHENT` 4, `AT_PHNUM` 5, `AT_PAGESZ` 6, `AT_ENTRY` 9, `AT_RANDOM` 25. |
 | `ARCH_SET_FS` (0x1002), `ARCH_GET_FS` (0x1003) | **Match.** |
@@ -162,6 +162,29 @@ that is fine -- musl's mallocng falls back to `mmap`. See
 | `BUS_*` (bus type) | **Match** (`BUS_I8042` 0x11 for the AT keyboard). |
 | `EVIOC*` ioctl numbers | **Match** Linux's `<linux/input.h>`: `EVIOCGVERSION`, `EVIOCGID`, `EVIOCGNAME`, `EVIOCGBIT`, `EVIOCGKEY`, `EVIOCGRAB`, etc. One device only, `/dev/input/event0`. |
 
+
+### 5a. W^X — a deliberate divergence
+
+NeoOS enforces "no page is both writable and executable", where Linux
+only discourages it:
+
+- **ELF loader** honours `p_flags`: a read-only segment (`.text`,
+  `.rodata`) is mapped without `PAGE_WRITABLE`, so a stray write faults
+  (`SIGSEGV`) instead of silently succeeding. A `PT_LOAD` segment that
+  is `W` and `X` in the file is refused and `execve` / spawn fails. No
+  toolchain emits such a segment.
+- **`mmap` / `mprotect`** return `-EINVAL` for any `prot` containing
+  both `PROT_WRITE` and `PROT_EXEC`.
+- **Kernel address space**: `.text` is read-only + executable,
+  everything else (`.rodata`, `.data`, `.bss`, the physmap) is
+  non-executable. Asserted at boot by `[wxorx] kernel selftest`.
+
+**What a ported application hits:** a JIT or trampoline generator that
+`mmap`s a single `RWX` region will get `-EINVAL`. The fix on the
+application side is the same one modern Linux hardening already forces:
+keep two mappings of the same pages (one `RW`, one `RX`), or `mprotect`
+between `RW` and `RX` around each code-generation step. Recorded in
+`docs/stdlib.md`.
 
 ## 6. futex, and what is built on it
 

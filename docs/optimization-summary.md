@@ -515,11 +515,23 @@ Carried forward as known work, not yet done:
   socket (Phase 13.6 residual).
 - The per-process lock is coarse (signal state + thread membership);
   split only if contention appears (Phase 15).
-- Post-SMP milestones planned, not started: NX/W^X, ASLR, x2APIC, an
-  FDC driver, an audio stack. See
-  `docs/superpowers/specs/2026-08-31-post-smp-roadmap.md`.
+- Post-SMP milestones planned, not started: ASLR, x2APIC, an FDC
+  driver, an audio stack, and a userspace console + init (M1a/M2/M1b).
+  See `docs/superpowers/specs/2026-08-31-post-smp-roadmap.md` and
+  `docs/superpowers/specs/2026-08-31-m1a-console-plumbing-design.md`.
 
 Closed since this list was last written:
+- **NX / W^X enforced.** The ELF loader honours `p_flags` (read-only
+  `.text`/`.rodata`); `mmap`/`mprotect` reject `PROT_WRITE|PROT_EXEC`
+  with `-EINVAL`; `paging_protect_kernel()` makes kernel `.text` RO and
+  everything else NX, asserted by `[wxorx] kernel selftest`. A
+  `PAGE_COW` PTE bit now distinguishes a fork copy-on-write page from a
+  genuinely read-only one. EFER.NXE is set in the boot / AP trampoline
+  so the NX bit is valid from the first instruction. Divergence in
+  `docs/abi-compatibility.md` §5a.
+- **Headless runs power off.** `kernel_shutdown()` (real ACPI S5) is
+  called when the last user process exits; `make test` drops from ~150s
+  (timeout) to ~11s.
 - `proc_list` / `proc_lock` deleted; the hash table is the sole
   process store; `wait4` no longer scans a list (Phase 13.6).
 - The `signal.c` thread-list walks are guarded (`p->lock`); the
