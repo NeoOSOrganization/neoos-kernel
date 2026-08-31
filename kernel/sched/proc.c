@@ -116,12 +116,24 @@ void process_init(void) {
     serial_write_string("[process] initialized\n");
 }
 
+// The stack_slots bitmap AND the process page tables it maps into are
+// both per-process shared state: a concurrent thread_create() on a live
+// multi-threaded process would otherwise race two threads onto one slot
+// or corrupt the bitmap. p->mm_lock (rank LOCK_RANK_MM) is the guard --
+// the same lock a demand-paging fault takes to touch these page tables.
+// pmm_alloc (rank PMM) and tlb_defer_free (rank TLB) both rank strictly
+// above MM, so the map/unmap loops are legal under it. Callers from
+// spawn()/exec_task() run on a process no other CPU can see yet, but
+// none of them hold mm_lock, so taking it unconditionally here does not
+// double-lock.
 int thread_stack_alloc(struct process *p, uint64_t *out_top) {
+    uint64_t f = spin_lock_irqsave(&p->mm_lock);
+
     int slot = -1;
     for (int i = 0; i < MAX_THREADS_PER_PROC; i++) {
         if (!(p->stack_slots & (1u << i))) { slot = i; break; }
     }
-    if (slot < 0) { return -1; }
+    if (slot < 0) { spin_unlock_irqrestore(&p->mm_lock, f); return -1; }
 
     uint64_t top = thread_stack_top_for(slot);
     uint64_t *pml4 = (uint64_t *)phys_to_virt(p->pml4_phys);
@@ -133,6 +145,7 @@ int thread_stack_alloc(struct process *p, uint64_t *out_top) {
                 uint64_t v = top - (uint64_t)(USER_STACK_PAGES - j) * PMM_FRAME_SIZE;
                 paging_unmap_from(pml4, v, 1);
             }
+            spin_unlock_irqrestore(&p->mm_lock, f);
             return -1;
         }
         zero_frames(frame, 0);
@@ -143,18 +156,21 @@ int thread_stack_alloc(struct process *p, uint64_t *out_top) {
 
     p->stack_slots |= (uint16_t)(1u << slot);
     *out_top = top;
+    spin_unlock_irqrestore(&p->mm_lock, f);
     return slot;
 }
 
 void thread_stack_free(struct process *p, int slot) {
     if (slot < 0) { return; }
     uint64_t top = thread_stack_top_for(slot);
+    uint64_t f = spin_lock_irqsave(&p->mm_lock);
     uint64_t *pml4 = (uint64_t *)phys_to_virt(p->pml4_phys);
     for (int i = 0; i < USER_STACK_PAGES; i++) {
         uint64_t v = top - (uint64_t)(USER_STACK_PAGES - i) * PMM_FRAME_SIZE;
         paging_unmap_from(pml4, v, 1);
     }
     p->stack_slots &= (uint16_t)~(1u << slot);
+    spin_unlock_irqrestore(&p->mm_lock, f);
 }
 
 // Builds a complete, freshly-loaded user address space from the ELF
