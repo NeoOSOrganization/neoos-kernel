@@ -616,11 +616,11 @@ int arch_prctl(int code, unsigned long addr);   /* ARCH_SET_FS, ARCH_GET_FS */
   user GS base" means writing the swapped MSR, and getting that subtly
   wrong corrupts `this_cpu()` for every thread on that CPU. No x86-64
   libc uses it.
-- **`AT_RANDOM` is not random.** There is no entropy source; the
-  sixteen bytes are derived from the tick counter and the addresses at
-  hand, so they differ between processes and are worthless against an
-  attacker. musl uses them to seed its stack guard, which is therefore
-  guessable. A real RNG is the fix and is not written yet.
+- **`AT_RANDOM` is a seeded PRNG, not cryptographic.** The sixteen bytes
+  are generated from a splitmix64 + xoshiro256** CSPRNG seeded at boot from
+  RTC ⊕ TSC ⊕ a stack address ⊕ RDRAND (if available). **Not an entropy pool**:
+  the seed is deterministic and the stream is not reseeded — adequate for the
+  stack guard canary, not for cryptographic keys or `/dev/random`.
 - **No `AT_BASE`, `AT_SECURE`, `AT_HWCAP`, `AT_CLKTCK`, `AT_UID` and
   friends.** `AT_BASE` in particular is absent because there is no
   dynamic linker; a program that finds no `AT_BASE` correctly concludes

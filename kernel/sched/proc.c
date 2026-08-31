@@ -2,6 +2,7 @@
 // teardown and reaping. Split out of the former kernel/process.c; the
 // code is unchanged, only relocated.
 
+#include "kernel.h"
 #include "sched/sched.h"
 #include "sched/proc_table.h"
 #include "sched/thread_table.h"

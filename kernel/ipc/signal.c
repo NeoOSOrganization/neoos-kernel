@@ -379,6 +379,12 @@ void signal_do_stop(struct thread *t, int sig) {
     t->state    = THREAD_STOPPED;
     spin_unlock_irqrestore(&p->lock, f);
 
+#ifdef NEOOS_DEBUG_STOP_WINDOW
+    // Widen the stop/continue race window so sigtest can hit it. A
+    // continue that arrives now, pre-fix, is lost. Test builds only.
+    schedule();
+#endif
+
     schedule();
     // Resumed by SIGCONT.
 }

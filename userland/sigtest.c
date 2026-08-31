@@ -201,7 +201,11 @@ static int check_stop_continue(void) {
 // HANG in wait4 below, not a wrong status: this test passing at all is
 // the assertion. The delay is varied per round so the pair lands at
 // different points in the path.
-#define STOP_RACE_ROUNDS 10
+//
+// This loop is a *reliable* reproducer only when the kernel is built
+// with NEOOS_DEBUG_STOP_WINDOW=1; the normal build keeps it as cheap
+// smoke cover.
+#define STOP_RACE_ROUNDS 200
 
 static int check_stop_continue_race(void) {
     for (int round = 0; round < STOP_RACE_ROUNDS; round++) {

@@ -187,7 +187,7 @@ no `select`/`poll`; no ICMP and no raw sockets.
 | Initial stack | **argc/argv/envp/auxv, SysV layout, 16-byte aligned.** `argv[0]` is the spawn path. |
 | **envp** | present and NULL-terminated, but always **empty** — nothing sets an environment |
 | **TLS** | **Working.** `arch_prctl(ARCH_SET_FS)`, variant-II layout, `%fs:0` self-pointer, per-thread and restored across migration. Local-exec model only. |
-| **AT_RANDOM** | **DIVERGES: not random.** Derived from the tick counter and the addresses at hand. musl seeds its stack guard from it, so that guard is guessable. |
+| **AT_RANDOM** | **PRNG, not cryptographic.** Seeded from RTC ⊕ TSC ⊕ stack address ⊕ RDRAND (if available); generated via splitmix64 + xoshiro256**. Not an entropy pool — deterministic seed, no reseeding. Adequate for the stack guard canary, not for keys. |
 | Signal frame | NeoOS-shaped; **not** Linux's `rt_sigframe` |
 | Stack alignment | SysV 16-byte at entry — matches |
 
