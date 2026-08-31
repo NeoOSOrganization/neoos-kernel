@@ -143,8 +143,7 @@ int64_t sys_wait4(struct syscall_args *a);
 int64_t sys_write(struct syscall_args *a);
 int64_t sys_yield(struct syscall_args *a);
 
-#ifdef NEOOS_TEST_HOOKS
+// Always declared; returns -ENOSYS without -DNEOOS_TEST_HOOKS.
 int64_t sys_test_hook(struct syscall_args *a);
-#endif
 
 #endif

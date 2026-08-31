@@ -123,8 +123,12 @@ int64_t sys_nanosleep(struct syscall_args *a) {
     return 0;
 }
 
-#ifdef NEOOS_TEST_HOOKS
+// Always present so the dispatch table has a real handler at
+// SYS_TEST_HOOK (the table selftest asserts every slot up to SYS_MAX is
+// filled). In a production build -- no -DNEOOS_TEST_HOOKS -- it just
+// reports -ENOSYS, exactly as an unimplemented number would.
 int64_t sys_test_hook(struct syscall_args *a) {
+#ifdef NEOOS_TEST_HOOKS
     switch ((int)a->a1) {
     case TESTHOOK_INJECT_KEY:
         input_inject_key((uint16_t)a->a2, (int)a->a3);
@@ -134,5 +138,8 @@ int64_t sys_test_hook(struct syscall_args *a) {
     default:
         return -EINVAL;
     }
-}
+#else
+    (void)a;
+    return -ENOSYS;
 #endif
+}
