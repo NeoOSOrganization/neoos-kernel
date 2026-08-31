@@ -77,21 +77,56 @@ struct winsize_k {
     uint16_t ws_ypixel;
 };
 
+#include "sync/spinlock_types.h"
+#include "sync/waitq.h"
+
+#define TTY_BUF 1024
+
+struct tty;
+
+// Where a tty's cooked output goes. The console backend writes serial +
+// framebuffer; the pty backend appends to the master's read buffer.
+struct tty_backend {
+    void (*output)(struct tty *t, const char *s, uint32_t n);
+};
+
+struct tty {
+    struct spinlock lock;
+    struct waitq    readers;        // blocked in the slave/console read()
+
+    char     edit[TTY_BUF];  uint32_t edit_len;        // canonical assembly
+    char     ready[TTY_BUF]; uint32_t ready_head, ready_len;  // readable
+    int      saw_eof;
+
+    struct termios_k tio;
+    struct winsize_k win;
+    int      fg_pgid;
+    int      sid;
+
+    const struct tty_backend *backend;
+    void *backend_priv;
+
+    // pty master side: what the slave wrote, waiting for the master read.
+    char     outq[TTY_BUF]; uint32_t out_head, out_len;
+    struct waitq out_readers;
+};
+
 void tty_init(void);
+struct tty *tty_console(void);
 
-// Called from the keyboard IRQ with one decoded character. Runs the
-// input side of the line discipline: echo, editing, signal generation,
-// and waking a blocked reader once a line is complete.
-void tty_input_char(char c);
+// Bring a freshly allocated struct tty up with default (canonical,
+// echoing) termios and the given backend.
+void tty_obj_init(struct tty *t, const struct tty_backend *b, void *priv);
 
-// The device file operations behind /dev/CONSOLE and /dev/TTY.
-int64_t tty_read(void *buf, uint32_t len);
-int64_t tty_write(const void *buf, uint32_t len);
+// The line discipline, now taking an explicit tty. tty_input_char is
+// called from the keyboard IRQ (console) and from a pty master write().
+void    tty_input_char(struct tty *t, char c);
+int64_t tty_obj_read(struct tty *t, void *buf, uint32_t len, int nonblock);
+int64_t tty_obj_write(struct tty *t, const void *buf, uint32_t len);
+int64_t tty_obj_ioctl(struct tty *t, uint64_t request, void *arg);
+int     tty_obj_poll(struct tty *t, int events);
 
-// Returns 0, or a negative errno. `arg` is a userland pointer.
-int64_t tty_ioctl(uint64_t request, void *arg);
-
-// File operations for the TTY device
+// File operations for /dev/CONSOLE and /dev/TTY (bound to tty_console()).
 struct file_ops;
 extern const struct file_ops tty_file_ops;
 

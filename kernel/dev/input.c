@@ -147,7 +147,7 @@ void input_key_event(const struct key_event *e) {
 
     // Phase 3: If no grab and ascii is valid, deliver to TTY
     if (should_call_tty) {
-        tty_input_char((char)e->ascii);
+        tty_input_char(tty_console(), (char)e->ascii);
     }
 }
 

@@ -8,41 +8,26 @@
 #include "ipc/signal.h"
 #include "errno.h"
 
-// The terminal: a line discipline between the keyboard and a reading
-// process.
+// The terminal: a line discipline between an input source (the keyboard,
+// or a pty master's write) and a reading process.
 //
 // Everything that makes a terminal a terminal rather than a byte pipe
 // lives here -- canonical line assembly with editing, echo, the signal
-// characters, and the output translation that turns "\n" into "\r\n"
-// for a device that would otherwise leave the cursor in column 40.
-
-#define TTY_BUF 1024
-
-struct tty {
-    struct spinlock lock;       // guards everything below
-    struct waitq    readers;
-
-    // Raw bytes accepted but not yet part of a completed line. In
-    // canonical mode a reader cannot see these: an unterminated line is
-    // still being edited.
-    char     edit[TTY_BUF];
-    uint32_t edit_len;
-
-    // Bytes a reader may take. In canonical mode a whole line is moved
-    // here at once when the terminator arrives; in raw mode every byte
-    // goes straight in.
-    char     ready[TTY_BUF];
-    uint32_t ready_head;
-    uint32_t ready_len;
-
-    int      saw_eof;           // VEOF on an empty line: read returns 0
-
-    struct termios_k  tio;
-    struct winsize_k  win;
-    int      fg_pgid;           // foreground process group, 0 = none
-};
+// characters, and the output translation that turns "\n" into "\r\n".
+// struct tty is now an allocatable object (see tty.h); the console is
+// one instance, a pty allocates more.
 
 static struct tty console_tty;
+
+struct tty *tty_console(void) { return &console_tty; }
+
+// The console backend: cooked output goes to serial + the framebuffer.
+static void console_output(struct tty *t, const char *s, uint32_t n) {
+    (void)t;
+    serial_write_raw_n(s, n);
+    console_write(s, n);
+}
+static const struct tty_backend console_backend = { console_output };
 
 static void tty_set_defaults(struct tty *t) {
     struct termios_k *o = &t->tio;
@@ -74,50 +59,46 @@ static void tty_set_defaults(struct tty *t) {
     t->win.ws_col = 80;
 }
 
+void tty_obj_init(struct tty *t, const struct tty_backend *b, void *priv) {
+    for (unsigned i = 0; i < sizeof(*t); i++) { ((uint8_t *)t)[i] = 0; }
+    spin_init(&t->lock, LOCK_RANK_TTY, "tty");
+    waitq_init(&t->readers);
+    waitq_init(&t->out_readers);
+    t->backend = b;
+    t->backend_priv = priv;
+    tty_set_defaults(t);
+}
+
 void tty_init(void) {
-    spin_init(&console_tty.lock, LOCK_RANK_DRIVER, "tty");
-    waitq_init(&console_tty.readers);
-    console_tty.edit_len = 0;
-    console_tty.ready_head = 0;
-    console_tty.ready_len = 0;
-    console_tty.saw_eof = 0;
-    console_tty.fg_pgid = 0;
-    tty_set_defaults(&console_tty);
+    tty_obj_init(&console_tty, &console_backend, 0);
     serial_write_string("[tty] console line discipline ready, 80x25\n");
 }
 
 // ---- output ---------------------------------------------------------
 
-// One character out, with ONLCR applied. Goes through the LOCKED serial
-// primitive: serial_lock is what stops a userland write from
-// interleaving byte-for-byte with kernel serial output. It used to call
-// the unlocked serial_putc directly, and ~1 boot in 10 a userland
-// printf landed in the middle of a kernel line -- e.g. the
-// "interrupts enabled, starting scheduler" marker split as
-// "...enabled, sta[looper pid=7] tick\ning scheduler", which then made
-// `make test` report a boot that had in fact completed.
-// serial_write_string_n inserts the CR before a LF itself.
-static void tty_emit(char c) {
-    serial_write_string_n(&c, 1);
-    console_putc(c);
+// Cooked output: expand LF -> CRLF when OPOST|ONLCR, then one call into
+// the backend so a userland write cannot interleave with kernel output.
+static void tty_out_cooked(struct tty *t, const char *s, uint32_t n) {
+    int post = (t->tio.c_oflag & OPOST) && (t->tio.c_oflag & ONLCR);
+    if (!post) { t->backend->output(t, s, n); return; }
+    char buf[64];
+    uint32_t k = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (k >= sizeof(buf) - 2) { t->backend->output(t, buf, k); k = 0; }
+        if (s[i] == '\n') { buf[k++] = '\r'; }
+        buf[k++] = s[i];
+    }
+    if (k) { t->backend->output(t, buf, k); }
 }
 
-int64_t tty_write(const void *buf, uint32_t len) {
-    const char *s = (const char *)buf;
-    uint64_t f = spin_lock_irqsave(&console_tty.lock);
-    int post = (console_tty.tio.c_oflag & OPOST) && (console_tty.tio.c_oflag & ONLCR);
-    spin_unlock_irqrestore(&console_tty.lock, f);
+static void tty_echo(struct tty *t, char c) {
+    tty_out_cooked(t, &c, 1);
+}
 
-    // One locked serial call for the whole write either way, so a
-    // userland printf cannot be split down the middle by kernel output
-    // on another CPU. The cooked path expands LF -> CRLF; the raw path
-    // (OPOST off) writes the bytes verbatim.
-    if (post) {
-        serial_write_string_n(s, len);
-    } else {
-        serial_write_raw_n(s, len);
-    }
-    for (uint32_t i = 0; i < len; i++) { console_putc(s[i]); }
+int64_t tty_obj_write(struct tty *t, const void *buf, uint32_t len) {
+    uint64_t f = spin_lock_irqsave(&t->lock);
+    tty_out_cooked(t, (const char *)buf, len);
+    spin_unlock_irqrestore(&t->lock, f);
     return (int64_t)len;
 }
 
@@ -136,8 +117,7 @@ static void line_commit(struct tty *t) {
     t->edit_len = 0;
 }
 
-void tty_input_char(char c) {
-    struct tty *t = &console_tty;
+void tty_input_char(struct tty *t, char c) {
     uint64_t f = spin_lock_irqsave(&t->lock);
 
     struct termios_k *o = &t->tio;
@@ -159,7 +139,7 @@ void tty_input_char(char c) {
             // The half-typed line is discarded, as on Linux: what was
             // being typed was for the program just interrupted.
             t->edit_len = 0;
-            if (o->c_lflag & ECHO) { tty_emit('^'); tty_emit((char)('@' + c)); tty_emit('\n'); }
+            if (o->c_lflag & ECHO) { tty_echo(t, '^'); tty_echo(t, (char)('@' + c)); tty_echo(t, '\n'); }
             spin_unlock_irqrestore(&t->lock, f);
             // Signalling is done with the tty lock DROPPED: delivery
             // takes the proc_table bucket lock and per-process p->lock,
@@ -174,7 +154,7 @@ void tty_input_char(char c) {
     if (!(o->c_lflag & ICANON)) {
         // Raw mode: every byte is immediately readable, no editing.
         ready_push(t, c);
-        if (o->c_lflag & ECHO) { tty_emit(c); }
+        if (o->c_lflag & ECHO) { tty_echo(t, c); }
         spin_unlock_irqrestore(&t->lock, f);
         waitq_wake_all(&t->readers);
         return;
@@ -186,7 +166,7 @@ void tty_input_char(char c) {
             t->edit_len--;
             // ECHOE: rub the character off the screen rather than
             // leaving it there with the cursor sitting on top.
-            if (o->c_lflag & ECHOE) { tty_emit('\b'); tty_emit(' '); tty_emit('\b'); }
+            if (o->c_lflag & ECHOE) { tty_echo(t, '\b'); tty_echo(t, ' '); tty_echo(t, '\b'); }
         }
         spin_unlock_irqrestore(&t->lock, f);
         return;
@@ -194,7 +174,7 @@ void tty_input_char(char c) {
 
     if (c == (char)o->c_cc[VKILL]) {
         if (o->c_lflag & ECHOK) {
-            while (t->edit_len > 0) { tty_emit('\b'); tty_emit(' '); tty_emit('\b'); t->edit_len--; }
+            while (t->edit_len > 0) { tty_echo(t, '\b'); tty_echo(t, ' '); tty_echo(t, '\b'); t->edit_len--; }
         }
         t->edit_len = 0;
         spin_unlock_irqrestore(&t->lock, f);
@@ -214,7 +194,7 @@ void tty_input_char(char c) {
 
     if (c == '\n') {
         if (t->edit_len < TTY_BUF) { t->edit[t->edit_len++] = c; }
-        if (o->c_lflag & ECHO) { tty_emit('\n'); }
+        if (o->c_lflag & ECHO) { tty_echo(t, '\n'); }
         line_commit(t);
         spin_unlock_irqrestore(&t->lock, f);
         waitq_wake_all(&t->readers);
@@ -223,13 +203,12 @@ void tty_input_char(char c) {
 
     if (t->edit_len < TTY_BUF) {
         t->edit[t->edit_len++] = c;
-        if (o->c_lflag & ECHO) { tty_emit(c); }
+        if (o->c_lflag & ECHO) { tty_echo(t, c); }
     }
     spin_unlock_irqrestore(&t->lock, f);
 }
 
-int64_t tty_read(void *buf, uint32_t len) {
-    struct tty *t = &console_tty;
+int64_t tty_obj_read(struct tty *t, void *buf, uint32_t len, int nonblock) {
     char *out = (char *)buf;
     if (len == 0) { return 0; }
 
@@ -237,6 +216,7 @@ int64_t tty_read(void *buf, uint32_t len) {
     for (;;) {
         if (t->ready_len > 0) { break; }
         if (t->saw_eof) { t->saw_eof = 0; spin_unlock_irqrestore(&t->lock, f); return 0; }
+        if (nonblock) { spin_unlock_irqrestore(&t->lock, f); return -EAGAIN; }
 
         // Nothing to read: block. waitq_sleep releases the lock for us
         // and returns holding nothing, which is why the loop retakes it.
@@ -260,8 +240,7 @@ int64_t tty_read(void *buf, uint32_t len) {
 
 // ---- ioctl ----------------------------------------------------------
 
-int64_t tty_ioctl(uint64_t request, void *arg) {
-    struct tty *t = &console_tty;
+int64_t tty_obj_ioctl(struct tty *t, uint64_t request, void *arg) {
 
     switch (request) {
     case TCGETS: {
@@ -328,6 +307,14 @@ int64_t tty_ioctl(uint64_t request, void *arg) {
     default:
         return -ENOTTY;
     }
+}
+
+int tty_obj_poll(struct tty *t, int events) {
+    uint64_t f = spin_lock_irqsave(&t->lock);
+    int mask = POLLOUT;
+    if (t->ready_len > 0 || t->saw_eof) { mask |= POLLIN; }
+    spin_unlock_irqrestore(&t->lock, f);
+    return mask & events;
 }
 
 // Selftest helpers: track what characters were delivered to the TTY
@@ -401,13 +388,13 @@ void tty_selftest(void) {
     t->ready_len = 0; t->ready_head = 0; t->edit_len = 0; t->saw_eof = 0;
     spin_unlock_irqrestore(&t->lock, f);
 
-    tty_input_char('h'); tty_input_char('i'); tty_input_char('x');
-    tty_input_char(127);            // erase the 'x'
-    tty_input_char('\n');
+    tty_input_char(t, 'h'); tty_input_char(t, 'i'); tty_input_char(t, 'x');
+    tty_input_char(t, 127);            // erase the 'x'
+    tty_input_char(t, '\n');
 
     char buf[16];
     for (int i = 0; i < 16; i++) { buf[i] = 0; }
-    int64_t n = tty_read(buf, sizeof(buf));
+    int64_t n = tty_obj_read(t, buf, sizeof(buf), 0);
 
     f = spin_lock_irqsave(&t->lock);
     t->tio.c_lflag = (uint32_t)saved_lflag;
@@ -422,15 +409,14 @@ void tty_selftest(void) {
     serial_write_string("[tty] selftest passed\n");
 }
 
-// File operations for /dev/CONSOLE and /dev/TTY
+// File operations for /dev/CONSOLE and /dev/TTY -- always the console tty.
 static int64_t tty_fop_read(struct file_descriptor *f, void *buf, uint64_t len) {
-    (void)f;
-    return tty_read(buf, (uint32_t)len);
+    return tty_obj_read(tty_console(), buf, (uint32_t)len, f->nonblock);
 }
 
 static int64_t tty_fop_write(struct file_descriptor *f, const void *buf, uint64_t len) {
     (void)f;
-    return tty_write(buf, (uint32_t)len);
+    return tty_obj_write(tty_console(), buf, (uint32_t)len);
 }
 
 static int64_t tty_fop_lseek(struct file_descriptor *f, int64_t offset, int whence) {
@@ -449,14 +435,12 @@ static int64_t tty_fop_getdents(struct file_descriptor *f, void *buf, int bytes)
 
 static int64_t tty_fop_ioctl(struct file_descriptor *f, uint64_t request, void *arg) {
     (void)f;
-    return tty_ioctl(request, arg);
+    return tty_obj_ioctl(tty_console(), request, arg);
 }
 
 static int tty_fop_poll(struct file_descriptor *f, int events) {
     (void)f;
-    // For now, always return POLLIN | POLLOUT
-    // A real implementation would check if a line is ready for reading
-    return (events & (POLLIN | POLLOUT));
+    return tty_obj_poll(tty_console(), events);
 }
 
 static void tty_fop_dup(struct file_descriptor *f) {
