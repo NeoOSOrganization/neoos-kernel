@@ -149,16 +149,34 @@ covers F1-F4 as one architecture; F2-F4 get their own plans.
   with its own BDL, codec enumeration to find a line-out DAC + pin.
   The widget graph walk is the bulk of the work.
 
+## Status (2026-08-31, autonomous session)
+
+Specs AND implementation plans are written for every milestone:
+
+| # | Design spec | Implementation plan |
+|---|---|---|
+| A net socket | (folded — commit `a66e5f7`, DONE) | — |
+| B NX/W^X | `2026-08-31-nx-wxorx-design.md` | `plans/2026-08-31-nx-wxorx.md` |
+| C ASLR | `2026-08-31-aslr-design.md` | `plans/2026-08-31-aslr.md` |
+| D x2APIC | `2026-08-31-x2apic-design.md` | `plans/2026-08-31-x2apic.md` |
+| E FDC | `2026-08-31-fdc-driver-design.md` | `plans/2026-08-31-fdc-driver.md` |
+| F audio | `2026-08-31-audio-stack-design.md` | `plans/2026-08-31-audio-p1-core-and-sb16.md` (P1); P2 PCI / P3 AC97 / P4 HDA plans pending P1+PCI |
+
 ## Notes for the executor
 
-- Take each design spec through the same self-review the SMP spec had
-  (placeholder scan, internal consistency, scope, ABI check) before
-  writing its plan.
-- The user delegated these as "plan for these" -- produce the specs and
-  plans; do **not** start implementing D/E/F without a review pass,
-  since each is a new subsystem with an ABI surface. B/C/A are
-  bounded hardening of existing code and may proceed once their short
-  specs are written and self-reviewed.
-- Where a spec makes a call the user would normally decide (OSS vs
-  ALSA, W+X strictness, ASLR entropy bits, x2APIC-always vs
-  opt-in), the choice is stated with its rationale and an "alt:" note.
+- Every spec makes calls the user would normally decide (OSS vs ALSA,
+  W+X strictness, ASLR entropy bits, x2APIC-always vs opt-in, the
+  `struct blockdev` seam); each is stated with rationale and an "alt:".
+  **These were not confirmed by the user** — a review pass on the
+  specs is the right first step when they return.
+- B/C are bounded hardening of existing code; their plans are
+  gauntlet-gated per task and safe to execute after a spec review.
+- D/E/F are new subsystems with ABI or hardware surface — review the
+  spec, then execute the plan.
+- The Phase 14 plan (`plans/2026-08-31-phase14-input-and-solidity.md`)
+  resumes at Task 2 and carries the two audio prerequisites
+  (`file_ops` ioctl/poll, devfs dynamic registration). Do Phase 14
+  before audio P1.
+- Each plan's Task 1 (or Global Constraints) restates that a single
+  `make test` is NOT sufficient sign-off — the parallel gauntlet
+  (`pgauntlet.sh`, CONC=3, `PGAUNTLET PASSED: 15/15`) is the bar.
