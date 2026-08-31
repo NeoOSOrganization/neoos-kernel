@@ -311,7 +311,7 @@ SMP_CPUS ?= 4
 QEMU_COMMON := -cpu Nehalem -smp $(SMP_CPUS) -boot order=d \
 	-cdrom $(BUILD_DIR)/neoos.iso \
 	-drive file=$(DISK_IMG),format=raw -drive file=$(DISK2_IMG),format=raw \
-	-no-reboot -machine shutdown=now
+	-no-reboot
 
 run: iso disk-image
 	qemu-system-x86_64 $(QEMU_COMMON)
@@ -356,7 +356,9 @@ REQUIRED_MARKERS := \
 	"[musltest] ALL PASSED" \
 	"[ttytest] ALL PASSED" \
 	"[tty] selftest passed" \
-	"[rtc] selftest passed"
+	"[rtc] selftest passed" \
+	"[keyboard] decode selftest passed" \
+	"[input] selftest passed"
 
 # The fat16 WRITE selftest creates /NEWDIR and /RT.TXT on the real disk
 # image, and the image persists between runs -- so on the second boot

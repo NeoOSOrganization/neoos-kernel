@@ -109,6 +109,7 @@ void kmain(void *multiboot_info) {
     // zero", so it needs a tick counter that already means something.
     tty_init();
     tty_selftest();
+    keyboard_decode_selftest();
     rtc_init();
     rtc_selftest();
 
