@@ -59,18 +59,28 @@ SECTIONS
     . = ALIGN(4K);
     . += KERNEL_VIRT_BASE;
 
+    /* Section-boundary symbols, all 4 KiB-aligned, for the NX / W^X pass
+       in kernel/mm/paging.c: .text is mapped read-only + executable,
+       everything from .rodata onward is NX (and .rodata is read-only). */
     .text ALIGN(4K) : AT(ADDR(.text) - KERNEL_VIRT_BASE)
     {
+        __text_start = .;
         *(.text .text.*)
+        . = ALIGN(4K);
+        __text_end = .;
     }
 
     .rodata ALIGN(4K) : AT(ADDR(.rodata) - KERNEL_VIRT_BASE)
     {
+        __rodata_start = .;
         *(.rodata .rodata.*)
+        . = ALIGN(4K);
+        __rodata_end = .;
     }
 
     .data ALIGN(4K) : AT(ADDR(.data) - KERNEL_VIRT_BASE)
     {
+        __data_start = .;
         *(.data .data.*)
     }
 
