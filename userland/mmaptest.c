@@ -4,11 +4,13 @@
 
 #define PROT_READ  1
 #define PROT_WRITE 2
+#define PROT_EXEC  4
 #define MAP_PRIVATE   0x02
 #define MAP_ANONYMOUS 0x20
 
 extern long mmap_raw(unsigned long addr, unsigned long len, int prot, int flags);
 extern int  munmap_raw(unsigned long addr, unsigned long len);
+extern int  mprotect(void *addr, unsigned long length, int prot);
 
 static volatile int segv_seen;
 static void segv_handler(int sig) { (void)sig; segv_seen = 1; exit(88); }
@@ -74,6 +76,24 @@ int main(int argc, char **argv) {
         return 1;
     }
     printf("[mmaptest] .text write faults passed\n");
+
+    // W^X: the kernel refuses a mapping that is writable AND executable.
+    long wx = mmap_raw(0, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
+                       MAP_PRIVATE | MAP_ANONYMOUS);
+    if (wx >= 0) {
+        printf("[mmaptest] FAILED: W+X mmap was allowed (%ld)\n", wx);
+        return 1;
+    }
+    long rw = mmap_raw(0, 4096, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS);
+    if (rw < 0) { printf("[mmaptest] FAILED: plain RW mmap\n"); return 1; }
+    if (mprotect((void *)(unsigned long)rw, 4096,
+                 PROT_READ | PROT_WRITE | PROT_EXEC) != -1) {
+        printf("[mmaptest] FAILED: mprotect to W+X was allowed\n");
+        return 1;
+    }
+    munmap_raw((unsigned long)rw, 4096);
+    printf("[mmaptest] W^X mmap/mprotect rejection passed\n");
 
     printf("[mmaptest] ALL PASSED\n");
     return 0;

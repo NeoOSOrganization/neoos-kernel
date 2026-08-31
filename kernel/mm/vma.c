@@ -111,6 +111,10 @@ static int vma_munmap_locked(struct process *p, uint64_t addr, uint64_t len) {
 static int64_t vma_mmap_locked(struct process *p, uint64_t addr, uint64_t len,
                  uint32_t prot, uint32_t flags) {
     if (len == 0) { return -EINVAL; }
+    // W^X: NeoOS refuses a mapping that is both writable and executable.
+    // Linux permits it (subject to lockdown / SELinux); a JIT that needs
+    // both must map twice. Recorded in docs/stdlib.md.
+    if ((prot & PROT_WRITE) && (prot & PROT_EXEC)) { return -EINVAL; }
     len = page_up(len);
 
     if (flags & MAP_FIXED) {
@@ -156,6 +160,8 @@ static int vma_split_at(struct vma *v, uint64_t at) {
 static int vma_mprotect_locked(struct process *p, uint64_t addr, uint64_t len, uint32_t prot) {
     if (addr & 0xFFF) { return -EINVAL; }
     if (len == 0) { return 0; }
+    // W^X, same rule as vma_mmap: no page becomes W and X at once.
+    if ((prot & PROT_WRITE) && (prot & PROT_EXEC)) { return -EINVAL; }
     uint64_t start = addr, end = page_up(addr + len);
     if (end <= start) { return -EINVAL; }
 

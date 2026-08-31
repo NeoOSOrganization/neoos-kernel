@@ -647,6 +647,21 @@ int arch_prctl(int code, unsigned long addr);   /* ARCH_SET_FS, ARCH_GET_FS */
 Only anonymous private mappings are supported: a non-negative `fd` or a
 non-zero offset returns `MAP_FAILED`.
 
+### DIVERGENCE — W^X enforced
+
+`mmap` and `mprotect` reject a `prot` that contains **both**
+`PROT_WRITE` and `PROT_EXEC` with `-EINVAL`. Linux permits W+X
+mappings (subject to lockdown / SELinux / `MDWE`); NeoOS does not, at
+all. A JIT or trampoline generator that needs to both write and
+execute a region must keep two mappings of the same pages (one `RW`,
+one `RX`) or `mprotect` between the two states. The ELF loader applies
+the same rule: a `PT_LOAD` segment that is `W` and `X` in the file is
+refused (`execve` / spawn fails). No toolchain emits such a segment.
+
+A program's own `.text` and `.rodata` are mapped read-only, so a stray
+write through a code or const pointer faults (`SIGSEGV`) rather than
+silently succeeding as it did before the loader honoured `p_flags`.
+
 ## Sockets: `<sys/socket.h>`, `<netinet/in.h>`, `<arpa/inet.h>`
 
 ```c
