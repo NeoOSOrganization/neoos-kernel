@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <time.h>
 
 static int failures;
 
@@ -153,6 +154,30 @@ static void check_errors(void) {
     printf("[stattest] error cases passed\n");
 }
 
+static void check_mtime_is_real(void) {
+    int fd = open("/MTIME.TMP", 1 | 0x40);   // O_WRONLY|O_CREAT (Linux value)
+    if (fd < 0) { fail("open for mtime", fd); return; }
+    if (write(fd, "x", 1) != 1) { fail("write for mtime", -1); close(fd); return; }
+    close(fd);
+
+    struct timespec now;
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0) { fail("clock_gettime", -1); return; }
+
+    struct stat st;
+    if (stat("/MTIME.TMP", &st) != 0) { fail("stat MTIME.TMP", -1); return; }
+    unlink("/MTIME.TMP");
+
+    long long skew = (long long)now.tv_sec - (long long)st.st_mtime_sec;
+    if (skew < 0) skew = -skew;
+    // FAT time resolution is 2s; the RTC epoch may be a few seconds
+    // stale. Allow a generous window; the point is "not zero, and not 1980".
+    if (st.st_mtime_sec == 0 || skew > 120) {
+        fail("st_mtime not close to CLOCK_REALTIME", 0);
+        return;
+    }
+    printf("[stattest] mtime is real passed\n");
+}
+
 int main(void) {
     check_layout();
     check_stat_file();
@@ -162,6 +187,7 @@ int main(void) {
     check_lstat();
     check_fstatat();
     check_errors();
+    check_mtime_is_real();
 
     if (failures) {
         printf("[stattest] SOME CHECKS FAILED\n");

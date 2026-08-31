@@ -895,8 +895,9 @@ nothing.
   `isatty` probes with `ioctl(TIOCGWINSZ)`.
 - `int clock_gettime(int clk, struct timespec *out)` — see below.
 - `int nanosleep(const struct timespec *req, struct timespec *rem)` —
-  relative, rounded **up** to a whole 10ms tick. `rem` is accepted and
-  ignored: nothing can interrupt a sleep partway yet.
+  blocks on a timer waitq until the deadline, rounded **up** to a whole
+  10ms tick. Returns `-EINTR` if the thread is killed mid-sleep. `rem`
+  is accepted and ignored.
 - `int set_tid_address(void *ptr)` — returns the caller's tid.
 - `void exit_group(int code)` — ends every thread in the process.
 

@@ -108,10 +108,16 @@ int64_t sys_nanosleep(struct syscall_args *a) {
     uint64_t ns    = (uint64_t)req->tv_sec * 1000000000ULL + (uint64_t)req->tv_nsec;
     uint64_t ticks = (ns + NS_PER_TICK - 1) / NS_PER_TICK;
     if (ticks == 0 && ns > 0) { ticks = 1; }
+    if (ticks == 0) { return 0; }
 
     uint64_t deadline = timer_ticks() + ticks;
-    while (timer_ticks() < deadline) {
-        schedule();
-    }
+    struct waitq q;
+    waitq_init(&q);
+    // Nothing ever wakes this queue; waitq_timeout_tick() dequeues the
+    // sleeper when timer_ticks() reaches `deadline`. -EINTR if the
+    // thread is killed while blocked, matching the interrupted-sleep
+    // contract (rem is still ignored — documented).
+    int rc = waitq_sleep_timeout(&q, NULL, deadline);
+    if (rc == -EINTR) { return -EINTR; }
     return 0;
 }
