@@ -424,13 +424,13 @@ never ran. Gauntlet green through every commit.
 
 **Residual (Phase 13.6 → follow-ons):**
 
-- **Net socket lifetime.** A blocked reader in `socket.c:recv_one`
-  holds no reference on its socket; `sock_close`/`sock_free` on another
-  thread can free `s->lock`/`s->readers` under `waitq_sleep`'s
-  re-acquire. Seen once as `[lock] PANIC: schedule() with a spinlock
-  held ... holding=socktable` under heavy parallel load. Same class,
-  ~20 lines (`sock_get`/`sock_put` + a ref across the wait). Not yet
-  done.
+- **Net socket lifetime — FIXED** (`a66e5f7`). A blocked reader in
+  `socket.c:recv_one` held no reference on its socket; `sock_close`/
+  `sock_free` on another thread could free `s->lock`/`s->readers` under
+  `waitq_sleep`'s re-acquire (seen once as `[lock] PANIC: schedule()
+  with a spinlock held ... holding=socktable` under CONC=4 load).
+  `sock_get`/`sock_put` + a ref held across the wait. Verified: 15/15
+  clean at CONC=4, the level that produced the panic.
 - The per-process lock is now coarse (signal state + thread
   membership). Splitting it is a Phase 15 concern, only if contention
   shows up (it will not at 4 CPUs).
