@@ -56,6 +56,25 @@ int main(int argc, char **argv) {
     }
     printf("[mmaptest] PROT_READ write faults passed\n");
 
+    // W^X: the program's own .text is mapped read-only + executable, so
+    // writing through a code pointer must fault -- not silently succeed
+    // as it did while elf_load mapped every segment writable. Done in a
+    // child; the parent reports.
+    int tchild = fork();
+    if (tchild == 0) {
+        struct sigaction sa;
+        sa.sa_handler = segv_handler; sa.sa_flags = 0; sa.sa_mask = 0;
+        sigaction(SIGSEGV, &sa, 0);
+        *(volatile unsigned char *)(unsigned long)&main = 0x90;   // must fault
+        exit(2);
+    }
+    int tcode = wait(tchild);
+    if (tcode != 88) {
+        printf("[mmaptest] FAILED: write to .text gave %d, want 88\n", tcode);
+        return 1;
+    }
+    printf("[mmaptest] .text write faults passed\n");
+
     printf("[mmaptest] ALL PASSED\n");
     return 0;
 }

@@ -34,6 +34,8 @@ struct elf64_phdr {
 #define ELF_PT_LOAD 1
 #define ELF_PT_TLS  7
 #define ELF_PF_X    1
+#define ELF_PF_W    2
+#define ELF_PF_R    4
 
 static int is_valid_elf64(const struct elf64_header *hdr) {
     return hdr->e_ident[0] == 0x7F && hdr->e_ident[1] == 'E' &&
@@ -85,10 +87,21 @@ int elf_load(const uint8_t *data, uint32_t size, uint64_t *pml4,
             out->phdr = ph->p_vaddr + (hdr->e_phoff - ph->p_offset);
         }
 
-        uint64_t flags = PAGE_WRITABLE | PAGE_USER; // always writable -- no read-only .text/.rodata this milestone
-        if (!(ph->p_flags & ELF_PF_X)) {
-            flags |= PAGE_NO_EXECUTE;
+        // W^X: a segment that is both writable and executable in the
+        // file is refused outright (no toolchain emits one; a crafted
+        // binary that does is rejected like Linux under lockdown).
+        if ((ph->p_flags & ELF_PF_W) && (ph->p_flags & ELF_PF_X)) {
+            serial_write_string("[elf] load FAILED: W+X PT_LOAD segment\n");
+            return 0;
         }
+
+        // Honour p_flags rather than mapping everything writable: a
+        // read-only segment (.text, .rodata) gets no PAGE_WRITABLE, so a
+        // stray write faults instead of silently succeeding. .bss lands
+        // inside a writable segment and stays writable.
+        uint64_t flags = PAGE_USER;
+        if (ph->p_flags & ELF_PF_W)    { flags |= PAGE_WRITABLE; }
+        if (!(ph->p_flags & ELF_PF_X)) { flags |= PAGE_NO_EXECUTE; }
 
         uint64_t seg_start = ph->p_vaddr & ~(uint64_t)0xFFF;
         uint64_t seg_end = (ph->p_vaddr + ph->p_memsz + 0xFFF) & ~(uint64_t)0xFFF;

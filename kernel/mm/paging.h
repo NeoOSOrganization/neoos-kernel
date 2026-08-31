@@ -88,6 +88,7 @@ int paging_unmap_from(uint64_t *pml4, uint64_t virt, int free_frame);
 // COW handler. Signal delivery uses this so a bad user stack becomes a
 // clean kill instead of a kernel fault.
 int user_range_writable(uint64_t addr, uint64_t len);
+int user_range_readable(uint64_t addr, uint64_t len);
 
 // Frees every frame belonging to the address space rooted at
 // pml4_phys (user pages, page-table frames, and the PML4 itself),

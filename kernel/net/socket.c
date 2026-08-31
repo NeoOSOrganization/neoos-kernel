@@ -372,7 +372,10 @@ int64_t socket_sendto(int fd, const void *buf, uint64_t len, int flags,
     (void)flags;   // MSG_* are all unimplemented; see docs/stdlib.md
     struct socket *s = sock_of(fd, 0);
     if (!s) { return -EBADF; }
-    if (!user_range_writable((uint64_t)(uintptr_t)buf, len)) { return -EFAULT; }
+    // send only READS buf -- a string literal in .rodata is a valid
+    // source (it stopped being writable when the ELF loader started
+    // honouring p_flags).
+    if (!user_range_readable((uint64_t)(uintptr_t)buf, len)) { return -EFAULT; }
 
     uint32_t dst_ip_n; uint16_t dst_port_n;
     if (dest) {

@@ -139,6 +139,32 @@ int user_range_writable(uint64_t addr, uint64_t len) {
     return 1;
 }
 
+// Like user_range_writable, but only checks that the range is mapped
+// and user-accessible -- a read-only page (a string literal in .rodata,
+// a PROT_READ mmap) passes. Use this to validate a buffer the kernel
+// will only READ from (send(), a pathname, an iovec's source).
+int user_range_readable(uint64_t addr, uint64_t len) {
+    if (len == 0) { return 1; }
+    if (addr + len < addr) { return 0; }
+    if (addr + len > USER_ADDR_LIMIT) { return 0; }
+
+    uint64_t cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+    uint64_t *pml4 = (uint64_t *)phys_to_virt(cr3 & PAGE_ADDR_MASK);
+
+    for (uint64_t v = addr & ~0xFFFULL; v < addr + len; v += PMM_FRAME_SIZE) {
+        uint64_t *pdpt = table_entry(pml4, PML4_INDEX(v), 0, 0);
+        uint64_t *pd   = pdpt ? table_entry(pdpt, PDPT_INDEX(v), 0, 0) : 0;
+        uint64_t *pt   = pd   ? table_entry(pd,   PD_INDEX(v),   0, 0) : 0;
+        if (!pt) { return 0; }
+        uint64_t e = pt[PT_INDEX(v)];
+        if ((e & (PAGE_PRESENT | PAGE_USER)) != (PAGE_PRESENT | PAGE_USER)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 // Same walk, but through the address space CURRENTLY IN CR3 rather than
 // the kernel's own p4_table. paging_translate below is no use for a
 // user pointer: user mappings do not exist in p4_table at all.
