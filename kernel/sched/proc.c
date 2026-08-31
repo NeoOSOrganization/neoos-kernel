@@ -541,22 +541,32 @@ static int fork_duplicate_user_pages(uint64_t *parent_pml4, uint64_t *child_pml4
                     uint64_t virt = ((uint64_t)i4 << 39) | ((uint64_t)i3 << 30) |
                                      ((uint64_t)i2 << 21) | ((uint64_t)i1 << 12);
 
-                    parent_pt[i1] &= ~PAGE_WRITABLE;
-                    // The parent's TLB may still cache a stale writable
-                    // translation for this page from before the PTE
-                    // change -- without this invlpg, a write from the
-                    // parent right after fork() could silently succeed
-                    // via the stale entry instead of taking the COW
-                    // fault, corrupting the frame the child now shares.
-                    __asm__ volatile ("invlpg (%0)" :: "r"(virt) : "memory");
+                    // Only a WRITABLE page needs to become copy-on-write.
+                    // A page that is already read-only is either a real
+                    // W^X segment (.text/.rodata -- stays shared and RO
+                    // in both, a write is a genuine SIGSEGV) or already a
+                    // COW page from an earlier fork (its PAGE_COW bit is
+                    // copied through below). Marking a real RO page COW
+                    // would hand a writable copy to anyone who faults it.
+                    if (parent_pt[i1] & PAGE_WRITABLE) {
+                        parent_pt[i1] &= ~PAGE_WRITABLE;
+                        parent_pt[i1] |= PAGE_COW;
+                        // The parent's TLB may still cache a stale writable
+                        // translation for this page from before the PTE
+                        // change -- without this invlpg, a write from the
+                        // parent right after fork() could silently succeed
+                        // via the stale entry instead of taking the COW
+                        // fault, corrupting the frame the child now shares.
+                        __asm__ volatile ("invlpg (%0)" :: "r"(virt) : "memory");
+                    }
 
                     uint64_t phys = parent_pt[i1] & PAGE_ADDR_MASK;
                     pmm_frame_share(phys);
 
-                    // Low 12 bits (permission/type flags) plus bit 63
-                    // (PAGE_NO_EXECUTE) -- NOT just `& 0xFFF`, which
-                    // would silently drop NX and make a non-executable
-                    // page executable in the child.
+                    // Low 12 bits (permission/type flags, PAGE_COW included)
+                    // plus bit 63 (PAGE_NO_EXECUTE) -- NOT just `& 0xFFF`,
+                    // which would silently drop NX and make a
+                    // non-executable page executable in the child.
                     uint64_t flags = parent_pt[i1] & (0xFFFULL | PAGE_NO_EXECUTE) & ~PAGE_PRESENT;
                     if (paging_map_into(child_pml4, virt, phys, flags) != 0) {
                         return 0;

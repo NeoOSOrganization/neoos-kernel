@@ -10,6 +10,13 @@
 #define PAGE_USER        (1ULL << 2)
 #define PAGE_NO_EXECUTE  (1ULL << 63)
 
+// Bit 9 is one of the three PTE bits (9-11) the CPU ignores and leaves
+// to the OS. fork() sets it on every page it makes copy-on-write, so the
+// #PF handler can tell a COW page (write it -> copy/re-grant) from a
+// genuinely read-only page (write it -> SIGSEGV). Before W^X every
+// read-only user page was a COW page and no marker was needed.
+#define PAGE_COW         (1ULL << 9)
+
 // The physical-frame address field of a page-table entry: bits 12-51.
 // Masking with this (rather than ~0xFFF) also strips the reserved
 // high bits and PAGE_NO_EXECUTE, leaving just the frame address.

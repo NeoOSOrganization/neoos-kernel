@@ -124,13 +124,15 @@ int user_range_writable(uint64_t addr, uint64_t len) {
             return 0;
         }
         if (!(e & PAGE_WRITABLE)) {
-            // A present, user, read-only page is a COW page: fork()
-            // clears PAGE_WRITABLE on every page of both parent and
-            // child. Writing it IS legal, but the kernel cannot simply
-            // do so -- a CPL0 write faults with user=0, which
-            // paging_handle_cow_fault's present+write+user test rejects,
-            // so it would reach exception_dump_and_halt and take the
-            // machine down. Break the sharing here instead.
+            // A present, user, read-only page marked PAGE_COW is a
+            // fork() copy-on-write page: writing it IS legal, but the
+            // kernel cannot just do it -- a CPL0 write faults with
+            // user=0, which paging_handle_cow_fault's present+write+user
+            // test rejects, so it would reach exception_dump_and_halt
+            // and take the machine down. Break the sharing here instead.
+            // A read-only page WITHOUT PAGE_COW is a real W^X segment and
+            // genuinely not writable: report that, like Linux's -EFAULT.
+            if (!(e & PAGE_COW)) { return 0; }
             if (!paging_handle_cow_fault(pml4_phys, v)) { return 0; }
         }
     }
@@ -298,13 +300,21 @@ int paging_handle_cow_fault(uint64_t pml4_phys, uint64_t fault_addr) {
     if (!(entry & PAGE_PRESENT) || (entry & PAGE_WRITABLE)) {
         return 0; // not present, or already writable -- not a COW fault
     }
+    if (!(entry & PAGE_COW)) {
+        // Present, read-only, and NOT marked copy-on-write: a genuine
+        // W^X page (.text/.rodata). Writing it is a real access
+        // violation -- let the caller fall through to SIGSEGV.
+        return 0;
+    }
 
     uint64_t old_phys = entry & PAGE_ADDR_MASK;
-    uint64_t flags_no_addr = entry & ~PAGE_ADDR_MASK & ~PAGE_PRESENT;
+    // Whatever happens below, the page stops being copy-on-write for
+    // this address space, so drop the marker along with re-granting write.
+    uint64_t flags_no_addr = entry & ~PAGE_ADDR_MASK & ~PAGE_PRESENT & ~PAGE_COW;
 
     if (pmm_frame_refcount(old_phys) == 1) {
         // Sole remaining owner -- no copy needed, just re-enable write.
-        pt[pt_index] = entry | PAGE_WRITABLE;
+        pt[pt_index] = (entry & ~PAGE_COW) | PAGE_WRITABLE;
     } else {
         uint64_t new_phys = pmm_alloc(0);
         if (!new_phys) {
