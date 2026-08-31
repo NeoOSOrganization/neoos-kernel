@@ -311,7 +311,7 @@ SMP_CPUS ?= 4
 QEMU_COMMON := -cpu Nehalem -smp $(SMP_CPUS) -boot order=d \
 	-cdrom $(BUILD_DIR)/neoos.iso \
 	-drive file=$(DISK_IMG),format=raw -drive file=$(DISK2_IMG),format=raw \
-	-no-reboot
+	-no-reboot -machine shutdown=now
 
 run: iso disk-image
 	qemu-system-x86_64 $(QEMU_COMMON)
@@ -321,9 +321,11 @@ run: iso disk-image
 # triple fault). BOOT_TIMEOUT is generous: bringing up APs plus every
 # selftest is slower than a plain boot.
 #
-# The kernel never powers the machine off, so QEMU is ALWAYS killed by
-# the timeout -- that is the expected exit path, not a failure, which is
-# why the qemu line is prefixed with `-`.
+# The kernel powers off via ACPI (port 0x604) when init exits, triggering
+# QEMU to exit immediately via -machine shutdown=now. This allows make test
+# to return as soon as all tests complete instead of waiting for timeout.
+# The qemu line is prefixed with `-` to ignore the exit code (timeout was the
+# expected exit path before shutdown support was added).
 BOOT_TIMEOUT ?= 150
 BOOT_MARKER  ?= NeoOS: interrupts enabled, starting scheduler
 
