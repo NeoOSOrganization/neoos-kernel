@@ -90,6 +90,13 @@ int paging_unmap_from(uint64_t *pml4, uint64_t virt, int free_frame);
 int user_range_writable(uint64_t addr, uint64_t len);
 int user_range_readable(uint64_t addr, uint64_t len);
 
+// Kernel W^X (see paging.c). Called once on the BSP after heap_init,
+// before AP bring-up.
+int      paging_split_huge(uint64_t virt);      // 2MiB leaf -> 512 4KiB; 0 ok, <0 oom
+void     paging_protect_kernel(void);           // .text RO+X, .rodata RO+NX, rest NX
+uint64_t paging_leaf_entry(uint64_t virt);      // leaf PTE/PDE for virt, or 0
+void     wxorx_selftest(void);
+
 // Frees every frame belonging to the address space rooted at
 // pml4_phys (user pages, page-table frames, and the PML4 itself),
 // leaving the three shared kernel entries untouched. The caller must

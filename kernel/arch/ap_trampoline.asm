@@ -60,7 +60,8 @@ ap_protected:
 
     mov ecx, 0xC0000080         ; EFER
     rdmsr
-    or  eax, 1 << 8             ; LME
+    or  eax, (1 << 8) | (1 << 11)  ; LME + NXE (kernel PTEs already carry
+                                   ; the NX bit by the time an AP walks them)
     wrmsr
 
     mov eax, cr0

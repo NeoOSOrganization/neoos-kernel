@@ -88,6 +88,8 @@ SECTIONS
     {
         *(COMMON)
         *(.bss .bss.*)
+        . = ALIGN(4K);
+        __kernel_end = .;   /* higher-half VA end, for paging_protect_kernel */
     }
 
     kernel_phys_end = . - KERNEL_VIRT_BASE;

@@ -366,6 +366,7 @@ REQUIRED_MARKERS := \
 	"[ttytest] ALL PASSED" \
 	"[evtest] ALL PASSED" \
 	"[tty] selftest passed" \
+	"[wxorx] kernel selftest passed" \
 	"[rtc] selftest passed" \
 	"[keyboard] decode selftest passed" \
 	"[input] selftest passed"

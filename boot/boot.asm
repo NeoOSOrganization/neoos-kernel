@@ -149,7 +149,10 @@ enable_paging:
 
     mov ecx, 0xC0000080      ; EFER MSR
     rdmsr
-    or eax, 1 << 8           ; LME
+    or eax, (1 << 8) | (1 << 11)  ; LME + NXE (NXE so PTE bit 63 is the
+                                  ; no-execute bit, not a reserved bit --
+                                  ; paging_protect_kernel sets it early,
+                                  ; before syscall_init)
     wrmsr
 
     mov eax, cr0

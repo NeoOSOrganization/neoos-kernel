@@ -244,6 +244,122 @@ void paging_init(void) {
     serial_write_string("\n");
 }
 
+// ------------------------------------------------------------ kernel W^X
+//
+// boot.asm maps the higher-half kernel with 2 MiB huge pages, all
+// PRESENT|WRITABLE and executable. paging_protect_kernel() splits the
+// huge page(s) covering the kernel image and rewrites the 4 KiB leaves:
+// .text read-only + executable, .rodata read-only + NX, everything else
+// (.data/.bss) writable + NX. The physmap window becomes NX in one
+// stroke via its PML4 entry.
+//
+// Runs once, on the BSP, after heap_init and before AP bring-up, so a
+// plain CR3 reload is a sufficient TLB flush (no other CPU has a TLB).
+
+extern char __text_start[], __text_end[];
+extern char __rodata_start[], __rodata_end[];
+extern char __kernel_end[];
+
+static void reload_cr3(void) {
+    uint64_t cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+    __asm__ volatile ("mov %0, %%cr3" :: "r"(cr3) : "memory");
+}
+
+// Walk to the leaf entry mapping `virt` in the live PML4. `*out_pt` and
+// `*out_idx` locate the 4 KiB PTE; returns 0 on success, <0 if `virt`
+// is unmapped or still covered by a huge page.
+static int leaf_pte(uint64_t virt, uint64_t **out_pt, unsigned *out_idx) {
+    uint64_t *pdpt = table_entry(p4_table, PML4_INDEX(virt), 0, 0);
+    if (!pdpt) { return -1; }
+    uint64_t *pd = table_entry(pdpt, PDPT_INDEX(virt), 0, 0);
+    if (!pd) { return -1; }
+    uint64_t e = pd[PD_INDEX(virt)];
+    if (!(e & PAGE_PRESENT) || (e & PAGE_HUGE)) { return -1; }
+    uint64_t *pt = (uint64_t *)phys_to_virt(e & PAGE_ADDR_MASK);
+    *out_pt = pt;
+    *out_idx = PT_INDEX(virt);
+    return 0;
+}
+
+int paging_split_huge(uint64_t virt) {
+    uint64_t *pdpt = table_entry(p4_table, PML4_INDEX(virt), 0, 0);
+    if (!pdpt) { return 0; }
+    uint64_t *pd = table_entry(pdpt, PDPT_INDEX(virt), 0, 0);
+    if (!pd) { return 0; }
+    unsigned pdi = PD_INDEX(virt);
+    uint64_t e = pd[pdi];
+    if (!(e & PAGE_PRESENT)) { return 0; }
+    if (!(e & PAGE_HUGE))    { return 0; }   // already a page table
+
+    uint64_t base       = e & PAGE_ADDR_MASK;                       // 2 MiB-aligned
+    uint64_t leaf_flags = e & ~PAGE_ADDR_MASK & ~PAGE_HUGE;         // PRESENT|WRITABLE|...
+
+    uint64_t pt_phys = alloc_table_frame();
+    if (!pt_phys) { return -1; }
+    uint64_t *pt = (uint64_t *)phys_to_virt(pt_phys);
+    for (unsigned i = 0; i < 512; i++) {
+        pt[i] = (base + (uint64_t)i * 4096) | leaf_flags;
+    }
+    // Parent PD entry stays permissive; the leaves carry the real
+    // permissions (the CPU ANDs W and ORs NX down the walk).
+    pd[pdi] = pt_phys | PAGE_PRESENT | PAGE_WRITABLE;
+    reload_cr3();
+    return 0;
+}
+
+void paging_protect_kernel(void) {
+    uint64_t start = (uint64_t)(uintptr_t)__text_start;
+    uint64_t end   = (uint64_t)(uintptr_t)__kernel_end;
+    uint64_t ts = (uint64_t)(uintptr_t)__text_start,   te = (uint64_t)(uintptr_t)__text_end;
+    uint64_t rs = (uint64_t)(uintptr_t)__rodata_start, re = (uint64_t)(uintptr_t)__rodata_end;
+
+    for (uint64_t va = start; va < end; va += 4096) {
+        if (paging_split_huge(va) != 0) {
+            serial_write_string("[paging] W^X FAILED: cannot split huge page at ");
+            serial_write_hex64(va);
+            serial_write_string("\n");
+            return;
+        }
+        uint64_t *pt; unsigned idx;
+        if (leaf_pte(va, &pt, &idx) != 0) { continue; }
+        uint64_t e = pt[idx];
+        if (!(e & PAGE_PRESENT)) { continue; }
+
+        if (va >= ts && va < te) {
+            e &= ~PAGE_WRITABLE;
+            e &= ~PAGE_NO_EXECUTE;          // .text: RO + X
+        } else if (va >= rs && va < re) {
+            e &= ~PAGE_WRITABLE;
+            e |=  PAGE_NO_EXECUTE;          // .rodata: RO + NX
+        } else {
+            e |=  PAGE_NO_EXECUTE;          // .data/.bss/.eh_frame: RW + NX
+        }
+        pt[idx] = e;
+    }
+
+    // The physmap is the kernel's data view of RAM -- never executed.
+    // NX on its PML4 entry covers every page below it.
+    p4_table[PHYSMAP_PML4_INDEX] |= PAGE_NO_EXECUTE;
+
+    reload_cr3();
+    serial_write_string("[paging] kernel W^X applied: .text RO+X, rest NX\n");
+}
+
+// Returns the leaf entry mapping `virt` (huge or 4 KiB), or 0 if not
+// mapped. Flags-only accessor for wxorx_selftest.
+uint64_t paging_leaf_entry(uint64_t virt) {
+    uint64_t *pdpt = table_entry(p4_table, PML4_INDEX(virt), 0, 0);
+    if (!pdpt) { return 0; }
+    uint64_t *pd = table_entry(pdpt, PDPT_INDEX(virt), 0, 0);
+    if (!pd) { return 0; }
+    uint64_t e = pd[PD_INDEX(virt)];
+    if (!(e & PAGE_PRESENT)) { return 0; }
+    if (e & PAGE_HUGE) { return e; }
+    uint64_t *pt = (uint64_t *)phys_to_virt(e & PAGE_ADDR_MASK);
+    return pt[PT_INDEX(virt)];
+}
+
 // Frees every user-mapped frame and page-table frame reachable from
 // pml4_phys, then the PML4 frame itself. The three shared kernel
 // entries (identity map, physmap, kernel higher-half alias -- see

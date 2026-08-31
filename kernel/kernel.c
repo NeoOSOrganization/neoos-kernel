@@ -135,6 +135,12 @@ void kmain(void *multiboot_info) {
     heap_init();
     heap_selftest();
     tlb_init();
+
+    // W^X the kernel address space: .text read-only, everything else
+    // NX. AFTER heap_init (the huge-page split allocates PT frames) and
+    // on the BSP only -- no AP has a TLB yet, so a CR3 reload suffices.
+    paging_protect_kernel();
+    wxorx_selftest();
     // AFTER heap_init: vma_insert allocates, so this cannot run against
     // an uninitialised heap. It used to sit before heap_init and worked
     // by accident -- class_pages is BSS-zero either way -- until
