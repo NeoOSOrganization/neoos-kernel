@@ -2,7 +2,7 @@
 #define NEOOS_FD_TABLE_H
 
 #include <stdint.h>
-#include "../lock.h"
+#include "sync/lock.h"
 
 /*
  * 2-level sparse file descriptor table

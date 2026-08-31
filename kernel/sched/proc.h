@@ -2,15 +2,15 @@
 #define NEOOS_PROCESS_H
 
 #include <stdint.h>
-#include "../cpu.h"
-#include "../lock.h"
-#include "../waitq.h"
-#include "../signal.h"
-#include "../fs/vfs.h"
-#include "../mm/pmm.h"
-#include "../mm/vma.h"
-#include "../sync/rcu.h"
-#include "../elf.h"
+#include "arch/cpu.h"
+#include "sync/lock.h"
+#include "sync/waitq.h"
+#include "ipc/signal.h"
+#include "fs/vfs.h"
+#include "mm/pmm.h"
+#include "mm/vma.h"
+#include "sync/rcu.h"
+#include "elf.h"
 
 #define KERNEL_STACK_ORDER 2 // 4 frames = 16KiB
 
@@ -85,6 +85,13 @@ struct process {
     // belongs to the PROCESS: threads share it. See fd_table.h for the
     // 2-level layout and the 16,384-fd ceiling.
     struct fd_table *fd_table;
+    // Current working directory: always absolute, always canonical
+    // (no "." or ".."), never empty, and never with a trailing slash
+    // except at the root. EVERY process has one from the moment
+    // proc_alloc returns -- "/" if nothing else -- so no path-taking
+    // syscall ever has to cope with a process that has none.
+    // Inherited by fork and by spawn, as on Linux.
+    char cwd[VFS_MAX_PATH];
     struct thread *threads;         // live threads, via thread->proc_next
     struct thread *zombies;         // exited, unjoined; freed at reap
     struct thread_table *thread_table;  // per-process thread hash table (NEW)
@@ -122,6 +129,11 @@ struct process {
 
 struct thread {
     int tid;                        // 0 == an idle thread (never a pid)
+    // set_tid_address's "clear child tid" pointer. Recorded because
+    // musl sets it before main; NOT acted on at exit -- see
+    // sys_set_tid_address for why, and docs/stdlib.md for the
+    // divergence that creates.
+    uint64_t clear_child_tid;
     struct process *proc;           // 0 for the pre-process idle thread
     enum thread_state state;
     // Non-zero while SOME CPU is still executing on this thread's

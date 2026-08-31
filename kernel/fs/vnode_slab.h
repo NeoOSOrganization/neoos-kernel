@@ -2,7 +2,7 @@
 #define NEOOS_VNODE_SLAB_H
 
 #include <stdint.h>
-#include "vfs.h"
+#include "fs/vfs.h"
 
 /*
  * Vnode slab allocator

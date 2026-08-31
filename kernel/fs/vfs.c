@@ -1,12 +1,13 @@
-#include "vfs.h"
-#include "vnode_slab.h"
-#include "ramfs.h"
-#include "fatfs.h"
-#include "devfs.h"
-#include "../errno.h"
-#include "../serial.h"
-#include "../sched/proc.h"
-#include "../sched/fd_table.h"
+#include "fs/vfs.h"
+#include "fs/stat.h"
+#include "fs/vnode_slab.h"
+#include "fs/ramfs.h"
+#include "fs/fatfs.h"
+#include "fs/devfs.h"
+#include "errno.h"
+#include "dev/serial.h"
+#include "sched/proc.h"
+#include "sched/fd_table.h"
 
 static struct vfs_mount mounts[MAX_MOUNTS];
 
@@ -394,6 +395,113 @@ static struct vnode *resolve_walk(const char *path, int stop_short,
     return dir;
 }
 
+// Appends one component, or pops one for "..". `len` tracks the live
+// prefix of `out`, which always starts with '/' and never ends with one
+// unless it IS "/" (len == 1).
+static int canon_push(char *out, uint64_t *len, const char *name) {
+    if (name[0] == '.' && name[1] == '\0') { return 0; }   // "." is a no-op
+
+    if (name[0] == '.' && name[1] == '.' && name[2] == '\0') {
+        // Pop to the previous '/'. At the root there is nothing above,
+        // and ".." stays at "/" -- as on Linux.
+        while (*len > 1 && out[*len - 1] != '/') { (*len)--; }
+        if (*len > 1) { (*len)--; }                 // drop the '/' itself
+        out[*len] = '\0';
+        return 0;
+    }
+
+    uint64_t need = 0;
+    while (name[need]) { need++; }
+    // A separator is needed unless we are sitting on the root's '/'.
+    uint64_t sep = (*len > 1) ? 1 : 0;
+    if (*len + sep + need + 1 > VFS_MAX_PATH) { return -ENAMETOOLONG; }
+
+    if (sep) { out[(*len)++] = '/'; }
+    for (uint64_t i = 0; i < need; i++) { out[(*len)++] = name[i]; }
+    out[*len] = '\0';
+    return 0;
+}
+
+// Fills a Linux `struct stat` from a vnode.
+//
+// Half of it is real and half is SYNTHESIZED, and the split is worth
+// being explicit about. Real: the type, the size, the inode number, and
+// which mount it lives on. Synthesized: mode bits, owner, link count,
+// and every timestamp -- FAT stores no owners or permissions at all,
+// and NeoOS has no clock syscall yet to have recorded a time with.
+//
+// Synthesizing is the right answer rather than zeroing: `ls` and every
+// shell test derive "is this a directory" and "may I execute this" from
+// st_mode, and a zero mode reads as a file that nobody may touch.
+// The values are the conventional 0755/0644 a FAT driver reports on
+// Linux too. Recorded as a divergence in docs/stdlib.md.
+void vfs_stat_vnode(struct vnode *vn, struct stat *out) {
+    for (uint64_t i = 0; i < sizeof(*out); i++) { ((uint8_t *)out)[i] = 0; }
+
+    // The mount's slot index is a stable per-filesystem id for as long
+    // as it stays mounted, which is what st_dev has to be: two files on
+    // one filesystem must agree, and files on different mounts must
+    // not. +1 so that no valid device is 0.
+    out->st_dev = (uint64_t)(vn->mount - &mounts[0]) + 1;
+    out->st_ino = vn->inode_id;
+
+    switch (vn->type) {
+    case VNODE_DIR:
+        out->st_mode  = S_IFDIR | 0755;
+        // "." and ".." -- the conventional answer for a directory whose
+        // real subdirectory count nothing here counts.
+        out->st_nlink = 2;
+        break;
+    case VNODE_DEVICE:
+        out->st_mode  = S_IFCHR | 0666;
+        out->st_nlink = 1;
+        break;
+    default:
+        out->st_mode  = S_IFREG | 0644;
+        out->st_nlink = 1;
+        break;
+    }
+
+    // Real timestamps when the filesystem keeps them: FAT records a
+    // write time and a create date per directory entry, and the RTC
+    // gives them an epoch to be relative to. ramfs and devfs keep
+    // none, and report 0 rather than a fabricated time.
+    out->st_mtime_sec = vn->mtime;
+    out->st_atime_sec = vn->atime;
+    out->st_ctime_sec = vn->ctime;
+
+    out->st_size    = (int64_t)vn->size;
+    out->st_blksize = 512;
+    // Rounded UP, as Linux does: a 1-byte file occupies one block.
+    out->st_blocks  = (int64_t)((vn->size + 511) / 512);
+}
+
+int vfs_path_canonicalise(const char *base, const char *path, char *out) {
+    out[0] = '/';
+    out[1] = '\0';
+    uint64_t len = 1;
+
+    char name[VFS_NAME_MAX];
+
+    // An absolute path ignores the base entirely; a relative one is
+    // seeded with it. `base` is itself already canonical -- it only
+    // ever comes from a process cwd this function produced.
+    if (path[0] != '/' && base) {
+        const char *cursor = base;
+        while (next_component(&cursor, name)) {
+            int rc = canon_push(out, &len, name);
+            if (rc != 0) { return rc; }
+        }
+    }
+
+    const char *cursor = path;
+    while (next_component(&cursor, name)) {
+        int rc = canon_push(out, &len, name);
+        if (rc != 0) { return rc; }
+    }
+    return 0;
+}
+
 struct vnode *vfs_resolve(const char *path, int *out_err) {
     return resolve_walk(path, 0, 0, out_err);
 }
@@ -502,7 +610,7 @@ void vfs_selftest(void) {
 
     // Walk the directory by ordinal until -ENOENT; we expect exactly
     // T.TXT (a file) and SUB (a directory), in either order.
-    struct dirent de;
+    struct vfs_dirent de;
     int files = 0, dirs = 0;
     for (uint32_t i = 0; root->mount->ops->readdir(root, i, &de) == 0; i++) {
         if (de.type == DT_DIR) { dirs++; } else { files++; }

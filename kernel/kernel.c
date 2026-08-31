@@ -1,35 +1,37 @@
 #include "kernel.h"
-#include "vga.h"
-#include "serial.h"
-#include "tss.h"
-#include "gdt.h"
-#include "idt.h"
-#include "acpi.h"
-#include "pic.h"
-#include "lapic.h"
-#include "ioapic.h"
-#include "timer.h"
-#include "keyboard.h"
+#include "dev/vga.h"
+#include "dev/serial.h"
+#include "arch/tss.h"
+#include "arch/gdt.h"
+#include "arch/idt.h"
+#include "dev/acpi.h"
+#include "dev/pic.h"
+#include "dev/lapic.h"
+#include "dev/ioapic.h"
+#include "dev/timer.h"
+#include "dev/rtc.h"
+#include "dev/tty.h"
+#include "dev/keyboard.h"
 #include "mm/pmm.h"
 #include "mm/paging.h"
 #include "mm/heap.h"
 #include "mm/vma.h"
-#include "ata.h"
+#include "dev/ata.h"
 #include "fs/blkcache.h"
 #include "fs/fatfs.h"
 #include "fs/vfs.h"
 #include "sched/proc.h"
-#include "syscall.h"
-#include "cpu.h"
-#include "lock.h"
-#include "waitq.h"
-#include "signal.h"
-#include "cpu_local.h"
-#include "tlb.h"
-#include "smp.h"
-#include "futex.h"
-#include "file.h"
-#include "pipe.h"
+#include "syscall/syscall.h"
+#include "arch/cpu.h"
+#include "sync/lock.h"
+#include "sync/waitq.h"
+#include "ipc/signal.h"
+#include "arch/cpu_local.h"
+#include "smp/tlb.h"
+#include "smp/smp.h"
+#include "ipc/futex.h"
+#include "fs/file.h"
+#include "ipc/pipe.h"
 #include "net/net.h"
 #include "net/socket.h"
 
@@ -89,6 +91,12 @@ void kmain(void *multiboot_info) {
     serial_write_string("[ioapic] initialized\n");
 
     timer_init();
+    // AFTER timer_init: the RTC anchor is stored as "epoch at tick
+    // zero", so it needs a tick counter that already means something.
+    tty_init();
+    tty_selftest();
+    rtc_init();
+    rtc_selftest();
 
     uint8_t keyboard_pin = acpi.irq1_gsi - acpi.ioapic_gsi_base;
     ioapic_set_redirection(keyboard_pin, VECTOR_KEYBOARD, acpi.irq1_polarity,
@@ -179,6 +187,13 @@ void kmain(void *multiboot_info) {
     spawn("/BIN/LOOPER.ELF");
     spawn("/BIN/YIELDER.ELF");
     spawn("/BIN/VFSTEST.ELF");
+    spawn("/BIN/CWDTEST.ELF");
+    spawn("/BIN/STATTEST.ELF");
+    spawn("/BIN/DIRTEST.ELF");
+    spawn("/BIN/LFNTEST.ELF");
+    spawn("/BIN/TIER0.ELF");
+    spawn("/BIN/MUSLHELO.ELF");
+    spawn("/BIN/TTYTEST.ELF");
     spawn("/BIN/THRDTEST.ELF");
     spawn("/BIN/SIGTEST.ELF");
     spawn("/BIN/FAULTER.ELF");

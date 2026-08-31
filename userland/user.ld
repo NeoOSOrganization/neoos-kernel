@@ -24,6 +24,17 @@ SECTIONS
        template. Costs one page of address space and nothing else. */
     . = 0x200000000000 + SIZEOF_HEADERS;
 
+    /* musl's crt1 entry does `lea _DYNAMIC(%rip),%rsi` against a WEAK
+       undefined symbol. Undefined means 0, and a PC-relative
+       displacement from 0x200000000000 down to 0 does not fit in the
+       32 bits the relocation has -- so the link fails with "relocation
+       truncated to fit" before anything runs.
+       Defining it HERE, inside the image, makes the displacement
+       small. Nothing reads the value: crt1.c's _start_c takes only the
+       stack pointer and ignores the second argument, which is where
+       this lands. PROVIDE so a program that defines its own wins. */
+    PROVIDE(_DYNAMIC = .);
+
     .text ALIGN(4K) : { *(.text .text.*) }
     .rodata ALIGN(4K) : { *(.rodata .rodata.*) }
     .data ALIGN(4K) : { *(.data .data.*) }

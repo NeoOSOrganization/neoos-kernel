@@ -11,17 +11,17 @@
 // a stream, and silently corrupt its own protocol. SOCK_STREAM returns
 // -EPROTONOSUPPORT until there is a real TCP behind it.
 
-#include "socket.h"
-#include "net.h"
-#include "../file.h"
-#include "../lock.h"
-#include "../waitq.h"
-#include "../errno.h"
-#include "../serial.h"
-#include "../mm/heap.h"
-#include "../mm/paging.h"
-#include "../sched/proc.h"
-#include "../sched/fd_table.h"
+#include "net/socket.h"
+#include "net/net.h"
+#include "fs/file.h"
+#include "sync/lock.h"
+#include "sync/waitq.h"
+#include "errno.h"
+#include "dev/serial.h"
+#include "mm/heap.h"
+#include "mm/paging.h"
+#include "sched/proc.h"
+#include "sched/fd_table.h"
 
 // One page of queued datagrams per socket, which is a policy choice
 // rather than a limit of anything: UDP is allowed to drop, and a
@@ -477,8 +477,8 @@ static int64_t sock_lseek(struct file_descriptor *f, int64_t off, int whence) {
     return -ESPIPE;
 }
 
-static int64_t sock_getdents(struct file_descriptor *f, struct dirent *out, int count) {
-    (void)f; (void)out; (void)count;
+static int64_t sock_getdents(struct file_descriptor *f, void *buf, int bytes) {
+    (void)f; (void)buf; (void)bytes;
     return -ENOTDIR;
 }
 

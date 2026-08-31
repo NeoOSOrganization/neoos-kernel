@@ -7,11 +7,17 @@ ASFLAGS := -f elf64
 BUILD_DIR := build
 ISO_DIR := iso
 
-C_SOURCES := $(wildcard kernel/*.c) $(wildcard kernel/mm/*.c) $(wildcard kernel/fs/*.c) $(wildcard kernel/sched/*.c) $(wildcard kernel/sync/*.c) $(wildcard kernel/net/*.c)
+# One entry per kernel subdirectory. Kept as an explicit list rather
+# than a recursive wildcard so that adding a directory is a deliberate
+# act: a stray .c file in a new folder should fail to link, not get
+# picked up silently.
+KERNEL_DIRS := kernel kernel/arch kernel/dev kernel/ipc kernel/smp \
+	kernel/syscall kernel/mm kernel/fs kernel/sched kernel/sync kernel/net
+C_SOURCES := $(foreach d,$(KERNEL_DIRS),$(wildcard $(d)/*.c))
 # Every kernel header, as a coarse prerequisite for every object. Without
 # this, editing a .h leaves stale .o files behind and a genuinely broken
 # tree can appear to build clean.
-C_HEADERS := $(wildcard kernel/*.h) $(wildcard kernel/mm/*.h) $(wildcard kernel/fs/*.h) $(wildcard kernel/sched/*.h) $(wildcard kernel/sync/*.h) $(wildcard kernel/net/*.h)
+C_HEADERS := $(foreach d,$(KERNEL_DIRS),$(wildcard $(d)/*.h))
 C_OBJECTS := $(patsubst kernel/%.c,$(BUILD_DIR)/%.o,$(C_SOURCES))
 ASM_OBJECTS := $(BUILD_DIR)/boot.o $(BUILD_DIR)/gdt_flush.o $(BUILD_DIR)/isr_stubs.o $(BUILD_DIR)/context_switch.o $(BUILD_DIR)/syscall_entry.o $(BUILD_DIR)/fork_trampoline.o $(BUILD_DIR)/sigframe.o $(BUILD_DIR)/ap_trampoline.o
 
@@ -25,33 +31,33 @@ $(BUILD_DIR)/boot.o: boot/boot.asm
 	mkdir -p $(BUILD_DIR)
 	$(AS) $(ASFLAGS) boot/boot.asm -o $(BUILD_DIR)/boot.o
 
-$(BUILD_DIR)/gdt_flush.o: kernel/gdt_flush.asm
+$(BUILD_DIR)/gdt_flush.o: kernel/arch/gdt_flush.asm
 	mkdir -p $(BUILD_DIR)
-	$(AS) $(ASFLAGS) kernel/gdt_flush.asm -o $(BUILD_DIR)/gdt_flush.o
+	$(AS) $(ASFLAGS) kernel/arch/gdt_flush.asm -o $(BUILD_DIR)/gdt_flush.o
 
-$(BUILD_DIR)/isr_stubs.o: kernel/isr.asm
+$(BUILD_DIR)/isr_stubs.o: kernel/arch/isr.asm
 	mkdir -p $(BUILD_DIR)
-	$(AS) $(ASFLAGS) kernel/isr.asm -o $(BUILD_DIR)/isr_stubs.o
+	$(AS) $(ASFLAGS) kernel/arch/isr.asm -o $(BUILD_DIR)/isr_stubs.o
 
-$(BUILD_DIR)/context_switch.o: kernel/context_switch.asm
+$(BUILD_DIR)/context_switch.o: kernel/arch/context_switch.asm
 	mkdir -p $(BUILD_DIR)
-	$(AS) $(ASFLAGS) kernel/context_switch.asm -o $(BUILD_DIR)/context_switch.o
+	$(AS) $(ASFLAGS) kernel/arch/context_switch.asm -o $(BUILD_DIR)/context_switch.o
 
-$(BUILD_DIR)/syscall_entry.o: kernel/syscall_entry.asm
+$(BUILD_DIR)/syscall_entry.o: kernel/syscall/syscall_entry.asm
 	mkdir -p $(BUILD_DIR)
-	$(AS) $(ASFLAGS) kernel/syscall_entry.asm -o $(BUILD_DIR)/syscall_entry.o
+	$(AS) $(ASFLAGS) kernel/syscall/syscall_entry.asm -o $(BUILD_DIR)/syscall_entry.o
 
-$(BUILD_DIR)/fork_trampoline.o: kernel/fork_trampoline.asm
+$(BUILD_DIR)/fork_trampoline.o: kernel/arch/fork_trampoline.asm
 	mkdir -p $(BUILD_DIR)
-	$(AS) $(ASFLAGS) kernel/fork_trampoline.asm -o $(BUILD_DIR)/fork_trampoline.o
+	$(AS) $(ASFLAGS) kernel/arch/fork_trampoline.asm -o $(BUILD_DIR)/fork_trampoline.o
 
-$(BUILD_DIR)/sigframe.o: kernel/sigframe.asm
+$(BUILD_DIR)/sigframe.o: kernel/ipc/sigframe.asm
 	mkdir -p $(BUILD_DIR)
-	$(AS) $(ASFLAGS) kernel/sigframe.asm -o $(BUILD_DIR)/sigframe.o
+	$(AS) $(ASFLAGS) kernel/ipc/sigframe.asm -o $(BUILD_DIR)/sigframe.o
 
-$(BUILD_DIR)/ap_trampoline.o: kernel/ap_trampoline.asm
+$(BUILD_DIR)/ap_trampoline.o: kernel/arch/ap_trampoline.asm
 	mkdir -p $(BUILD_DIR)
-	$(AS) $(ASFLAGS) kernel/ap_trampoline.asm -o $(BUILD_DIR)/ap_trampoline.o
+	$(AS) $(ASFLAGS) kernel/arch/ap_trampoline.asm -o $(BUILD_DIR)/ap_trampoline.o
 
 $(BUILD_DIR)/%.o: kernel/%.c $(C_HEADERS)
 	mkdir -p $(dir $@)
@@ -78,6 +84,43 @@ LIB_OBJECTS := $(patsubst $(LIB_DIR)/%.c,$(LIB_BUILD)/%.o,$(LIB_SOURCES))
 USERLAND_DIR := userland
 USERLAND_BUILD := $(BUILD_DIR)/userland
 USER_CFLAGS := -ffreestanding -fno-stack-protector -mno-red-zone -msse3 -mssse3 -msse4.1 -msse4.2 -mcmodel=large -fno-pic -ftls-model=local-exec -static -nostdlib -Wall -Wextra -std=gnu11 -O2 -I$(LIB_DIR)/include
+
+# ---- musl -----------------------------------------------------------
+#
+# musl is the real C library; lib/ is the NeoOS-native extension layer
+# beside it. A musl program reaches the kernel through the shim in
+# third_party/shim, which translates Linux syscall numbers into NeoOS's
+# -- see docs/stdlib.md.
+#
+# Same code model as everything else in userland: programs link at
+# 0x200000000000, so -mcmodel=large is not optional.
+MUSL_DIR   := third_party/musl
+MUSL_LIB   := $(MUSL_DIR)/lib/libc.a
+MUSL_CFLAGS := -static -nostdlib -nostdinc -ffreestanding \
+	-mcmodel=large -fno-pic -mno-red-zone -fno-stack-protector -O2 \
+	-isystem $(MUSL_DIR)/include -isystem $(MUSL_DIR)/arch/x86_64 \
+	-isystem $(MUSL_DIR)/arch/generic -isystem $(MUSL_DIR)/obj/include
+
+# Installs the shim, then builds musl. Both steps are idempotent, and
+# the shim sources live in third_party/shim so the submodule itself
+# stays a pristine checkout apart from the two files copied in.
+$(MUSL_LIB):
+	third_party/shim/apply.sh
+	cd $(MUSL_DIR) && ./configure --target=x86_64 --disable-shared \
+		CC=$(CC) AR=$(HOME)/opt/cross-x86_64-elf/bin/x86_64-elf-ar \
+		RANLIB=$(HOME)/opt/cross-x86_64-elf/bin/x86_64-elf-ranlib \
+		CFLAGS="-mcmodel=large -fno-pic -mno-red-zone -O2" >/dev/null
+	$(MAKE) -C $(MUSL_DIR) -j$(shell nproc) >/dev/null
+
+.PHONY: musl
+musl: $(MUSL_LIB)
+
+$(USERLAND_BUILD)/MUSLHELO.ELF: $(USERLAND_DIR)/musl/hello.c $(USERLAND_DIR)/user.ld $(MUSL_LIB)
+	mkdir -p $(USERLAND_BUILD)
+	$(CC) $(MUSL_CFLAGS) -T $(USERLAND_DIR)/user.ld -z noexecstack -o $@ \
+		$(MUSL_DIR)/lib/crt1.o $(USERLAND_DIR)/musl/hello.c \
+		-L$(MUSL_DIR)/lib -lc -lgcc
+
 
 $(LIB_BUILD)/%.o: $(LIB_DIR)/%.c
 	mkdir -p $(LIB_BUILD)
@@ -134,6 +177,30 @@ $(USERLAND_BUILD)/MOUNTTST.ELF: $(USERLAND_DIR)/mounttest.c $(USERLAND_DIR)/user
 	mkdir -p $(USERLAND_BUILD)
 	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/mounttest.c -L$(LIB_BUILD) -lneoos
 
+$(USERLAND_BUILD)/TTYTEST.ELF: $(USERLAND_DIR)/ttytest.c $(USERLAND_DIR)/user.ld $(LIB_BUILD)/crt0.o $(LIB_BUILD)/libneoos.a
+	mkdir -p $(USERLAND_BUILD)
+	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/ttytest.c -L$(LIB_BUILD) -lneoos
+
+$(USERLAND_BUILD)/TIER0.ELF: $(USERLAND_DIR)/tier0test.c $(USERLAND_DIR)/user.ld $(LIB_BUILD)/crt0.o $(LIB_BUILD)/libneoos.a
+	mkdir -p $(USERLAND_BUILD)
+	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/tier0test.c -L$(LIB_BUILD) -lneoos
+
+$(USERLAND_BUILD)/LFNTEST.ELF: $(USERLAND_DIR)/lfntest.c $(USERLAND_DIR)/user.ld $(LIB_BUILD)/crt0.o $(LIB_BUILD)/libneoos.a
+	mkdir -p $(USERLAND_BUILD)
+	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/lfntest.c -L$(LIB_BUILD) -lneoos
+
+$(USERLAND_BUILD)/DIRTEST.ELF: $(USERLAND_DIR)/direnttest.c $(USERLAND_DIR)/user.ld $(LIB_BUILD)/crt0.o $(LIB_BUILD)/libneoos.a
+	mkdir -p $(USERLAND_BUILD)
+	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/direnttest.c -L$(LIB_BUILD) -lneoos
+
+$(USERLAND_BUILD)/STATTEST.ELF: $(USERLAND_DIR)/stattest.c $(USERLAND_DIR)/user.ld $(LIB_BUILD)/crt0.o $(LIB_BUILD)/libneoos.a
+	mkdir -p $(USERLAND_BUILD)
+	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/stattest.c -L$(LIB_BUILD) -lneoos
+
+$(USERLAND_BUILD)/CWDTEST.ELF: $(USERLAND_DIR)/cwdtest.c $(USERLAND_DIR)/user.ld $(LIB_BUILD)/crt0.o $(LIB_BUILD)/libneoos.a
+	mkdir -p $(USERLAND_BUILD)
+	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/cwdtest.c -L$(LIB_BUILD) -lneoos
+
 $(USERLAND_BUILD)/VFSTEST.ELF: $(USERLAND_DIR)/vfstest.c $(USERLAND_DIR)/user.ld $(LIB_BUILD)/crt0.o $(LIB_BUILD)/libneoos.a
 	mkdir -p $(USERLAND_BUILD)
 	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/vfstest.c -L$(LIB_BUILD) -lneoos
@@ -178,14 +245,16 @@ $(USERLAND_BUILD)/MPITEST.ELF: $(USERLAND_DIR)/mpitest.c $(USERLAND_DIR)/user.ld
 	mkdir -p $(USERLAND_BUILD)
 	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/mpitest.c -L$(LIB_BUILD) -lneoos
 
-$(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_BUILD)/PARENT.ELF $(USERLAND_BUILD)/LOOPER.ELF $(USERLAND_BUILD)/YIELDER.ELF $(USERLAND_BUILD)/FAULTER.ELF $(USERLAND_BUILD)/FILEIO.ELF $(USERLAND_BUILD)/SSE_TEST.ELF $(USERLAND_BUILD)/FORKTEST.ELF $(USERLAND_BUILD)/EXECTARG.ELF $(USERLAND_BUILD)/MOUNTTST.ELF $(USERLAND_BUILD)/VFSTEST.ELF $(USERLAND_BUILD)/THRDTEST.ELF $(USERLAND_BUILD)/SIGTEST.ELF $(USERLAND_BUILD)/AVXTEST.ELF $(USERLAND_BUILD)/MMAPTEST.ELF $(USERLAND_BUILD)/SMPTEST.ELF $(USERLAND_BUILD)/IPCTEST.ELF $(USERLAND_BUILD)/PIPETEST.ELF $(USERLAND_BUILD)/TLSTEST.ELF $(USERLAND_BUILD)/NETTEST.ELF $(USERLAND_BUILD)/MPITEST.ELF
+$(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_BUILD)/PARENT.ELF $(USERLAND_BUILD)/LOOPER.ELF $(USERLAND_BUILD)/YIELDER.ELF $(USERLAND_BUILD)/FAULTER.ELF $(USERLAND_BUILD)/FILEIO.ELF $(USERLAND_BUILD)/SSE_TEST.ELF $(USERLAND_BUILD)/FORKTEST.ELF $(USERLAND_BUILD)/EXECTARG.ELF $(USERLAND_BUILD)/MOUNTTST.ELF $(USERLAND_BUILD)/VFSTEST.ELF $(USERLAND_BUILD)/THRDTEST.ELF $(USERLAND_BUILD)/SIGTEST.ELF $(USERLAND_BUILD)/AVXTEST.ELF $(USERLAND_BUILD)/MMAPTEST.ELF $(USERLAND_BUILD)/SMPTEST.ELF $(USERLAND_BUILD)/IPCTEST.ELF $(USERLAND_BUILD)/PIPETEST.ELF $(USERLAND_BUILD)/TLSTEST.ELF $(USERLAND_BUILD)/NETTEST.ELF $(USERLAND_BUILD)/MPITEST.ELF $(USERLAND_BUILD)/CWDTEST.ELF $(USERLAND_BUILD)/STATTEST.ELF $(USERLAND_BUILD)/DIRTEST.ELF $(USERLAND_BUILD)/LFNTEST.ELF $(USERLAND_BUILD)/TIER0.ELF $(USERLAND_BUILD)/MUSLHELO.ELF $(USERLAND_BUILD)/TTYTEST.ELF
 	mkdir -p $(DISK_SRC)/DIR
 	printf 'Hello from NeoOS FAT16!\n' > $(DISK_SRC)/HELLO.TXT
 	head -c 8192 /dev/zero | tr '\0' 'N' > $(DISK_SRC)/BIGFILE.TXT
 	printf 'nested file contents\n' > $(DISK_SRC)/DIR/NESTED.TXT
+	printf 'a long name survived the round trip\n' > "$(DISK_SRC)/A Long File Name.txt"
 	dd if=/dev/zero of=$(DISK_IMG) bs=1M count=32 status=none
 	mkfs.fat -F 16 $(DISK_IMG)
 	mcopy -i $(DISK_IMG) $(DISK_SRC)/HELLO.TXT ::HELLO.TXT
+	mcopy -i $(DISK_IMG) "$(DISK_SRC)/A Long File Name.txt" "::A Long File Name.txt"
 	mcopy -i $(DISK_IMG) $(DISK_SRC)/BIGFILE.TXT ::BIGFILE.TXT
 	mmd -i $(DISK_IMG) ::DIR
 	mcopy -i $(DISK_IMG) $(DISK_SRC)/DIR/NESTED.TXT ::DIR/NESTED.TXT
@@ -212,6 +281,13 @@ $(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_B
 	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/TLSTEST.ELF ::BIN/TLSTEST.ELF
 	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/NETTEST.ELF ::BIN/NETTEST.ELF
 	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/MPITEST.ELF ::BIN/MPITEST.ELF
+	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/CWDTEST.ELF ::BIN/CWDTEST.ELF
+	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/STATTEST.ELF ::BIN/STATTEST.ELF
+	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/DIRTEST.ELF ::BIN/DIRTEST.ELF
+	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/LFNTEST.ELF ::BIN/LFNTEST.ELF
+	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/TIER0.ELF ::BIN/TIER0.ELF
+	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/MUSLHELO.ELF ::BIN/MUSLHELO.ELF
+	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/TTYTEST.ELF ::BIN/TTYTEST.ELF
 
 # 64MB, not 32: FAT32 needs at least 65525 clusters, and mkfs.fat warns
 # that a 32MB image falls below that. Depends on $(DISK_IMG) only so
@@ -265,7 +341,16 @@ REQUIRED_MARKERS := \
 	"[pipetest] ALL PASSED" \
 	"[tlstest] ALL PASSED" \
 	"[nettest] ALL PASSED" \
-	"[mpitest] ALL PASSED"
+	"[mpitest] ALL PASSED" \
+	"[cwdtest] ALL PASSED" \
+	"[stattest] ALL PASSED" \
+	"[direnttest] ALL PASSED" \
+	"[lfntest] ALL PASSED" \
+	"[tier0test] ALL PASSED" \
+	"[musltest] ALL PASSED" \
+	"[ttytest] ALL PASSED" \
+	"[tty] selftest passed" \
+	"[rtc] selftest passed"
 
 # The fat16 WRITE selftest creates /NEWDIR and /RT.TXT on the real disk
 # image, and the image persists between runs -- so on the second boot
@@ -275,11 +360,35 @@ REQUIRED_MARKERS := \
 fresh-disks:
 	rm -f $(DISK_IMG) $(DISK2_IMG)
 
+# An EMPTY serial log means QEMU never got as far as running the kernel,
+# and that is not a boot failure. Reporting it as one ("BOOT DID NOT
+# COMPLETE", followed by thirty lines of nothing) sent a real debugging
+# session chasing an early-boot race that did not exist.
+#
+# The usual cause is a lingering qemu -- from a `make test` that was
+# interrupted, or one running in another terminal -- still holding the
+# write lock on the disk images. qemu TRUNCATES the serial file first
+# and only then fails to open the drive, so the log is zero bytes and
+# looks exactly like a triple fault before serial_init. Its stderr says
+# precisely what went wrong ("Failed to get \"write\" lock"), which is
+# why it goes to a file now instead of /dev/null.
+#
+# Worth knowing when hunting a lingering qemu: the kernel never powers
+# the machine off, so EVERY `make test` runs the full BOOT_TIMEOUT and
+# is killed by `timeout`. Interrupting one is the easy way to leave a
+# qemu behind.
 test: fresh-disks iso disk-image
 	@mkdir -p $(BUILD_DIR)
 	-@timeout $(BOOT_TIMEOUT) qemu-system-x86_64 $(QEMU_COMMON) \
-		-display none -serial file:$(BUILD_DIR)/serial.log > /dev/null 2>&1
+		-display none -serial file:$(BUILD_DIR)/serial.log \
+		> /dev/null 2>$(BUILD_DIR)/qemu.err
 	@echo "--- serial log: $(BUILD_DIR)/serial.log ---"
+	@if [ ! -s $(BUILD_DIR)/serial.log ]; then \
+		echo "QEMU PRODUCED NO OUTPUT AT ALL -- it likely never started."; \
+		echo "--- qemu stderr ---"; cat $(BUILD_DIR)/qemu.err; \
+		echo "--- still-running qemu processes ---"; \
+		pgrep -a qemu-system-x86_64 || echo "(none)"; \
+		exit 1; fi
 	@if grep -q 'FAILED' $(BUILD_DIR)/serial.log; then \
 		echo "TEST FAILURES:"; grep 'FAILED' $(BUILD_DIR)/serial.log; exit 1; fi
 	@if ! grep -q '$(BOOT_MARKER)' $(BUILD_DIR)/serial.log; then \

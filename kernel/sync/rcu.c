@@ -1,6 +1,6 @@
-#include "rcu.h"
-#include "../cpu_local.h"
-#include "../serial.h"
+#include "sync/rcu.h"
+#include "arch/cpu_local.h"
+#include "dev/serial.h"
 
 /*
  * Single-CPU RCU implementation

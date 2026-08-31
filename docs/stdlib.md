@@ -28,6 +28,16 @@ alongside the library code that exposes it.
   failure. Writing past the current end of file (via a forward
   `lseek`) zero-fills the gap with real allocated bytes, not a logical
   sparse hole.
+- `int chdir(const char *path)` — sets the calling process's working
+  directory. `path` may itself be relative, and is resolved against the
+  current one. Returns 0, `-ENOENT` if it does not exist, `-ENOTDIR` if
+  it is not a directory, or `-ENAMETOOLONG`. A failed `chdir` leaves the
+  working directory unchanged.
+- `char *getcwd(char *buf, uint64_t size)` — writes the working
+  directory, always absolute and always canonical, into `buf`. Returns
+  `buf`, or `NULL` if `size` is too small for the path plus its NUL.
+  The raw syscall underneath returns Linux's length-including-NUL, or
+  `-ERANGE`; the `NULL` translation is library code, as in musl.
 - `int getpid(void)` — returns the calling process's PID.
 - `void yield(void)` — voluntarily gives up the remaining CPU time
   slice to the scheduler.
@@ -86,16 +96,45 @@ alongside the library code that exposes it.
   Returns `0` on failure (path missing, not a directory, or more than
   four directories already open).
 - `struct dirent *readdir(DIR *d)` — returns the next entry, or `0` at
-  end of directory. `d->name` is an 8.3 name and `d->type` is
-  `DT_REG`, `DT_DIR`, or `DT_CHR`. The returned pointer is into the
-  `DIR`'s own buffer and is invalidated by the next `readdir` or
-  `closedir` on that `DIR`.
+  end of directory. The pointer is **into the `DIR`'s own buffer** and
+  is invalidated by the next `readdir` or `closedir` on that `DIR`.
 - `int closedir(DIR *d)` — closes the directory. Returns 0, or a
   negative `<errno.h>` code.
-- `int getdents(int fd, struct dirent *buf, int count)` — the raw
-  syscall the three functions above are built on. Fills up to `count`
-  entries from a directory fd, returning how many were written, `0` at
-  end of directory, or `-EBADF`/`-ENOTDIR`.
+- `int getdents(int fd, void *buf, int bytes)` — the raw syscall.
+  Fills `buf` with as many complete records as fit, returning the
+  number of **bytes** written, `0` at end of directory, `-EINVAL` if
+  the buffer cannot hold even one record, or `-ENOTDIR`.
+
+`struct dirent` is **Linux's `getdents64` record**: `d_ino` (8),
+`d_off` (8), `d_reclen` (2), `d_type` (1), then a NUL-terminated
+`d_name` at offset 19, the whole record padded so the next starts
+8-byte aligned. `d_type` uses Linux's values — `DT_REG` 8, `DT_DIR` 4,
+`DT_CHR` 2.
+
+Records are **variable length**, which is why `getdents` counts bytes
+rather than entries and why a caller walks the buffer by adding
+`d_reclen`. This is exactly the shape a shim cannot fake: without
+`d_reclen` there is nothing to step by.
+
+`d_ino` is the same inode `stat` reports for the same file, so pairing
+`readdir` with `stat` sees one file, not two.
+
+### Note: `d_name` is bounded by the filesystem, not by the struct
+
+The declared `d_name[256]` is a ceiling so callers can hold a `struct
+dirent` by value. The kernel writes only as many bytes as the name
+needs, up to `VFS_NAME_MAX` (256 — a VFAT long name is at most 255
+characters plus a NUL). On the FAT volumes a short 8.3 name still
+produces a short record; a file created or listed with a long name
+carries it in full.
+
+### Previously
+
+Until this milestone `struct dirent` was `{ char name[13]; uint8_t
+type; }` with private `DT_*` values of 1/2/3, and `getdents` counted
+entries. Nothing about that matched Linux, and every field and constant
+listed above changed. Any code using `e->name`/`e->type` becomes
+`e->d_name`/`e->d_type`.
 
 ## `<thread.h>`
 
@@ -742,6 +781,218 @@ the socket calls.
 - **`MPI_Recv` reports `MPI_ERR_TRUNCATE`** for a message larger than
   the buffer, which is MPI's rule and the opposite of `recvfrom`'s
   silent truncation.
+
+## `<sys/stat.h>`
+
+- `int stat(const char *path, struct stat *st)` — metadata for `path`,
+  which may be relative (resolved against the working directory).
+- `int lstat(const char *path, struct stat *st)` — identical to `stat`.
+- `int fstat(int fd, struct stat *st)` — metadata for an open file.
+- `int fstatat(int dirfd, const char *path, struct stat *st, int flags)`
+  — `dirfd` must be `AT_FDCWD`; see the divergence below.
+
+All four return 0 or a negative `<errno.h>` code. `struct stat` is
+**Linux's x86-64 layout, byte for byte** — 144 bytes, asserted at
+compile time in `kernel/fs/stat.h` and again from userland by
+`stattest`, because musl compiles its own copy of this struct into
+every caller and no shim can correct a wrong offset.
+
+### DIVERGENCE: most of `struct stat` is synthesized
+
+Real: `st_ino`, `st_size`, the file type in `st_mode`, and `st_dev`
+(the mount's slot index, +1 so no valid device is 0).
+
+Synthesized, because FAT does not store them and NeoOS has no clock
+syscall to have recorded them with:
+
+| Field | Value | Why |
+|---|---|---|
+| permission bits of `st_mode` | `0755` dirs, `0644` files, `0666` devices | zero would read as "nobody may touch this"; these are what a FAT driver reports on Linux too |
+| `st_uid`, `st_gid` | 0 | single-user system, no credentials exist |
+| `st_nlink` | 2 for directories, 1 otherwise | FAT has no link count; 2 is the conventional `.`/`..` answer |
+| `st_rdev` | 0 | device nodes are not numbered |
+| `st_atime`/`st_mtime`/`st_ctime` | 0 (the epoch) | **no clock syscall yet.** Every file looks equally old, so `make` and anything else comparing timestamps will misbehave |
+
+`st_blksize` is 512 and `st_blocks` is the size rounded **up**, as on
+Linux.
+
+### DIVERGENCE: `lstat` is `stat`
+
+They differ only on a symbolic link, and no filesystem NeoOS mounts can
+represent one — FAT has no such entry type. When symlinks exist, this
+must be revisited.
+
+### DIVERGENCE: `fstatat` takes only `AT_FDCWD`
+
+A real directory fd returns `-EBADF`. There is no `openat` family yet,
+so nothing in userland can obtain one, and resolving against a dirfd
+would need path resolution to start somewhere other than a mount root —
+which the working-directory design deliberately avoids. `AT_EMPTY_PATH`
+with a real fd works and is equivalent to `fstat`.
+`AT_SYMLINK_NOFOLLOW` is accepted and ignored, for the reason above.
+
+`fstat` on a pipe or a socket returns `-EINVAL`: those have no vnode,
+and inventing an inode number for them would be worse than refusing.
+
+## musl, and the shim
+
+**musl 1.2.5 is built and linked, and a musl binary runs.**
+`userland/musl/hello.c` exercises printf, malloc, stat, open/read,
+opendir/readdir, fopen/fgets, clock_gettime, isatty and getpid, and is
+part of `make test` as `[musltest]`.
+
+The shim (`third_party/shim/`) does exactly two things, never a third:
+
+1. **Number translation** — Linux's syscall numbers onto NeoOS's.
+2. **Argument reshaping** — Linux passes a NUL-terminated `const char *`
+   for paths; NeoOS's path syscalls take a (pointer, length) pair, so
+   the shim measures the string and shifts the remaining arguments.
+
+It never implements a primitive. An unmapped call returns `-ENOSYS`,
+which is the signal that the primitive belongs in the kernel.
+
+### The part that is easy to miss
+
+`arch/x86_64/syscall_arch.h` is **not** the only place musl issues
+syscalls. Six hand-written assembly files issue `syscall` themselves
+and bypass it completely. Leaving them alone is not a clean failure:
+Linux's number lands on whatever NeoOS call shares it — `clone` (56)
+would have called `lstat`.
+
+`__set_thread_area.s` was the one that mattered first: without it musl
+cannot install a thread pointer, `__init_tp` returns -1, and
+`__init_tls` reaches its one `a_crash()` — a `hlt` in ring 3 — before
+`main`. The symptom was a process that ran, exited 0, and printed
+nothing.
+
+`third_party/musl-README.md` lists all eight replaced files.
+
+### DIVERGENCES the shim records rather than hides
+
+- **`clone` returns `-ENOSYS`.** NeoOS has no `clone`, so musl's
+  `pthread_create` fails cleanly instead of corrupting something.
+- **`vfork` is a real `fork`.** NeoOS has no `vfork`; fork is the safe
+  direction to diverge in, since vfork's contract is a subset.
+- **`open`'s and `mkdir`'s `mode` argument is dropped.** NeoOS has no
+  permission bits to store it in.
+- **Cancellation points are approximate.** `__cp_begin`/`__cp_end` no
+  longer bracket the `syscall` instruction itself, so the test pthread
+  cancellation uses is not exact. Nothing uses musl's pthreads yet.
+
+## Tier 0: the calls musl makes before `main`
+
+- `int64_t writev(int fd, const struct iovec *iov, int iovcnt)` and
+  `readv` — `<sys/uio.h>`. musl's stdio writes **only** through
+  `writev`. At most `IOV_MAX` (16) vectors; more is `-EINVAL` rather
+  than a silent truncation. A short transfer ends the call, and bytes
+  already moved are reported, as on Linux.
+- `int ioctl(int fd, unsigned long request, void *arg)` — on
+  `/dev/CONSOLE` (a real TTY) it answers `TCGETS`, `TCSETS`, `TCSETSW`,
+  `TCSETSF`, `TIOCGWINSZ`, `TIOCSWINSZ`, `TIOCGPGRP` and `TIOCSPGRP`
+  (see `<termios.h>` below). On a regular file, pipe or socket it
+  returns `-ENOTTY`, as Linux does.
+- `int isatty(int fd)` — 1 on `/dev/CONSOLE`, 0 elsewhere. musl's
+  `isatty` probes with `ioctl(TIOCGWINSZ)`.
+- `int clock_gettime(int clk, struct timespec *out)` — see below.
+- `int nanosleep(const struct timespec *req, struct timespec *rem)` —
+  relative, rounded **up** to a whole 10ms tick. `rem` is accepted and
+  ignored: nothing can interrupt a sleep partway yet.
+- `int set_tid_address(void *ptr)` — returns the caller's tid.
+- `void exit_group(int code)` — ends every thread in the process.
+
+### DIVERGENCE: 10ms resolution, and a fragile wall clock
+
+NeoOS's only fine time source is the 100Hz LAPIC tick, so **resolution
+is 10ms**. `CLOCK_REALTIME` is wall time, anchored to the CMOS RTC read
+once at boot; `CLOCK_MONOTONIC`, `CLOCK_MONOTONIC_RAW` and the two
+CPU-time clocks count from boot. All five ids resolve.
+
+If the RTC cannot be read at boot, `CLOCK_REALTIME` silently falls back
+to a boot epoch and formats as January 1970 (`rtc_is_real()` reports
+which). Either way `stat`'s timestamps are all zero — nothing records
+file times yet — so anything comparing a file's mtime against the
+clock, `make` above all, will misbehave.
+
+### DIVERGENCE: `set_tid_address`'s pointer is recorded, not acted on
+
+The address is Linux's "clear child tid": the kernel writes 0 there and
+futex-wakes it when the thread exits, which is how a joiner notices.
+NeoOS joins through `thread_join` instead, so the pointer is stored and
+never written. musl's `pthread_join` spins on that word — when
+something uses musl's pthreads, the wake belongs here, not in a shim.
+
+## `<termios.h>` and the console TTY
+
+`/dev/CONSOLE` (and its alias `/dev/TTY`) is a line-discipline
+terminal, not a raw byte sink. The keyboard IRQ feeds characters
+through the input side: canonical-mode line buffering, echo, `ERASE`
+and `KILL` editing, `\r`→`\n` translation, and signal generation
+(`INTR`→`SIGINT`, `QUIT`→`SIGQUIT`, `SUSP`→`SIGTSTP`) to the
+foreground process group. A `read` blocks until a full line is
+available in canonical mode, or `VMIN`/`VTIME` are satisfied in raw
+mode.
+
+`struct termios` is **musl's** — it has `c_ispeed`/`c_ospeed` and
+`c_cc[32]`. The kernel only ever reads or writes the leading 36 bytes
+(Linux's kernel `termios`, `NCCS` 19), exactly as Linux does, so the
+extra tail is left untouched.
+
+- `tcgetattr`/`tcsetattr` — `TCGETS` / `TCSETS`/`TCSETSW`/`TCSETSF`.
+  The optional-actions argument is accepted; there is no output queue
+  to drain, so `TCSETSW` and `TCSETSF` behave as `TCSETS`.
+- `TIOCGWINSZ`/`TIOCSWINSZ` — `struct winsize`. The default is 80×25;
+  a set is remembered and a `SIGWINCH` is **not** sent (no source of
+  resize events exists).
+- `TIOCGPGRP`/`TIOCSPGRP` — the foreground process group that job
+  control tracks; the signal characters deliver to it.
+
+### DIVERGENCE
+
+No `TCXONC` (flow control), no `TCFLSH`, no `TIOCSCTTY`/`TIOCNOTTY`
+(the controlling terminal is implicit and permanent), no pseudoterminals.
+Baud rate is stored but meaningless — the backing device is a fixed
+serial line plus a PS/2 keyboard.
+
+## The working directory
+
+**Every process has a working directory from the moment it is created.**
+`proc_alloc` sets it to `/` before any creation path runs, `fork` and
+`spawn` inherit the caller's, and the first process keeps `/`. No
+path-taking syscall ever has to cope with a process that has none.
+
+Every syscall that takes a path — `open`, `mkdir`, `unlink`, `spawn`,
+`spawnv`, `exec`, `mount`, `umount` — resolves it against the caller's
+working directory, so a relative path means the same thing everywhere.
+
+### DIVERGENCE: `..` is resolved textually
+
+NeoOS canonicalises a path *before* walking it: the string is joined
+onto the working directory and `.` and `..` are removed lexically, then
+the result is walked from a mount root. Linux walks first and resolves
+`..` against the directory it actually reached.
+
+The two differ only where a symlink is involved, and NeoOS has no
+symlinks — FAT cannot represent one. The reason for choosing the
+textual form is `getcwd`: it returns a stored string, and FAT offers no
+way to map a directory back to its name, so a walk-based `..` would
+leave no way to report the path afterwards.
+
+`..` at the root stays at the root, as on Linux.
+
+### DIVERGENCE: no `openat` family, and no `dirfd`
+
+There is no `openat`, `unlinkat`, `mkdirat` or `AT_FDCWD`. musl's
+`stat`/`lstat` reach for the plain forms on x86_64 when the path is
+absolute or the directory is `AT_FDCWD`, which is why the *at* family
+is not yet needed; anything resolving against a real directory fd is
+not supported. See `docs/porting-coreutils.md`.
+
+### Limits
+
+A path is bounded by `VFS_MAX_PATH` (512 bytes) after joining, and a
+single component by `VFS_NAME_MAX` (256 — a VFAT long name of 255 plus
+NUL). Exceeding the first gives `-ENAMETOOLONG`; a component longer than
+the second is truncated by the path walker.
 
 ## `spawnv` and `fcntl`
 

@@ -1,6 +1,6 @@
-#include "vnode_slab.h"
-#include "../mm/heap.h"
-#include "../lock.h"
+#include "fs/vnode_slab.h"
+#include "mm/heap.h"
+#include "sync/lock.h"
 
 static struct vnode_slab_pool pool;
 static struct spinlock pool_lock;

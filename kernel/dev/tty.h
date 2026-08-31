@@ -1,0 +1,96 @@
+#ifndef NEOOS_TTY_H
+#define NEOOS_TTY_H
+
+#include <stdint.h>
+
+// Linux's KERNEL `struct termios` -- the one TCGETS/TCSETS move, which
+// is 36 bytes and has NCCS 19. Userland's struct (musl's) is larger:
+// it appends c_ispeed/c_ospeed and declares c_cc[32]. That is fine and
+// deliberate on Linux's part -- the leading 36 bytes are identical, so
+// the kernel writes a prefix of the caller's struct and leaves the
+// rest alone. Copying userland's 44-byte version here instead would
+// scribble 8 bytes past what Linux writes.
+#define NCCS_K 19
+
+struct termios_k {
+    uint32_t c_iflag;
+    uint32_t c_oflag;
+    uint32_t c_cflag;
+    uint32_t c_lflag;
+    uint8_t  c_line;
+    uint8_t  c_cc[NCCS_K];
+};
+
+// c_cc indices, Linux's order.
+#define VINTR  0
+#define VQUIT  1
+#define VERASE 2
+#define VKILL  3
+#define VEOF   4
+#define VTIME  5
+#define VMIN   6
+#define VSTART 8
+#define VSTOP  9
+#define VSUSP  10
+
+// c_iflag
+#define ICRNL  0000400
+#define INLCR  0000100
+#define IGNCR  0000200
+#define IXON   0002000
+
+// c_oflag
+#define OPOST  0000001
+#define ONLCR  0000004
+
+// c_cflag
+#define B38400 0000017
+#define CS8    0000060
+#define CREAD  0000200
+#define CLOCAL 0004000
+
+// c_lflag
+#define ISIG   0000001
+#define ICANON 0000002
+#define ECHO   0000010
+#define ECHOE  0000020
+#define ECHOK  0000040
+#define ECHONL 0000100
+#define NOFLSH 0000200
+#define TOSTOP 0000400
+#define IEXTEN 0100000
+
+// The ioctls a terminal answers. Linux's numbers.
+#define TCGETS     0x5401
+#define TCSETS     0x5402
+#define TCSETSW    0x5403
+#define TCSETSF    0x5404
+#define TIOCGWINSZ 0x5413
+#define TIOCSWINSZ 0x5414
+#define TIOCGPGRP  0x540F
+#define TIOCSPGRP  0x5410
+
+struct winsize_k {
+    uint16_t ws_row;
+    uint16_t ws_col;
+    uint16_t ws_xpixel;
+    uint16_t ws_ypixel;
+};
+
+void tty_init(void);
+
+// Called from the keyboard IRQ with one decoded character. Runs the
+// input side of the line discipline: echo, editing, signal generation,
+// and waking a blocked reader once a line is complete.
+void tty_input_char(char c);
+
+// The device file operations behind /dev/CONSOLE and /dev/TTY.
+int64_t tty_read(void *buf, uint32_t len);
+int64_t tty_write(const void *buf, uint32_t len);
+
+// Returns 0, or a negative errno. `arg` is a userland pointer.
+int64_t tty_ioctl(uint64_t request, void *arg);
+
+void tty_selftest(void);
+
+#endif

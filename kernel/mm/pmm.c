@@ -1,6 +1,6 @@
-#include "pmm.h"
-#include "serial.h"
-#include "../lock.h"
+#include "mm/pmm.h"
+#include "dev/serial.h"
+#include "sync/lock.h"
 
 // One lock over the whole buddy allocator. pmm is a leaf: it calls
 // nothing that takes another lock, so a single lock costs nothing in

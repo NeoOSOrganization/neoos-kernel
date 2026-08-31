@@ -1,7 +1,7 @@
-#include "ramfs.h"
-#include "../errno.h"
-#include "../mm/pmm.h"
-#include "../mm/paging.h"
+#include "fs/ramfs.h"
+#include "errno.h"
+#include "mm/pmm.h"
+#include "mm/paging.h"
 
 struct ramfs_node {
     int             in_use;
@@ -198,7 +198,7 @@ static int ramfs_unlink(struct vnode *dir, const char *name) {
 // Enumerates the dir's children by ordinal. `index` counts only
 // matching children, so callers can walk 0,1,2,... until -ENOENT
 // without knowing anything about the pool's internal layout.
-static int ramfs_readdir(struct vnode *dir, uint32_t index, struct dirent *out) {
+static int ramfs_readdir(struct vnode *dir, uint32_t index, struct vfs_dirent *out) {
     struct ramfs_node *d = (struct ramfs_node *)dir->fs_private;
     uint32_t dir_index = (uint32_t)(d - nodes);
     uint32_t seen = 0;
@@ -210,6 +210,7 @@ static int ramfs_readdir(struct vnode *dir, uint32_t index, struct dirent *out) 
         if (seen == index) {
             name_copy(out->name, nodes[i].name);
             out->type = (nodes[i].type == VNODE_DIR) ? DT_DIR : DT_REG;
+            out->ino  = (uint64_t)i;
             return 0;
         }
         seen++;

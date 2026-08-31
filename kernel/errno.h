@@ -11,6 +11,8 @@
 #define ESRCH   3
 #define EAGAIN  11
 #define EDEADLK 35
+#define ENAMETOOLONG 36
+#define ERANGE  34
 #define ENOMEM  12
 #define ECHILD  10
 #define ETIMEDOUT 110
@@ -26,6 +28,8 @@
 #define ENFILE  23
 #define EMFILE  24
 #define ENOSPC  28
+#define EIO     5
+#define ENOTTY  25
 #define EFAULT  14
 #define EPIPE   32
 #define ENOBUFS 105

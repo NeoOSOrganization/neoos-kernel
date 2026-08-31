@@ -2,8 +2,8 @@
 #define NEOOS_THREAD_TABLE_H
 
 #include <stdint.h>
-#include "../lock.h"
-#include "../sync/rcu.h"
+#include "sync/lock.h"
+#include "sync/rcu.h"
 
 /*
  * Per-process thread hash table

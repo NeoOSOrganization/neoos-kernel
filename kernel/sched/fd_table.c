@@ -1,10 +1,10 @@
-#include "fd_table.h"
-#include "proc.h"
-#include "../mm/heap.h"
-#include "../fs/vfs.h"
-#include "../file.h"
-#include "../serial.h"
-#include "../errno.h"
+#include "sched/fd_table.h"
+#include "sched/proc.h"
+#include "mm/heap.h"
+#include "fs/vfs.h"
+#include "fs/file.h"
+#include "dev/serial.h"
+#include "errno.h"
 
 static inline unsigned fd_bucket(int fd) {
     return (unsigned)fd / FD_TABLE_SLOTS;

@@ -7,6 +7,10 @@
 #include "futex.h"
 #include "tls.h"
 #include "sys/mman.h"
+#include "sys/stat.h"
+#include "sys/uio.h"
+#include "termios.h"
+#include "time.h"
 
 #define SYS_EXIT   0
 #define SYS_WRITE  1
@@ -53,6 +57,19 @@
 #define SYS_SPAWNV        51
 #define SYS_FCNTL         52
 
+#define SYS_CHDIR         53
+#define SYS_GETCWD        54
+#define SYS_STAT          55
+#define SYS_LSTAT         56
+#define SYS_FSTAT         57
+#define SYS_NEWFSTATAT    58
+#define SYS_SET_TID_ADDRESS 59
+#define SYS_EXIT_GROUP    60
+#define SYS_WRITEV        61
+#define SYS_READV         62
+#define SYS_IOCTL         63
+#define SYS_CLOCK_GETTIME 64
+#define SYS_NANOSLEEP     65
 static inline int64_t syscall0(int64_t num) {
     int64_t ret;
     __asm__ volatile ("syscall" : "=a"(ret) : "a"(num) : "rcx", "r11", "memory");
@@ -178,8 +195,8 @@ int fork(void) {
     return (int)syscall0(SYS_FORK);
 }
 
-int getdents(int fd, struct dirent *buf, int count) {
-    return (int)syscall3(SYS_GETDENTS, fd, (int64_t)(uint64_t)buf, count);
+int getdents(int fd, void *buf, int bytes) {
+    return (int)syscall3(SYS_GETDENTS, fd, (int64_t)(uintptr_t)buf, bytes);
 }
 
 int mount(const char *source, const char *target, const char *fstype) {
@@ -360,4 +377,101 @@ int fcntl(int fd, int cmd, int arg) {
 
 int arch_prctl(int code, unsigned long addr) {
     return (int)syscall2(SYS_ARCH_PRCTL, code, (int64_t)addr);
+}
+
+// --------------------------------------------------------- working dir
+
+int chdir(const char *path) {
+    return (int)syscall2(SYS_CHDIR, (int64_t)(uint64_t)(uintptr_t)path,
+                         (int64_t)strlen(path));
+}
+
+// Linux's raw getcwd returns the length INCLUDING the NUL, or -ERANGE.
+// POSIX's getcwd(3) returns the buffer, or NULL. The translation is
+// library work, exactly as it is in musl.
+char *getcwd(char *buf, uint64_t size) {
+    long rc = syscall2(SYS_GETCWD, (int64_t)(uint64_t)(uintptr_t)buf,
+                       (int64_t)size);
+    if (rc < 0) { return 0; }
+    return buf;
+}
+
+// ---------------------------------------------------------------- stat
+
+int stat(const char *path, struct stat *st) {
+    return (int)syscall3(SYS_STAT, (int64_t)(uint64_t)(uintptr_t)path,
+                         (int64_t)strlen(path), (int64_t)(uint64_t)(uintptr_t)st);
+}
+
+int lstat(const char *path, struct stat *st) {
+    return (int)syscall3(SYS_LSTAT, (int64_t)(uint64_t)(uintptr_t)path,
+                         (int64_t)strlen(path), (int64_t)(uint64_t)(uintptr_t)st);
+}
+
+int fstat(int fd, struct stat *st) {
+    return (int)syscall2(SYS_FSTAT, fd, (int64_t)(uint64_t)(uintptr_t)st);
+}
+
+// Five arguments: the path is a (pointer, length) pair, so `flags`
+// lands in the fifth slot, which is r8 -- the same route mmap's fifth
+// takes. __neoos_syscall6 already sets up r8/r9, so no new helper.
+int fstatat(int dirfd, const char *path, struct stat *st, int flags) {
+    return (int)__neoos_syscall6(SYS_NEWFSTATAT, dirfd,
+                                 (long)(uintptr_t)path, (long)strlen(path),
+                                 (long)(uintptr_t)st, flags, 0);
+}
+
+// ------------------------------------------------------- Tier 0 calls
+
+int64_t writev(int fd, const struct iovec *iov, int iovcnt) {
+    return syscall3(SYS_WRITEV, fd, (int64_t)(uintptr_t)iov, iovcnt);
+}
+
+int64_t readv(int fd, const struct iovec *iov, int iovcnt) {
+    return syscall3(SYS_READV, fd, (int64_t)(uintptr_t)iov, iovcnt);
+}
+
+int ioctl(int fd, unsigned long request, void *arg) {
+    return (int)syscall3(SYS_IOCTL, fd, (int64_t)request, (int64_t)(uintptr_t)arg);
+}
+
+// NeoOS has no terminal driver, so this is always 0. It exists because
+// stdio asks, and because a program checking it should get an answer
+// rather than a link error.
+int isatty(int fd) {
+    // A REAL struct, not NULL: the probe has to be a call the terminal
+    // can actually answer, and musl's isatty passes one too.
+    struct winsize ws;
+    return ioctl(fd, TIOCGWINSZ, &ws) == 0 ? 1 : 0;
+}
+
+int clock_gettime(int clk, struct timespec *out) {
+    return (int)syscall2(SYS_CLOCK_GETTIME, clk, (int64_t)(uintptr_t)out);
+}
+
+int nanosleep(const struct timespec *req, struct timespec *rem) {
+    return (int)syscall2(SYS_NANOSLEEP, (int64_t)(uintptr_t)req,
+                         (int64_t)(uintptr_t)rem);
+}
+
+int set_tid_address(void *ptr) {
+    return (int)syscall1(SYS_SET_TID_ADDRESS, (int64_t)(uintptr_t)ptr);
+}
+
+void exit_group(int code) {
+    syscall1(SYS_EXIT_GROUP, code);
+    for (;;) { }
+}
+
+// ------------------------------------------------------------ termios
+
+int tcgetattr(int fd, struct termios *t) {
+    return ioctl(fd, TCGETS, t);
+}
+
+int tcsetattr(int fd, int actions, const struct termios *t) {
+    unsigned long req = TCSETS;
+    if (actions == TCSADRAIN) { req = TCSETSW; }
+    else if (actions == TCSAFLUSH) { req = TCSETSF; }
+    return ioctl(fd, req, (void *)t);
 }

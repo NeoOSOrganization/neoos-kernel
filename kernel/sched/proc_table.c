@@ -1,7 +1,7 @@
-#include "proc_table.h"
-#include "proc.h"
-#include "../mm/heap.h"
-#include "../serial.h"
+#include "sched/proc_table.h"
+#include "sched/proc.h"
+#include "mm/heap.h"
+#include "dev/serial.h"
 
 struct proc_table global_proc_table;
 

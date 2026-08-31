@@ -40,6 +40,12 @@ int64_t lseek(int fd, int64_t offset, int whence);
 
 int getpid(void);
 
+// 1 on /dev/CONSOLE and /dev/TTY, 0 on a file, pipe or socket.
+int isatty(int fd);
+int ioctl(int fd, unsigned long request, void *arg);
+int set_tid_address(void *ptr);
+void exit_group(int code) __attribute__((noreturn));
+
 // Creates a pipe: fds[0] is the read end, fds[1] the write end.
 // Returns 0, or a negative errno.h code.
 //
@@ -107,5 +113,13 @@ int mkdir(const char *path);
 // Deletes the file at `path`. Returns 0, or a negative errno.h code
 // on failure (including -EISDIR if `path` is a directory).
 int unlink(const char *path);
+
+// Working directory. Every process has one from creation ("/" unless it
+// inherited another), and every path-taking call resolves against it.
+int chdir(const char *path);
+
+// POSIX shape: returns `buf`, or NULL on failure. The kernel call
+// underneath returns Linux's length-including-NUL / -ERANGE.
+char *getcwd(char *buf, uint64_t size);
 
 #endif

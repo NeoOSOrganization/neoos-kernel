@@ -1,7 +1,7 @@
-#include "blkcache.h"
-#include "../ata.h"
-#include "../lock.h"
-#include "../serial.h"
+#include "fs/blkcache.h"
+#include "dev/ata.h"
+#include "sync/lock.h"
+#include "dev/serial.h"
 
 struct blk_buf {
     uint8_t  data[BLKCACHE_SECTOR_SIZE];

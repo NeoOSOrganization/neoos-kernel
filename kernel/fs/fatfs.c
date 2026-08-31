@@ -1,8 +1,8 @@
-#include "fatfs.h"
-#include "blkcache.h"
-#include "../ata.h"
-#include "../serial.h"
-#include "../mm/heap.h"
+#include "fs/fatfs.h"
+#include "fs/blkcache.h"
+#include "dev/ata.h"
+#include "dev/serial.h"
+#include "mm/heap.h"
 
 // The legacy single-volume API. No longer declared in fatfs.h -- the
 // VFS is the only way in from outside this file -- but the two
@@ -22,7 +22,9 @@ int fat16_mkdir(const char *path);
 int fat16_delete_entry(const char *path);
 int fat16_find(const char *path, uint32_t *out_cluster, uint32_t *out_size,
                uint32_t *out_dir_lba, uint16_t *out_dir_offset);
-#include "../errno.h"
+#include "errno.h"
+#include "dev/rtc.h"
+#include "dev/timer.h"
 
 #define FAT_ATTR_DIRECTORY 0x10
 #define FAT_ATTR_VOLUME_ID 0x08
@@ -636,6 +638,599 @@ static int find_in_directory_cluster(struct fat_volume *v, uint32_t dir_cluster,
     return 0;
 }
 
+// Defined further down, with the vnode layer; needed here because the
+// long-name code is the FIRST thing that reads an 8.3 name back or
+// erases a slot.
+static void from_fat_name(const uint8_t *raw, char *out);
+static int  mark_dirent_deleted(struct fat_volume *v, uint32_t lba, uint16_t offset);
+static void write_dirent(struct fat_volume *v, struct fat16_dirent *entry,
+                         const uint8_t *fat_name, uint8_t attr,
+                         uint32_t first_cluster, uint32_t size);
+
+// The current wall time, or 0 when the RTC could not be read -- in
+// which case entries are written with no timestamp rather than one
+// counted from an epoch that is not the real one.
+static int64_t fat_now_epoch(void) {
+    if (!rtc_is_real()) { return 0; }
+    return rtc_boot_epoch() + (int64_t)(timer_ticks() / TIMER_HZ);
+}
+
+// ---- FAT timestamps --------------------------------------------------
+//
+// FAT packs a date into 16 bits (year-1980 : month : day, 7:4:5) and a
+// time into another 16 (hour : minute : second/2, 5:6:5). The two-second
+// resolution is the format's, not NeoOS's -- a FAT write time can only
+// ever be even.
+//
+// A zero date means "not recorded", which is what mkfs and some tools
+// leave behind; reporting it as 1980-01-01 would be a fabricated time,
+// so it becomes 0 (the Unix epoch) and stat shows "no timestamp".
+static int64_t fat_datetime_to_epoch(uint16_t date, uint16_t time) {
+    if (date == 0) { return 0; }
+    int year  = 1980 + ((date >> 9) & 0x7F);
+    int month = (date >> 5) & 0x0F;
+    int day   = date & 0x1F;
+    int hour  = (time >> 11) & 0x1F;
+    int min   = (time >> 5) & 0x3F;
+    int sec   = (time & 0x1F) * 2;
+    if (month < 1 || month > 12 || day < 1 || day > 31) { return 0; }
+    return rtc_time_to_epoch(year, month, day, hour, min, sec);
+}
+
+// The inverse, for entries NeoOS writes itself.
+static void fat_epoch_to_datetime(int64_t epoch, uint16_t *out_date, uint16_t *out_time) {
+    if (epoch <= 0) { *out_date = 0; *out_time = 0; return; }
+
+    // Walk years then months from the epoch. The counts are small and
+    // this runs once per file creation, so a table-free loop is fine.
+    int64_t days = epoch / 86400;
+    int64_t rem  = epoch % 86400;
+    int year = 1970;
+    for (;;) {
+        int len = ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0) ? 366 : 365;
+        if (days < len) { break; }
+        days -= len;
+        year++;
+    }
+    int leap = ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0);
+    int mlen[12] = { 31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    int month = 1;
+    for (int i = 0; i < 12; i++) {
+        if (days < mlen[i]) { break; }
+        days -= mlen[i];
+        month++;
+    }
+    int day = (int)days + 1;
+
+    if (year < 1980) { *out_date = 0; *out_time = 0; return; }
+    *out_date = (uint16_t)(((year - 1980) << 9) | (month << 5) | day);
+    *out_time = (uint16_t)(((rem / 3600) << 11) | (((rem / 60) % 60) << 5) |
+                           ((rem % 60) / 2));
+}
+
+// ===================== VFAT long file names ==========================
+//
+// A long name is stored in the 32-byte slots IMMEDIATELY BEFORE the
+// 8.3 entry it belongs to, in REVERSE order: the slot holding the last
+// 13 characters comes first on disk, and the slot holding the first 13
+// characters (flagged LFN_LAST) sits closest to... no -- the flagged
+// slot with the HIGHEST ordinal comes first physically, and ordinals
+// descend towards the short entry. Scanning forward therefore sees
+// ordinal N, N-1, ... 1, then the short entry.
+//
+// Each slot carries 13 UTF-16 code units in three runs (5, 6, 2) at
+// non-contiguous offsets, because the layout had to dodge the fields
+// an old 8.3-only driver would write.
+//
+// Every LFN slot also carries a CHECKSUM of the 8.3 name it belongs
+// to. If it does not match, the long name is stale garbage left by a
+// driver that rewrote the short entry without updating these, and the
+// only safe reading is to ignore it and use the 8.3 name.
+
+#define LFN_LAST      0x40
+#define LFN_CHARS     13
+#define LFN_MAX_SLOTS 20            // 20 * 13 = 260 >= 255-char names
+
+struct fat_lfn_slot {
+    uint8_t  order;
+    uint8_t  name1[10];
+    uint8_t  attr;
+    uint8_t  type;
+    uint8_t  checksum;
+    uint8_t  name2[12];
+    uint16_t cluster_lo;
+    uint8_t  name3[4];
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct fat_lfn_slot) == 32, "an LFN slot is one directory entry");
+
+static uint8_t lfn_checksum(const uint8_t name11[11]) {
+    uint8_t sum = 0;
+    for (int i = 0; i < 11; i++) {
+        sum = (uint8_t)(((sum & 1) << 7) + (sum >> 1) + name11[i]);
+    }
+    return sum;
+}
+
+// Pulls this slot's 13 code units into `out`. NeoOS stores names as
+// bytes, so a code unit outside ASCII becomes '_' rather than being
+// silently truncated to its low byte -- a mangled name a user can see
+// beats one that looks right and opens the wrong file.
+static void lfn_slot_chars(const struct fat_lfn_slot *sl, uint16_t *out) {
+    int k = 0;
+    for (int i = 0; i < 10; i += 2) { out[k++] = (uint16_t)(sl->name1[i] | (sl->name1[i+1] << 8)); }
+    for (int i = 0; i < 12; i += 2) { out[k++] = (uint16_t)(sl->name2[i] | (sl->name2[i+1] << 8)); }
+    for (int i = 0; i <  4; i += 2) { out[k++] = (uint16_t)(sl->name3[i] | (sl->name3[i+1] << 8)); }
+}
+
+static void lfn_slot_set_chars(struct fat_lfn_slot *sl, const uint16_t *in) {
+    int k = 0;
+    for (int i = 0; i < 10; i += 2) { sl->name1[i] = (uint8_t)in[k]; sl->name1[i+1] = (uint8_t)(in[k] >> 8); k++; }
+    for (int i = 0; i < 12; i += 2) { sl->name2[i] = (uint8_t)in[k]; sl->name2[i+1] = (uint8_t)(in[k] >> 8); k++; }
+    for (int i = 0; i <  4; i += 2) { sl->name3[i] = (uint8_t)in[k]; sl->name3[i+1] = (uint8_t)(in[k] >> 8); k++; }
+}
+
+// ---- sequential access to a directory's raw 32-byte slots -----------
+//
+// One walker for the root directory (a fixed run of sectors on FAT16)
+// and for a cluster chain (everything else), so nothing above this
+// point has to care which it is. Four separate scanners used to open
+// that distinction by hand; LFN would have needed the same accumulator
+// bolted into each.
+
+struct fat_slots {
+    struct fat_volume *v;
+    int      in_root;
+    uint32_t cluster;
+    uint32_t sector_in_unit;
+    uint32_t ent;
+    uint8_t  sector[SECTOR_SIZE];
+    uint32_t lba;
+    int      loaded;
+    int      done;
+};
+
+static void slots_begin(struct fat_slots *it, struct fat_volume *v, int in_root, uint32_t dir_cluster) {
+    it->v = v;
+    it->in_root = in_root;
+    it->cluster = dir_cluster;
+    it->sector_in_unit = 0;
+    it->ent = 0;
+    it->loaded = 0;
+    it->done = 0;
+    it->lba = 0;
+}
+
+// Loads the slot the cursor points at, advancing across sectors and
+// clusters as needed. Returns 1 with *out/*lba/*off filled, or 0 once
+// the directory's allocated space is exhausted.
+static int slots_next(struct fat_slots *it, struct fat16_dirent *out, uint32_t *lba, uint16_t *off) {
+    struct fat_volume *v = it->v;
+    for (;;) {
+        if (it->done) { return 0; }
+
+        if (!it->loaded) {
+            uint32_t units = it->in_root ? v->root_dir_sector_count : v->sectors_per_cluster;
+            if (it->sector_in_unit >= units) {
+                if (it->in_root) { it->done = 1; return 0; }
+                it->cluster = fat16_next_cluster(v, it->cluster);
+                if (fat_is_eoc(v, it->cluster) || it->cluster < 2) { it->done = 1; return 0; }
+                it->sector_in_unit = 0;
+            }
+            uint32_t base = it->in_root ? v->root_dir_start_lba : cluster_to_lba(v, it->cluster);
+            it->lba = base + it->sector_in_unit;
+            if (!blkcache_read(v->drive, it->lba, it->sector)) { it->done = 1; return 0; }
+            it->loaded = 1;
+            it->ent = 0;
+        }
+
+        if (it->ent >= DIRENTS_PER_SECTOR) {
+            it->loaded = 0;
+            it->sector_in_unit++;
+            continue;
+        }
+
+        struct fat16_dirent *entries = (struct fat16_dirent *)it->sector;
+        *out = entries[it->ent];
+        if (lba) { *lba = it->lba; }
+        if (off) { *off = (uint16_t)(it->ent * sizeof(struct fat16_dirent)); }
+        it->ent++;
+        return 1;
+    }
+}
+
+// One directory entry, with its long name assembled if it has one.
+//
+// `run_lba`/`run_off`/`run_slots` describe the WHOLE run -- the LFN
+// slots plus the short entry -- which is what unlink has to erase. Just
+// deleting the short entry would leave orphaned LFN slots that the next
+// scan folds onto whatever entry follows them.
+struct fat_entry {
+    char     name[VFS_NAME_MAX];
+    struct fat16_dirent de;
+    uint32_t lba;
+    uint16_t off;
+    uint32_t run_lba;
+    uint16_t run_off;
+    int      run_slots;
+};
+
+static int fat_dir_next(struct fat_slots *it, struct fat_entry *out) {
+    uint16_t chars[LFN_MAX_SLOTS * LFN_CHARS];
+    int      have_lfn = 0;
+    int      slots_seen = 0;
+    int      highest = 0;
+    uint8_t  want_sum = 0;
+    uint32_t run_lba = 0;
+    uint16_t run_off = 0;
+
+    struct fat16_dirent de;
+    uint32_t lba;
+    uint16_t off;
+
+    while (slots_next(it, &de, &lba, &off)) {
+        if (de.name[0] == 0x00) { return 0; }        // never-used: end of directory
+        if (de.name[0] == 0xE5) { have_lfn = 0; slots_seen = 0; continue; }
+
+        if ((de.attr & FAT_ATTR_LONG_NAME) == FAT_ATTR_LONG_NAME) {
+            const struct fat_lfn_slot *sl = (const struct fat_lfn_slot *)&de;
+            int ord = sl->order & 0x1F;
+            if (ord < 1 || ord > LFN_MAX_SLOTS) { have_lfn = 0; slots_seen = 0; continue; }
+            if (!have_lfn) {
+                // First slot of a run. Only a LAST-flagged slot may
+                // start one; anything else is a fragment.
+                if (!(sl->order & LFN_LAST)) { continue; }
+                have_lfn = 1;
+                highest = ord;
+                want_sum = sl->checksum;
+                run_lba = lba;
+                run_off = off;
+                slots_seen = 0;
+            } else if (sl->checksum != want_sum) {
+                have_lfn = 0; slots_seen = 0; continue;
+            }
+            lfn_slot_chars(sl, &chars[(ord - 1) * LFN_CHARS]);
+            slots_seen++;
+            continue;
+        }
+
+        if (de.attr & FAT_ATTR_VOLUME_ID) { have_lfn = 0; slots_seen = 0; continue; }
+
+        // A short entry ends the run.
+        out->de  = de;
+        out->lba = lba;
+        out->off = off;
+
+        int usable = have_lfn && slots_seen == highest &&
+                     lfn_checksum(de.name) == want_sum;
+        if (usable) {
+            int n = 0;
+            for (int i = 0; i < highest * LFN_CHARS && n < VFS_NAME_MAX - 1; i++) {
+                uint16_t c = chars[i];
+                if (c == 0x0000 || c == 0xFFFF) { break; }
+                out->name[n++] = (c < 0x80) ? (char)c : '_';
+            }
+            out->name[n] = '\0';
+            out->run_lba   = run_lba;
+            out->run_off   = run_off;
+            out->run_slots = highest + 1;
+        } else {
+            from_fat_name(de.name, out->name);
+            out->run_lba   = lba;
+            out->run_off   = off;
+            out->run_slots = 1;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+// Case-insensitive, like every other FAT driver: the on-disk 8.3 name
+// is upper-case by construction, so a case-sensitive compare would
+// make "readme.txt" and "README.TXT" different files on a filesystem
+// that cannot tell them apart.
+static int fat_name_eq(const char *a, const char *b) {
+    for (;;) {
+        char ca = *a++, cb = *b++;
+        if (ca >= 'a' && ca <= 'z') { ca = (char)(ca - 'a' + 'A'); }
+        if (cb >= 'a' && cb <= 'z') { cb = (char)(cb - 'a' + 'A'); }
+        if (ca != cb) { return 0; }
+        if (ca == '\0') { return 1; }
+    }
+}
+
+// Finds `name` in a directory, matching against the long name when the
+// entry has one and the 8.3 name otherwise.
+static int fat_dir_find(struct fat_volume *v, int in_root, uint32_t dir_cluster,
+                        const char *name, struct fat_entry *out) {
+    struct fat_slots it;
+    slots_begin(&it, v, in_root, dir_cluster);
+    while (fat_dir_next(&it, out)) {
+        if (fat_name_eq(out->name, name)) { return 1; }
+    }
+    return 0;
+}
+
+// ---- creating a long name -------------------------------------------
+
+static int fat_char_ok_in_83(char c) {
+    if (c >= 'A' && c <= 'Z') { return 1; }
+    if (c >= '0' && c <= '9') { return 1; }
+    return c == '_' || c == '-' || c == '~' || c == '!' || c == '#' ||
+           c == '$' || c == '%' || c == '&' || c == '\'' || c == '(' ||
+           c == ')' || c == '@' || c == '^' || c == '`' || c == '{' ||
+           c == '}';
+}
+
+// Does this name fit 8.3 exactly, so that no LFN slots are needed?
+// Lower case counts as NOT fitting: FAT would store it upper-cased and
+// the name would come back changed.
+static int fits_83(const char *name) {
+    int base = 0, ext = 0, dots = 0, in_ext = 0;
+    for (int i = 0; name[i]; i++) {
+        char c = name[i];
+        if (c == '.') {
+            dots++;
+            if (dots > 1) { return 0; }
+            in_ext = 1;
+            continue;
+        }
+        if (!fat_char_ok_in_83(c)) { return 0; }   // lower case lands here too
+        if (in_ext) { ext++; } else { base++; }
+    }
+    if (base < 1 || base > 8 || ext > 3) { return 0; }
+    return 1;
+}
+
+// Builds a unique 8.3 alias for a long name: the conventional
+// "LONGNA~1.TXT". The tail number is what makes it unique, so it is
+// probed against the directory rather than assumed.
+static void make_short_alias(struct fat_volume *v, int in_root, uint32_t dir_cluster,
+                             const char *name, uint8_t *out11) {
+    char base[8];
+    int  bn = 0;
+    // The extension is whatever follows the LAST dot.
+    int last_dot = -1;
+    for (int i = 0; name[i]; i++) { if (name[i] == '.') { last_dot = i; } }
+
+    for (int i = 0; name[i] && bn < 6; i++) {
+        if (i == last_dot) { break; }
+        char c = name[i];
+        if (c >= 'a' && c <= 'z') { c = (char)(c - 'a' + 'A'); }
+        if (c == ' ' || c == '.') { continue; }
+        if (!fat_char_ok_in_83(c)) { c = '_'; }
+        base[bn++] = c;
+    }
+    if (bn == 0) { base[bn++] = '_'; }
+
+    char ext[3];
+    int  en = 0;
+    if (last_dot >= 0) {
+        for (int i = last_dot + 1; name[i] && en < 3; i++) {
+            char c = name[i];
+            if (c >= 'a' && c <= 'z') { c = (char)(c - 'a' + 'A'); }
+            if (!fat_char_ok_in_83(c)) { c = '_'; }
+            ext[en++] = c;
+        }
+    }
+
+    for (int n = 1; n < 1000; n++) {
+        for (int i = 0; i < 11; i++) { out11[i] = ' '; }
+        int k = 0;
+        for (; k < bn; k++) { out11[k] = (uint8_t)base[k]; }
+        out11[k++] = '~';
+        // Only 1..999 are tried; the loop bound and the digits agree.
+        if (n < 10) {
+            out11[k++] = (uint8_t)('0' + n);
+        } else if (n < 100) {
+            out11[k++] = (uint8_t)('0' + n / 10);
+            out11[k++] = (uint8_t)('0' + n % 10);
+        } else {
+            out11[k++] = (uint8_t)('0' + n / 100);
+            out11[k++] = (uint8_t)('0' + (n / 10) % 10);
+            out11[k++] = (uint8_t)('0' + n % 10);
+        }
+        for (int i = 0; i < en; i++) { out11[8 + i] = (uint8_t)ext[i]; }
+
+        // Unique? Compare against the 8.3 names actually on disk.
+        struct fat_slots it;
+        struct fat_entry e;
+        slots_begin(&it, v, in_root, dir_cluster);
+        int clash = 0;
+        while (fat_dir_next(&it, &e)) {
+            if (fat_name_matches(e.de.name, out11)) { clash = 1; break; }
+        }
+        if (!clash) { return; }
+    }
+    // 999 aliases taken. The caller's create will fail on the duplicate
+    // rather than silently overwrite.
+}
+
+// Writes `slots` consecutive directory entries starting at the cursor
+// position given by (lba, off), walking forward across sectors.
+static int write_slots_at(struct fat_volume *v, int in_root, uint32_t dir_cluster,
+                          uint32_t start_lba, uint16_t start_off,
+                          const struct fat16_dirent *src, int count) {
+    struct fat_slots it;
+    slots_begin(&it, v, in_root, dir_cluster);
+    struct fat16_dirent de;
+    uint32_t lba;
+    uint16_t off;
+    int writing = 0, written = 0;
+
+    uint8_t sector[SECTOR_SIZE];
+    uint32_t cur_lba = 0;
+    int dirty = 0;
+
+    while (slots_next(&it, &de, &lba, &off) && written < count) {
+        if (!writing) {
+            if (lba != start_lba || off != start_off) { continue; }
+            writing = 1;
+        }
+        if (dirty && lba != cur_lba) {
+            blkcache_write(v->drive, cur_lba, sector);
+            dirty = 0;
+        }
+        if (!dirty) {
+            if (!blkcache_read(v->drive, lba, sector)) { return -EIO; }
+            cur_lba = lba;
+        }
+        struct fat16_dirent *entries = (struct fat16_dirent *)sector;
+        entries[off / sizeof(struct fat16_dirent)] = src[written];
+        dirty = 1;
+        written++;
+    }
+    if (dirty) { blkcache_write(v->drive, cur_lba, sector); }
+    return written == count ? 0 : -ENOSPC;
+}
+
+// Finds `count` CONSECUTIVE free slots, growing the directory by a
+// cluster if needed. Returns 1 with the run's start in *out_lba/*out_off.
+static int find_free_run(struct fat_volume *v, int in_root, uint32_t dir_cluster,
+                         int count, uint32_t *out_lba, uint16_t *out_off) {
+    for (int attempt = 0; attempt < 2; attempt++) {
+        struct fat_slots it;
+        slots_begin(&it, v, in_root, dir_cluster);
+        struct fat16_dirent de;
+        uint32_t lba;
+        uint16_t off;
+        int run = 0;
+        uint32_t run_lba = 0;
+        uint16_t run_off = 0;
+
+        while (slots_next(&it, &de, &lba, &off)) {
+            int free_slot = (de.name[0] == 0x00 || de.name[0] == 0xE5);
+            if (free_slot) {
+                if (run == 0) { run_lba = lba; run_off = off; }
+                run++;
+                if (run == count) { *out_lba = run_lba; *out_off = run_off; return 1; }
+            } else {
+                run = 0;
+            }
+        }
+
+        if (in_root || attempt == 1) { return 0; }   // the root cannot grow
+
+        // Grow by one cluster and rescan. The new cluster is zeroed, so
+        // it contributes a full cluster of free slots.
+        uint32_t last = dir_cluster;
+        uint32_t c = dir_cluster;
+        while (!fat_is_eoc(v, c) && c >= 2) { last = c; c = fat16_next_cluster(v, c); }
+        uint32_t nc = fat16_alloc_cluster(v);
+        if (nc == 0) { return 0; }
+        fat16_set_next_cluster(v, last, nc);
+        uint8_t zero[SECTOR_SIZE];
+        for (uint32_t i = 0; i < SECTOR_SIZE; i++) { zero[i] = 0; }
+        uint32_t nlba = cluster_to_lba(v, nc);
+        for (uint8_t sx = 0; sx < v->sectors_per_cluster; sx++) {
+            blkcache_write(v->drive, nlba + sx, zero);
+        }
+    }
+    return 0;
+}
+
+// Creates a directory entry under any name, writing LFN slots when the
+// name does not fit 8.3. This is what the VFS ops use; the legacy
+// path-based API below stays 8.3-only.
+static int fat_create_named(struct fat_volume *v, int in_root, uint32_t dir_cluster,
+                            const char *name, uint8_t attr, uint32_t first_cluster,
+                            uint32_t size, uint32_t *out_lba, uint16_t *out_off) {
+    uint64_t namelen = 0;
+    while (name[namelen]) { namelen++; }
+    if (namelen == 0 || namelen > VFS_NAME_MAX - 1) { return -ENAMETOOLONG; }
+
+    uint8_t short_name[11];
+    int need_lfn = !fits_83(name);
+    if (need_lfn) {
+        make_short_alias(v, in_root, dir_cluster, name, short_name);
+    } else {
+        to_fat_name(name, short_name);
+    }
+
+    int lfn_slots = need_lfn ? (int)((namelen + LFN_CHARS - 1) / LFN_CHARS) : 0;
+    if (lfn_slots > LFN_MAX_SLOTS) { return -ENAMETOOLONG; }
+    int total = lfn_slots + 1;
+
+    uint32_t lba;
+    uint16_t off;
+    if (!find_free_run(v, in_root, dir_cluster, total, &lba, &off)) { return -ENOSPC; }
+
+    struct fat16_dirent run[LFN_MAX_SLOTS + 1];
+    uint8_t sum = lfn_checksum(short_name);
+
+    for (int i = 0; i < lfn_slots; i++) {
+        // Physical order is REVERSE of character order: the highest
+        // ordinal comes first on disk.
+        int ord = lfn_slots - i;
+        struct fat_lfn_slot *sl = (struct fat_lfn_slot *)&run[i];
+        for (uint64_t b = 0; b < sizeof(*sl); b++) { ((uint8_t *)sl)[b] = 0; }
+        sl->order    = (uint8_t)(ord | (i == 0 ? LFN_LAST : 0));
+        sl->attr     = FAT_ATTR_LONG_NAME;
+        sl->type     = 0;
+        sl->checksum = sum;
+        sl->cluster_lo = 0;
+
+        uint16_t chars[LFN_CHARS];
+        for (int k = 0; k < LFN_CHARS; k++) {
+            uint64_t idx = (uint64_t)(ord - 1) * LFN_CHARS + k;
+            if (idx < namelen)       { chars[k] = (uint16_t)(uint8_t)name[idx]; }
+            else if (idx == namelen) { chars[k] = 0x0000; }   // the terminator
+            else                     { chars[k] = 0xFFFF; }   // unused padding
+        }
+        lfn_slot_set_chars(sl, chars);
+    }
+
+    write_dirent(v, &run[lfn_slots], short_name, attr, first_cluster, size);
+
+    int rc = write_slots_at(v, in_root, dir_cluster, lba, off, run, total);
+    if (rc != 0) { return rc; }
+
+    // The caller's inode id must name the SHORT entry, which is where
+    // the file's cluster and size actually live.
+    uint32_t slba = lba;
+    uint16_t soff = off;
+    {
+        struct fat_slots it;
+        slots_begin(&it, v, in_root, dir_cluster);
+        struct fat16_dirent de;
+        uint32_t l; uint16_t o;
+        int seen = 0, counting = 0;
+        while (slots_next(&it, &de, &l, &o)) {
+            if (!counting) {
+                if (l != lba || o != off) { continue; }
+                counting = 1;
+            }
+            if (seen == total - 1) { slba = l; soff = o; break; }
+            seen++;
+        }
+    }
+    if (out_lba) { *out_lba = slba; }
+    if (out_off) { *out_off = soff; }
+    return 0;
+}
+
+// Erases a whole run: the LFN slots and the short entry together.
+static int fat_erase_run(struct fat_volume *v, int in_root, uint32_t dir_cluster,
+                         const struct fat_entry *e) {
+    struct fat_slots it;
+    slots_begin(&it, v, in_root, dir_cluster);
+    struct fat16_dirent de;
+    uint32_t lba;
+    uint16_t off;
+    int erasing = 0, done = 0;
+
+    while (slots_next(&it, &de, &lba, &off) && done < e->run_slots) {
+        if (!erasing) {
+            if (lba != e->run_lba || off != e->run_off) { continue; }
+            erasing = 1;
+        }
+        int rc = mark_dirent_deleted(v, lba, off);
+        if (rc != 0) { return rc; }
+        done++;
+    }
+    return done == e->run_slots ? 0 : -EIO;
+}
+
 static void write_dirent(struct fat_volume *v, struct fat16_dirent *entry, const uint8_t *fat_name, uint8_t attr,
                            uint32_t first_cluster, uint32_t size) {
     for (int i = 0; i < 11; i++) {
@@ -644,11 +1239,18 @@ static void write_dirent(struct fat_volume *v, struct fat16_dirent *entry, const
     entry->attr = attr;
     entry->nt_reserved = 0;
     entry->create_time_tenth = 0;
-    entry->create_time = 0;
-    entry->create_date = 0;
-    entry->access_date = 0;
-    entry->write_time = 0;
-    entry->write_date = 0;
+
+    // Stamp the entry with the wall clock. These used to be written as
+    // zero, which is why every file NeoOS created showed 1980-00-00 in
+    // mdir and an epoch mtime in stat -- and why anything comparing
+    // file times could not work.
+    uint16_t date = 0, time = 0;
+    fat_epoch_to_datetime(fat_now_epoch(), &date, &time);
+    entry->create_time = time;
+    entry->create_date = date;
+    entry->access_date = date;
+    entry->write_time  = time;
+    entry->write_date  = date;
     dirent_set_cluster(v, entry, first_cluster);
     entry->file_size = size;
 }
@@ -841,6 +1443,20 @@ int fat16_mkdir(const char *path) {
     uint32_t lba = cluster_to_lba(v, new_cluster);
     for (uint8_t s = 0; s < v->sectors_per_cluster; s++) {
         blkcache_write(v->drive, lba + s, zero_sector);
+    }
+
+    // "." and "..", for the same reason the vnode mkdir writes them:
+    // fsck.fat treats a subdirectory without them as damaged and
+    // repairs it by shifting entries down.
+    {
+        uint8_t dot[11], dotdot[11];
+        for (int i = 0; i < 11; i++) { dot[i] = ' '; dotdot[i] = ' '; }
+        dot[0] = '.';
+        dotdot[0] = '.'; dotdot[1] = '.';
+        struct fat16_dirent *e = (struct fat16_dirent *)zero_sector;
+        write_dirent(v, &e[0], dot, FAT_ATTR_DIRECTORY, new_cluster, 0);
+        write_dirent(v, &e[1], dotdot, FAT_ATTR_DIRECTORY, in_root ? 0 : dir_cluster, 0);
+        blkcache_write(v->drive, lba, zero_sector);
     }
 
     uint32_t dir_lba;
@@ -1246,40 +1862,6 @@ static int mark_dirent_deleted(struct fat_volume *v, uint32_t lba, uint16_t offs
     return 0;
 }
 
-// Returns the index'th real 8.3 entry of a directory, skipping free
-// (0x00), deleted (0xE5), volume-label, and VFAT long-name entries.
-// Contract matches ramfs: 0 with *out filled for a valid index,
-// -ENOENT once past the last entry.
-static int fat_dir_nth(struct fat_volume *v, uint32_t dir_cluster, int in_root,
-                       uint32_t index, struct dirent *out) {
-    uint32_t seen = 0;
-    uint32_t sectors = in_root ? v->root_dir_sector_count : v->sectors_per_cluster;
-    uint32_t cluster = dir_cluster;
-
-    for (;;) {
-        uint32_t base = in_root ? v->root_dir_start_lba : cluster_to_lba(v, cluster);
-        for (uint32_t s = 0; s < sectors; s++) {
-            uint8_t sector[SECTOR_SIZE];
-            if (!blkcache_read(v->drive, base + s, sector)) { return -ENOENT; }
-            for (uint32_t o = 0; o < SECTOR_SIZE; o += sizeof(struct fat16_dirent)) {
-                struct fat16_dirent *de = (struct fat16_dirent *)(sector + o);
-                if (de->name[0] == 0x00) { return -ENOENT; } // end of directory
-                if (de->name[0] == 0xE5) { continue; }       // deleted
-                if ((de->attr & FAT_ATTR_LONG_NAME) == FAT_ATTR_LONG_NAME) { continue; }
-                if (de->attr & FAT_ATTR_VOLUME_ID) { continue; }
-                if (seen == index) {
-                    from_fat_name(de->name, out->name);
-                    out->type = (de->attr & FAT_ATTR_DIRECTORY) ? DT_DIR : DT_REG;
-                    return 0;
-                }
-                seen++;
-            }
-        }
-        if (in_root) { return -ENOENT; }
-        cluster = fat16_next_cluster(v, cluster);
-        if (fat_is_eoc(v, cluster) || cluster < 2) { return -ENOENT; }
-    }
-}
 
 static int fatfs_mount_op(struct vfs_mount *m, const char *source) {
     uint8_t drive;
@@ -1367,6 +1949,15 @@ static int fatfs_read_inode(struct vfs_mount *m, uint64_t inode_id, struct vnode
 
     out->type = n->is_dir ? VNODE_DIR : VNODE_FILE;
     out->size = n->size;
+    // Real times, straight out of the directory entry. FAT keeps a
+    // write time to two-second resolution, a create time to one
+    // second, and an access DATE only -- so atime has no time of day
+    // and is midnight on the day of access.
+    out->mtime = fat_datetime_to_epoch(de->write_date,  de->write_time);
+    out->ctime = fat_datetime_to_epoch(de->create_date, de->create_time);
+    out->atime = fat_datetime_to_epoch(de->access_date, 0);
+    if (out->atime == 0) { out->atime = out->mtime; }
+    if (out->ctime == 0) { out->ctime = out->mtime; }
     out->fs_private = n;
     return 0;
 }
@@ -1388,20 +1979,11 @@ static int fatfs_sync_inode(struct vnode *vn) {
 static int fatfs_lookup(struct vnode *dir, const char *name, uint64_t *out_inode_id) {
     struct fat_volume *v = (struct fat_volume *)dir->mount->fs_private;
     struct fatfs_inode *d = (struct fatfs_inode *)dir->fs_private;
-
-    uint8_t fat_name[11];
-    to_fat_name(name, fat_name);
-
-    struct fat16_dirent found;
-    uint32_t lba;
-    uint16_t off;
     int in_root = (dir->inode_id == FATFS_ROOT_INODE) && (v->variant == FAT_16);
-    int ok = in_root ? find_in_root(v, fat_name, &found, &lba, &off)
-                     : find_in_directory_cluster(v, d->first_cluster, fat_name, &found, &lba, &off);
-    if (!ok) {
-        return -ENOENT;
-    }
-    *out_inode_id = inode_id_of(lba, off);
+
+    struct fat_entry e;
+    if (!fat_dir_find(v, in_root, d->first_cluster, name, &e)) { return -ENOENT; }
+    *out_inode_id = inode_id_of(e.lba, e.off);
     return 0;
 }
 
@@ -1440,26 +2022,15 @@ static int64_t fatfs_write(struct vnode *vn, uint32_t pos, const void *buf, uint
 static int fatfs_create(struct vnode *dir, const char *name, uint64_t *out_inode_id) {
     struct fat_volume *v = (struct fat_volume *)dir->mount->fs_private;
     struct fatfs_inode *d = (struct fatfs_inode *)dir->fs_private;
-
-    uint8_t fat_name[11];
-    to_fat_name(name, fat_name);
-
-    struct fat16_dirent existing;
     int in_root = (dir->inode_id == FATFS_ROOT_INODE) && (v->variant == FAT_16);
-    int already = in_root ? find_in_root(v, fat_name, &existing, NULL, NULL)
-                          : find_in_directory_cluster(v, d->first_cluster, fat_name,
-                                                      &existing, NULL, NULL);
-    if (already) { return -EEXIST; }
+
+    struct fat_entry existing;
+    if (fat_dir_find(v, in_root, d->first_cluster, name, &existing)) { return -EEXIST; }
 
     uint32_t lba;
     uint16_t off;
-    // create_entry_in_directory reports success as 1, not 0 -- it is
-    // boolean-with-negative-errno, the same convention find_in_root
-    // uses. Translate here rather than leaking it to the VFS, whose
-    // ops are all 0-on-success.
-    int rc = create_entry_in_directory(v, d->first_cluster, in_root,
-                                       fat_name, 0, 0, 0, &lba, &off);
-    if (rc <= 0) { return rc == 0 ? -ENOSPC : rc; }
+    int rc = fat_create_named(v, in_root, d->first_cluster, name, 0, 0, 0, &lba, &off);
+    if (rc != 0) { return rc; }
     *out_inode_id = inode_id_of(lba, off);
     return 0;
 }
@@ -1467,16 +2038,10 @@ static int fatfs_create(struct vnode *dir, const char *name, uint64_t *out_inode
 static int fatfs_mkdir_op(struct vnode *dir, const char *name) {
     struct fat_volume *v = (struct fat_volume *)dir->mount->fs_private;
     struct fatfs_inode *d = (struct fatfs_inode *)dir->fs_private;
-
-    uint8_t fat_name[11];
-    to_fat_name(name, fat_name);
-
-    struct fat16_dirent existing;
     int in_root = (dir->inode_id == FATFS_ROOT_INODE) && (v->variant == FAT_16);
-    int already = in_root ? find_in_root(v, fat_name, &existing, NULL, NULL)
-                          : find_in_directory_cluster(v, d->first_cluster, fat_name,
-                                                      &existing, NULL, NULL);
-    if (already) { return -EEXIST; }
+
+    struct fat_entry existing;
+    if (fat_dir_find(v, in_root, d->first_cluster, name, &existing)) { return -EEXIST; }
 
     uint32_t cluster = fat16_alloc_cluster(v);
     if (!cluster) { return -ENOSPC; }
@@ -1491,14 +2056,34 @@ static int fatfs_mkdir_op(struct vnode *dir, const char *name) {
         blkcache_write(v->drive, base + s, zero);
     }
 
+    // "." and ".." MUST be the first two entries of a FAT subdirectory.
+    // mkdir never wrote them, which fsck.fat reports as "Expected a
+    // valid '..' entry in this slot" and then repairs by shifting
+    // everything down -- which, once long names existed, tore apart the
+    // LFN run of whatever had been created first inside the directory.
+    //
+    // ".."'s cluster is 0 when the parent is the FAT16 root: the root
+    // has no cluster number, and 0 is how FAT spells "the root".
+    {
+        uint8_t dot[11], dotdot[11];
+        for (int i = 0; i < 11; i++) { dot[i] = ' '; dotdot[i] = ' '; }
+        dot[0] = '.';
+        dotdot[0] = '.'; dotdot[1] = '.';
+
+        struct fat16_dirent *e = (struct fat16_dirent *)zero;
+        write_dirent(v, &e[0], dot, FAT_ATTR_DIRECTORY, cluster, 0);
+        uint32_t parent_cluster = in_root ? 0 : d->first_cluster;
+        write_dirent(v, &e[1], dotdot, FAT_ATTR_DIRECTORY, parent_cluster, 0);
+        blkcache_write(v->drive, base, zero);
+    }
+
     uint32_t lba;
     uint16_t off;
-    // Same boolean-success convention as fatfs_create above.
-    int rc = create_entry_in_directory(v, d->first_cluster, in_root,
-                                       fat_name, FAT_ATTR_DIRECTORY, cluster, 0, &lba, &off);
-    if (rc <= 0) {
+    int rc = fat_create_named(v, in_root, d->first_cluster, name,
+                              FAT_ATTR_DIRECTORY, cluster, 0, &lba, &off);
+    if (rc != 0) {
         fat16_free_chain(v, cluster);
-        return rc == 0 ? -ENOSPC : rc;
+        return rc;
     }
     return 0;
 }
@@ -1506,24 +2091,17 @@ static int fatfs_mkdir_op(struct vnode *dir, const char *name) {
 static int fatfs_unlink_op(struct vnode *dir, const char *name) {
     struct fat_volume *v = (struct fat_volume *)dir->mount->fs_private;
     struct fatfs_inode *d = (struct fatfs_inode *)dir->fs_private;
-
-    uint8_t fat_name[11];
-    to_fat_name(name, fat_name);
-
-    struct fat16_dirent found;
-    uint32_t lba;
-    uint16_t off;
     int in_root = (dir->inode_id == FATFS_ROOT_INODE) && (v->variant == FAT_16);
-    int ok = in_root ? find_in_root(v, fat_name, &found, &lba, &off)
-                     : find_in_directory_cluster(v, d->first_cluster, fat_name, &found, &lba, &off);
-    if (!ok) { return -ENOENT; }
-    if (found.attr & FAT_ATTR_DIRECTORY) { return -EISDIR; }
 
-    uint32_t victim = dirent_cluster(v, &found);
-    if (victim != 0) {
-        fat16_free_chain(v, victim);
-    }
-    return mark_dirent_deleted(v, lba, off);
+    struct fat_entry e;
+    if (!fat_dir_find(v, in_root, d->first_cluster, name, &e)) { return -ENOENT; }
+    if (e.de.attr & FAT_ATTR_DIRECTORY) { return -EISDIR; }
+
+    uint32_t victim = dirent_cluster(v, &e.de);
+    if (victim != 0) { fat16_free_chain(v, victim); }
+    // The WHOLE run, not just the short entry: orphaned LFN slots would
+    // otherwise be folded onto whatever entry follows them.
+    return fat_erase_run(v, in_root, d->first_cluster, &e);
 }
 
 static int fatfs_truncate_op(struct vnode *vn) {
@@ -1536,11 +2114,26 @@ static int fatfs_truncate_op(struct vnode *vn) {
     return 0;
 }
 
-static int fatfs_readdir_op(struct vnode *dir, uint32_t index, struct dirent *out) {
+static int fatfs_readdir_op(struct vnode *dir, uint32_t index, struct vfs_dirent *out) {
     struct fat_volume *v = (struct fat_volume *)dir->mount->fs_private;
     struct fatfs_inode *d = (struct fatfs_inode *)dir->fs_private;
     int in_root = (dir->inode_id == FATFS_ROOT_INODE) && (v->variant == FAT_16);
-    return fat_dir_nth(v, d->first_cluster, in_root, index, out);
+
+    struct fat_slots it;
+    struct fat_entry e;
+    slots_begin(&it, v, in_root, d->first_cluster);
+    for (uint32_t seen = 0; fat_dir_next(&it, &e); seen++) {
+        if (seen != index) { continue; }
+        int i = 0;
+        while (e.name[i] && i < VFS_NAME_MAX - 1) { out->name[i] = e.name[i]; i++; }
+        out->name[i] = '\0';
+        out->type = (e.de.attr & FAT_ATTR_DIRECTORY) ? DT_DIR : DT_REG;
+        // The same id fatfs_lookup returns for this name: a directory
+        // entry is identified by where its SHORT entry sits on disk.
+        out->ino  = inode_id_of(e.lba, e.off);
+        return 0;
+    }
+    return -ENOENT;
 }
 
 const struct vfs_ops fatfs_ops = {

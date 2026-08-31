@@ -2,19 +2,20 @@
 // thread. Split out of the former kernel/process.c; the code is
 // unchanged, only relocated.
 
-#include "sched.h"
-#include "../mm/pmm.h"
-#include "../mm/paging.h"
-#include "../mm/heap.h"
-#include "../tss.h"
-#include "../serial.h"
-#include "../fs/vfs.h"
-#include "../elf.h"
-#include "../cpu.h"
-#include "../cpu_local.h"
-#include "../waitq.h"
-#include "../errno.h"
-#include "../smp.h"
+#include "sched/sched.h"
+#include "mm/pmm.h"
+#include "mm/paging.h"
+#include "mm/heap.h"
+#include "arch/tss.h"
+#include "dev/serial.h"
+#include "fs/vfs.h"
+#include "elf.h"
+#include "arch/cpu.h"
+#include "arch/cpu_local.h"
+#include "arch/msr.h"
+#include "sync/waitq.h"
+#include "errno.h"
+#include "smp/smp.h"
 
 extern void context_switch(uint64_t *old_rsp, uint64_t *new_rsp);
 extern void kernel_thread_entry_trampoline(void);
@@ -336,7 +337,8 @@ void schedule(void) {
     // already releases the caller's guard before calling us; this makes
     // that an enforced invariant rather than an accident.
     if (lock_held_depth() != 0) {
-        lock_panic("schedule() with a spinlock held", "schedule", 0);
+        lock_panic("schedule() with a spinlock held", "schedule",
+                   lock_held_top_name());
     }
 
     // schedule() is NOT reentrant, and until this cli it ran with
@@ -413,9 +415,7 @@ void schedule(void) {
     // cache cannot go stale behind our back.
     if (next->fs_base != c->fs_base_loaded) {
         c->fs_base_loaded = next->fs_base;
-        uint32_t lo = (uint32_t)next->fs_base;
-        uint32_t hi = (uint32_t)(next->fs_base >> 32);
-        __asm__ volatile ("wrmsr" :: "c"(0xC0000100u), "a"(lo), "d"(hi));
+        wrmsr(MSR_FS_BASE, next->fs_base);
     }
     c->tss->rsp0    = next->kernel_stack_top;
     c->kernel_stack = next->kernel_stack_top;

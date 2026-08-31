@@ -1,6 +1,9 @@
 # NeoOS Linux ABI Compatibility Report
 
-**Generated:** 2026-08-30, at the close of Phase 10 (SMP & concurrency).
+**Generated:** 2026-08-31, after Phase 12 (IPC, TLS, networking) and the
+coreutils-porting ABI work that followed it (musl, the `stat` family,
+the working directory, VFAT long names, TTY, RTC).
+**Previous:** 2026-08-30, close of Phase 10 (SMP).
 **Refreshed:** at the end of every milestone, per `CLAUDE.md`.
 
 ## 1. Scope
@@ -20,148 +23,226 @@ can retrofit a struct layout an application was compiled against.
 This report is the honest inventory. Anything below marked **DIVERGES**
 is a known gap, not a design claim.
 
-## 2. Syscalls
+## 2. What changed since Phase 10
 
-42 syscalls, numbered 0–41 in NeoOS's own space (`kernel/syscall.c`).
-Linux x86_64 numbers are unrelated and are expected to be mapped by the
-musl shim when musl is integrated.
+Seven of the nine items on the previous report's "what a real ported
+application hits, in order" list are now closed:
+
+| Was #1 | **auxv is missing** | **CLOSED.** A real SysV entry stack with argc/argv/envp and AT_PHDR/PHENT/PHNUM/PAGESZ/ENTRY/RANDOM. |
+| Was #2 | **No TLS, no `arch_prctl`** | **CLOSED.** `arch_prctl(ARCH_SET_FS)`, per-thread FS base restored on every context switch, `__thread` works across migration. |
+| Was #3 | **No `stat` family** | **CLOSED.** `stat`/`lstat`/`fstat`/`newfstatat`, Linux's 144-byte `struct stat`. Field values still synthesized — §4, and `docs/stdlib.md`. |
+| Was #4 | **`struct dirent` layout** | **CLOSED.** Linux's `getdents64` record, matching `DT_*`. |
+| Was #5 | **`O_CREAT` value diverges** | **STILL OPEN** — see §5. Cheap, and still worth doing. |
+| Was #7 | **No `clone`/`futex`** | **HALF CLOSED.** `futex` exists with Linux semantics, and pthread mutexes, condvars and POSIX semaphores are built on it. There is still no `clone`. |
+| Was #8 | **No `clock_gettime`/`nanosleep`** | **MOSTLY CLOSED.** Both exist; resolution is 10ms and there are no absolute timeouts — §8a. |
+| Was #9 | **13-character filenames** | **CLOSED** (a FAT constraint, not an ABI one): VFAT long names, read and write. |
+
+Since this report was last written, a per-process **working directory**
+landed: `chdir`/`getcwd`, inherited by fork and spawn, with every
+path-taking syscall resolving through it. That was the largest single
+item in `docs/porting-coreutils.md`'s Tier 1, because it changed
+`struct process` rather than adding a call.
+
+New since Phase 10: futex, pipes, AF_INET datagram sockets over a
+loopback stack, thread-local storage, the auxiliary vector, `spawnv`,
+`fcntl`, an MPI subset, **musl 1.2.5 statically linked**, the `stat`
+family, the working directory, VFAT long names, a line-discipline TTY,
+a CMOS RTC behind `CLOCK_REALTIME`, and Tier 0 of the coreutils surface
+(`writev`/`readv`, `ioctl`, `clock_gettime`, `nanosleep`,
+`set_tid_address`, `exit_group`).
+
+## 3. Syscalls
+
+66 syscalls, numbered 0–65 in NeoOS's own space
+(`kernel/syscall/syscall_nr.h`). Linux x86_64 numbers are unrelated;
+the musl shim (`third_party/shim/`) maps them. Dispatch is a table
+indexed by the number; an unimplemented number returns `-ENOSYS`, as on
+Linux.
 
 | NeoOS | Name | Linux analogue | Status |
 |-------|------|----------------|--------|
 | 0 | exit | `exit` | implemented |
-| 1 | write | `write` | implemented |
+| 1/6 | write/read | `write`/`read` | implemented, now via a file-ops table |
 | 2 | yield | `sched_yield` | implemented |
 | 3 | getpid | `getpid` | implemented |
 | 4 | spawn | *(none — NeoOS extension)* | implemented |
 | 5 | wait | *(NeoOS wait-by-pid)* | implemented |
-| 6 | read | `read` | implemented |
-| 7 | open | `open` | implemented, flags diverge (§4) |
-| 8 | close | `close` | implemented |
-| 9 | mkdir | `mkdir` | implemented |
-| 10 | unlink | `unlink` | implemented |
-| 11 | lseek | `lseek` | implemented |
-| 12 | fork | `fork` | implemented (COW) |
-| 13 | exec | `execve` | implemented |
+| 7 | open | `open` | implemented, **`O_CREAT` value diverges** (§5) |
+| 8–11 | close/mkdir/unlink/lseek | same names | implemented |
+| 12/13 | fork/exec | `fork`/`execve` | implemented (COW); **exec takes no argv** |
 | 14/15 | mount/umount | `mount`/`umount2` | implemented, NeoOS-shaped |
-| 16 | getdents | `getdents64` | implemented, **struct DIVERGES** (§3) |
-| 17–20 | thread create/exit/join/self | `clone`/`exit`/`futex`/`gettid` | NeoOS-shaped, not `clone` |
+| 16 | getdents | `getdents64` | implemented, **struct now MATCHES** (§4) |
+| 17–20 | thread create/exit/join/self | `clone`/`exit`/`futex`/`gettid` | NeoOS-shaped, **not `clone`** |
 | 21–28 | rt_sigaction … sigaltstack | same names | implemented |
 | 29–31 | kill / tkill / tgkill | same names | implemented |
 | 32 | wait4 | `wait4` | implemented |
 | 33–36 | setpgid/getpgid/setsid/getsid | same names | implemented |
-| 37–39 | mmap / munmap / mprotect | same names | implemented |
-| 40–41 | cpu_count / getcpu | `sysconf`/`getcpu` | implemented (Phase 10) |
+| 37–39 | mmap / munmap / mprotect | same names | implemented, anonymous only |
+| 40–41 | cpu_count / getcpu | `sysconf`/`getcpu` | implemented |
+| **42** | **futex** | `futex` | **NEW.** WAIT and WAKE only (§6) |
+| **43** | **pipe2** | `pipe2` | **NEW.** `pipe()` is library code over it |
+| **44** | **arch_prctl** | `arch_prctl` | **NEW.** SET_FS/GET_FS; GS codes refused |
+| **45–50** | **socket/bind/connect/sendto/recvfrom/getsockname** | same names | **NEW.** AF_INET SOCK_DGRAM only (§7) |
+| **51** | **spawnv** | *(what `execve`'s argv will become)* | **NEW** |
+| **52** | **fcntl** | `fcntl` | **NEW.** F_GETFL/F_SETFL; F_GETFD/F_SETFD are no-ops; F_DUPFD refused |
+| **53–54** | **chdir / getcwd** | same names | **NEW.** Per-process cwd; `..` resolved textually (§5) |
+| **55–58** | **stat / lstat / fstat / newfstatat** | same names | **NEW.** Linux's 144-byte `struct stat`; most fields synthesized (§4) |
+| **59–65** | **set_tid_address / exit_group / writev / readv / ioctl / clock_gettime / nanosleep** | same names | **NEW.** Tier 0: what musl needs before `main`. `ioctl` on a terminal answers `TCGETS`/`TCSETS`/`TIOCGWINSZ` (§8b); `CLOCK_REALTIME` is anchored to the CMOS RTC read at boot (§8a) |
 
-**Absent, and reached early by a real program:** `stat`, `fstat`,
-`lstat`, `newfstatat`, `ioctl`, `fcntl`, `dup`/`dup2`, `pipe`,
-`readv`/`writev`, `brk`, `clock_gettime`, `nanosleep`, `futex`,
-`set_tid_address`, `set_robust_list`, `getuid`/`geteuid`/`getgid`,
-`uname`, `poll`/`select`, `socket`. There is **no `clone`**: threads are
-created through a NeoOS-shaped call, so a pthreads implementation cannot
-sit directly on top yet.
+**musl now runs.** The shim (`third_party/shim/`) translates Linux's
+numbers onto these, and `[musltest]` in `make test` is a real musl
+binary using printf, malloc, stat, opendir and stdio.
 
-## 3. Struct layouts crossing the boundary
+**Absent, and reached early by a real program:** `dup`/`dup2`,
+`set_robust_list`, `getuid`/`geteuid`/`getgid`, `uname`, `umask`,
+`chmod`, `rename`, `rmdir`, `ftruncate`,
+`poll`/`select`/`epoll`, `clone`, `listen`/`accept`, `setsockopt`, and
+the whole *at* family (`openat`, `unlinkat`, ...). `brk` is absent and
+that is fine -- musl's mallocng falls back to `mmap`. See
+`docs/porting-coreutils.md` for which of these actually block a port.
+
+## 4. Struct layouts crossing the boundary
 
 | Struct | Verdict |
 |--------|---------|
-| `struct k_sigaction` | **Matches** Linux's kernel `sigaction`: handler, flags, restorer, mask, in that order. |
-| `struct siginfo` | **Matches** in size — 128 bytes, as Linux. Only the fields NeoOS produces are named; the rest is explicit padding. |
-| `struct dirent` | **DIVERGES completely.** |
-| `struct stat` | **Absent.** No stat family exists, so there is nothing to compare. This is the single largest gap. |
-| `struct timespec` | **Absent.** No `clock_gettime`/`nanosleep`. |
+| `struct k_sigaction` | **Matches** Linux's kernel `sigaction`. |
+| `struct siginfo` | **Matches** in size — 128 bytes. |
+| `struct sockaddr_in` | **Matches** — 16 bytes, family/port/addr/zero at 0/2/4/8. Asserted at boot by `socket_selftest`. |
+| `struct timespec` | **Matches** — two 64-bit signed fields. Defined; nothing consumes it from userland yet except futex timeouts. |
+| The auxv | **Matches** — pairs of `unsigned long`, `AT_NULL`-terminated, at the documented place on the entry stack. |
+| `struct dirent` | **Matches** — Linux's `getdents64` record: d_ino/d_off/d_reclen/d_type and a variable-length d_name at offset 19, 8-byte aligned. `DT_*` are Linux's values. Names carry the full VFAT long name (up to 255 characters). |
+| `struct stat` | **Matches** — Linux's x86-64 144-byte layout, asserted at compile time and from userland. Field *values* diverge: mode bits, owner and link count are synthesized, and all three timestamps are 0, because FAT stores none of them (`CLOCK_REALTIME` now exists but nothing records file times with it). See `docs/stdlib.md`. |
+| `struct termios` | **Matches** Linux's 36-byte kernel `termios` (NCCS 19), a prefix of musl's larger userland struct — the TTY writes only that prefix. `struct winsize` matches. c_cc indices, `I*`/`O*`/`C*`/`L*` flags and the `TC*`/`TIOC*` ioctl numbers are Linux's. |
 | `struct utsname` | **Absent.** No `uname`. |
+| `pthread_mutex_t`, `sem_t` | **DIVERGE**, and deliberately: they are NeoOS's own definitions, and musl replaces them wholesale. Nothing is compiled against them yet, so there is no compatibility to preserve. |
 
-### `struct dirent` — the divergence in detail
-
-NeoOS (`lib/include/dirent.h`):
-
-```c
-struct dirent { char name[13]; uint8_t type; };
-```
-
-Linux `getdents64`:
-
-```c
-struct linux_dirent64 {
-    ino64_t  d_ino; off64_t d_off; unsigned short d_reclen;
-    unsigned char d_type; char d_name[];
-};
-```
-
-Nothing matches: no inode number, no offset, no record length, and a
-**13-byte fixed name** (FAT 8.3 plus NUL) where Linux has a variable
-one. Any program that reads directories — `ls`, a shell glob, a build
-tool — needs this replaced with the Linux layout. A shim cannot paper
-over it, because the record length is what lets a caller walk the
-buffer.
-
-## 4. Constants and flags
+## 5. Constants and flags
 
 | Family | Verdict |
 |--------|---------|
-| `errno` | **Matches** Linux x86_64: EPERM 1, ENOENT 2, ESRCH 3, EINTR 4, EBADF 9, ECHILD 10, EAGAIN 11, ENOMEM 12, EBUSY 16, EEXIST 17, ENODEV 19, ENOTDIR 20, EISDIR 21, EDEADLK 35, ENOSYS 38, ETIMEDOUT 110. |
-| Signal numbers | **Matches**: SIGKILL 9, SIGSEGV 11, NSIG 65 (1–64 usable). |
-| `PROT_*`, `MAP_*` | **Match** for the subset implemented (`PROT_READ` 1, `PROT_WRITE` 2, `MAP_PRIVATE` 0x02, `MAP_ANONYMOUS` 0x20). |
-| `_SC_NPROCESSORS_*` | **Match** (83, 84). |
-| `O_*` | **`O_CREAT` DIVERGES**: NeoOS 0x100, Linux 0x40. `O_RDONLY`/`O_WRONLY`/`O_RDWR` (0/1/2), `O_TRUNC` (0x200) and `O_APPEND` (0x400) match. |
-| `AT_*`, `CLOCK_*` | **Absent.** |
+| `errno` | **Matches** Linux x86_64, now including `EFAULT` 14, `EPIPE` 32, `ESPIPE` 29, `EMSGSIZE` 90, `EAFNOSUPPORT` 97, `EADDRINUSE` 98, `EADDRNOTAVAIL` 99, `ENETUNREACH` 101, `ENOTCONN` 107, `ERANGE` 34, `ENAMETOOLONG` 36. |
+| Signal numbers | **Matches**: SIGKILL 9, SIGSEGV 11, SIGPIPE 13, NSIG 65. |
+| `PROT_*`, `MAP_*` | **Match** for the subset implemented. |
+| `AF_INET` (2), `SOCK_DGRAM` (2), `SOCK_STREAM` (1), `INADDR_*` | **Match.** |
+| `AT_*` (auxv) | **Match**: `AT_PHDR` 3, `AT_PHENT` 4, `AT_PHNUM` 5, `AT_PAGESZ` 6, `AT_ENTRY` 9, `AT_RANDOM` 25. |
+| `ARCH_SET_FS` (0x1002), `ARCH_GET_FS` (0x1003) | **Match.** |
+| `FUTEX_WAIT`/`FUTEX_WAKE`/`FUTEX_PRIVATE_FLAG` | **Match** (0, 1, 128). |
+| `F_GETFL`/`F_SETFL`, `O_NONBLOCK` (0x800), `O_CLOEXEC` (0x80000) | **Match.** |
+| `O_*` (open) | **`O_CREAT` STILL DIVERGES**: NeoOS 0x100, Linux 0x40. |
+| `CLOCK_*` | **Match** (`CLOCK_REALTIME` 0, `CLOCK_MONOTONIC` 1, ...). All ids resolve; `CLOCK_REALTIME` is wall time anchored to the CMOS RTC, the rest count from boot. Resolution is one 10ms tick (§8a). |
+| `TCGETS`/`TCSETS`/`TIOCGWINSZ` etc. | **Match** — Linux's ioctl numbers (§8b). |
 
-**`O_CREAT` is a live bug**, not a design choice: a program compiled
-against Linux headers passes 0x40, which NeoOS does not recognise as
-create — so the open silently fails to create the file. It costs one
-constant to fix and should be fixed before anything is ported.
+**`O_CREAT` remains a live bug.** A program compiled against Linux
+headers passes 0x40, which NeoOS does not recognise as create, so the
+open silently fails to create the file. It costs one constant. It was
+called out at the close of Phase 10 and is still here; it should be
+fixed before anything is ported.
 
-## 5. Error-reporting convention — DIVERGES
+## 6. futex, and what is built on it
 
-NeoOS's library returns negative error codes **directly** from
-`open`/`read`/`write`/`close`/`lseek`/`mkdir`/`unlink`
-(`lib/include/errno.h`). There is no settable `errno` variable.
+`futex(uaddr, op, val, timeout)` with Linux's operation numbers,
+argument order and return values. **`FUTEX_WAIT` and `FUTEX_WAKE`
+only.** `FUTEX_PRIVATE_FLAG` is accepted and ignored, because NeoOS
+keys every futex by physical address — correct for private and shared
+alike, so the hint has nothing to change.
 
-POSIX requires `-1` plus `errno`. Every ported program checks `errno`,
-so this must change when musl lands: the kernel keeps returning negative
-codes (Linux-shaped), and musl's syscall wrappers do the `-1`/`errno`
-translation, which is exactly the translation-not-emulation split
-`CLAUDE.md` describes. No kernel change is needed — only the shim.
+**DIVERGES:** no `FUTEX_REQUEUE`/`CMP_REQUEUE`, so a condition
+variable's broadcast wakes every waiter instead of moving them to the
+mutex's queue. Correct, but a thundering herd, and musl's
+`pthread_cond_broadcast` will take the slower path. No `*_BITSET`, no
+`FUTEX_WAKE_OP`, no priority-inheritance futexes. Timeouts are relative
+only and rounded up to a 10ms tick.
 
-## 6. Process startup contract
+`<semaphore.h>` and `<pthread.h>` (mutexes, condvars, and a small
+threads subset) are built on it in `lib/` and are placeholders: musl
+supplies all of them, on this same syscall, unchanged.
+
+## 7. Sockets and the network stack
+
+`socket`/`bind`/`connect`/`sendto`/`recvfrom`/`getsockname`, with
+Linux's `sockaddr_in` layout, over a real IPv4 and UDP path on a
+loopback device — real headers, real checksums, real port demux. A
+socket is an ordinary file descriptor, so `close`, `fork` inheritance,
+and `read`/`write` on a connected socket all work.
+
+**DIVERGES / absent:** one interface and it is loopback; **no TCP**
+(`SOCK_STREAM` returns `-EPROTONOSUPPORT` rather than silently giving
+datagram semantics); no `AF_UNIX`, no IPv6; no `MSG_*` flags at all,
+including `MSG_DONTWAIT` and `MSG_TRUNC`; no `setsockopt`/`getsockopt`;
+no `select`/`poll`; no ICMP and no raw sockets.
+
+## 8. Process startup contract
 
 | Item | State |
 |------|-------|
-| ELF loading | static ELF64 only; no dynamic linker, no `PT_INTERP` |
-| **auxv** | **Not supplied.** musl's `__libc_start_main` reads `AT_PHDR`, `AT_PAGESZ`, `AT_ENTRY`, `AT_RANDOM`; without them it cannot start. |
-| Initial stack | `argc`/`argv` placed by `crt0.asm`; envp and auxv absent |
-| TLS | no `fs_base` setup, no `set_thread_area`; `%fs`-relative TLS is unavailable |
-| Signal frame | NeoOS-shaped, delivered via a `restorer` trampoline; the layout is **not** Linux's `rt_sigframe` |
+| ELF loading | static ELF64 only; no `PT_INTERP`, no dynamic linker |
+| **auxv** | **Supplied.** AT_PHDR/PHENT/PHNUM/PAGESZ/ENTRY/RANDOM. |
+| Initial stack | **argc/argv/envp/auxv, SysV layout, 16-byte aligned.** `argv[0]` is the spawn path. |
+| **envp** | present and NULL-terminated, but always **empty** — nothing sets an environment |
+| **TLS** | **Working.** `arch_prctl(ARCH_SET_FS)`, variant-II layout, `%fs:0` self-pointer, per-thread and restored across migration. Local-exec model only. |
+| **AT_RANDOM** | **DIVERGES: not random.** Derived from the tick counter and the addresses at hand. musl seeds its stack guard from it, so that guard is guessable. |
+| Signal frame | NeoOS-shaped; **not** Linux's `rt_sigframe` |
 | Stack alignment | SysV 16-byte at entry — matches |
 
-## 7. What a real ported application hits, in order
+### 8a. The clock — DIVERGES in precision, not in shape
 
-1. **auxv is missing** — musl's startup aborts before `main`. Nothing
-   runs until this exists.
-2. **No TLS / no `set_thread_area`** — any libc using `%fs` for errno or
-   thread state faults immediately.
-3. **No `stat` family** — the second or third call of almost any tool.
-4. **`struct dirent` layout** — anything listing a directory.
-5. **`O_CREAT` value** — silent failure to create files.
-6. **No `errno` variable** — every error check reads the wrong thing
-   (fixed by the musl shim, not the kernel).
-7. **No `clone`/`futex`** — no pthreads.
-8. **No `clock_gettime`/`nanosleep`** — no timing, no sleeping.
-9. **13-character filenames** — a FAT limit that reaches userland
-   through `dirent`; not a Linux-ABI issue as such, but a porting one.
+`clock_gettime` and `nanosleep` exist with Linux's argument order.
+NeoOS's only time source is the 100Hz LAPIC tick, so **resolution is
+10ms**. `CLOCK_REALTIME` is anchored to the CMOS RTC read once at boot;
+`CLOCK_MONOTONIC` and the CPU-time clocks count from boot. If the RTC
+cannot be read, `CLOCK_REALTIME` silently falls back to a boot epoch
+and formats as January 1970. `nanosleep` rounds up to a whole tick and
+ignores the remaining-time argument (nothing interrupts a sleep
+partway). `stat`'s timestamps are still 0 — nothing records file times.
 
-## 8. Phase 10's own additions
+### 8b. The terminal
 
-`sysconf(_SC_NPROCESSORS_ONLN/CONF)` and `sched_getcpu()`, both
-Linux-shaped, with divergences recorded in `docs/stdlib.md`: `CONF`
-always equals `ONLN` (no hotplug), no NUMA node is reported, and there
-is no `sched_setaffinity` to make the result stable.
+`/dev/CONSOLE` is a real line-discipline TTY: canonical mode with echo
+and line editing, `TCGETS`/`TCSETS`/`TCSETSW`/`TCSETSF`,
+`TIOCGWINSZ`/`TIOCSWINSZ`, `TIOCGPGRP`/`TIOCSPGRP`, and `SIGINT`/
+`SIGQUIT`/`SIGTSTP` generated from `c_cc`. `struct termios` is Linux's
+36-byte kernel layout. `isatty` on it returns 1; on a file, pipe or
+socket `ioctl` returns `-ENOTTY` as Linux does.
 
-## 9. Summary
+## 9. What a real ported application hits, in order
 
-The **error space is Linux-compatible** (errno values, signal numbers,
-`PROT_*`/`MAP_*`) and the **signal disposition structs match**. The
-**process startup contract and the file-metadata surface are the real
-work**: auxv, TLS, the `stat` family, and `struct dirent` stand between
-NeoOS and running an unmodified binary. Two are cheap and worth doing
-immediately — the `O_CREAT` value, and auxv.
+1. **`O_CREAT` value** — silent failure to create files. One constant,
+   called out since Phase 10.
+2. **No `errno` variable** — every error check reads the wrong thing.
+   Fixed by the musl shim, not the kernel.
+3. **No `clone`** — threads exist, but not through the call a libc
+   makes, so musl's pthreads cannot sit on them.
+4. **10ms clock resolution and no absolute timeouts** — why
+   `sem_timedwait` and `pthread_cond_timedwait` diverge into
+   relative-timeout spellings, and why `stat` times are all 0.
+5. **No `poll`/`select`** — anything waiting on more than one fd; the
+   most conspicuous gap after the socket work.
+6. **No `dup`/`dup2`, no `F_DUPFD`** — shell redirection.
+7. **No `getuid`/`uname`/`umask`/`chmod`/`rename`/`rmdir`/`ftruncate`**
+   — Tier 2 of `docs/porting-coreutils.md`: makes the tools honest
+   rather than merely running.
+8. **`exec` takes no argv** — `spawnv` (51) is a separate call with
+   different semantics; a real `execve(argv, envp)` is still owed.
+
+**Closed since Phase 10:** the `stat` family, `struct dirent`'s layout,
+the working directory, `writev`/`ioctl`/`clock_gettime`, TLS and the
+auxv, and — a FAT constraint rather than an ABI one — the 13-character
+filename limit, now VFAT long names.
+
+## 10. Summary
+
+The **process startup contract is now largely correct**: a program gets
+a real entry stack, a working auxiliary vector, and thread-local
+storage, which were the top two blockers at the close of Phase 10. The
+**synchronisation substrate is Linux-shaped** — futex, with everything
+POSIX built on it — so musl's pthreads will land on it without
+emulation. The **file-metadata surface** — the `stat` family, `struct
+dirent`, the working directory — is now in place, and a static musl
+binary runs. The **error space, signal numbers, `sockaddr_in`, the
+auxv, `struct stat`, `struct dirent` and `struct termios` all match**.
+
+What stands between NeoOS and an unmodified multi-threaded binary is now
+**`clone`** (musl's pthreads) and **`select`/`poll`**. The `O_CREAT`
+constant remains the cheapest outstanding fix. Field *values* in
+`struct stat` — timestamps especially — are the remaining semantic
+divergence, recorded in `docs/stdlib.md`.

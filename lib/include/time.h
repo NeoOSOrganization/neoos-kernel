@@ -14,9 +14,21 @@ struct timespec {
     int64_t tv_nsec;   // `long` on Linux x86_64, which is 64-bit there too
 };
 
-// Deliberately NO clock ids and no clock_gettime() yet. NeoOS has a
-// tick counter but exposes no clock syscall, and declaring CLOCK_*
-// constants for a call that does not exist invites code that compiles
-// and then fails at run time. They arrive with the clock milestone.
+// Linux's clock ids. Every one NeoOS accepts reads the SAME 100Hz tick
+// counter, so they differ in name only -- see docs/stdlib.md.
+#define CLOCK_REALTIME           0
+#define CLOCK_MONOTONIC          1
+#define CLOCK_PROCESS_CPUTIME_ID 2
+#define CLOCK_THREAD_CPUTIME_ID  3
+#define CLOCK_MONOTONIC_RAW      4
+
+// DIVERGENCE: the epoch is BOOT, not 1970. Differences between two
+// readings are correct; an absolute CLOCK_REALTIME formats as a date in
+// January 1970. Resolution is one 10ms tick.
+int clock_gettime(int clk, struct timespec *out);
+
+// Relative sleep, rounded up to a whole tick. `rem` is accepted and
+// ignored: nothing can interrupt a sleep partway yet.
+int nanosleep(const struct timespec *req, struct timespec *rem);
 
 #endif

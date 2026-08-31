@@ -9,10 +9,10 @@
 // receive path takes -- which the socket layer's send path is careful
 // about.
 
-#include "net.h"
-#include "../serial.h"
-#include "../errno.h"
-#include "../mm/heap.h"
+#include "net/net.h"
+#include "dev/serial.h"
+#include "errno.h"
+#include "mm/heap.h"
 
 // ---------------------------------------------------------------- checksum
 

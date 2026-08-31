@@ -1,10 +1,10 @@
-#include "vma.h"
-#include "pmm.h"
-#include "paging.h"
-#include "heap.h"
-#include "../sched/proc.h"
-#include "../errno.h"
-#include "../serial.h"
+#include "mm/vma.h"
+#include "mm/pmm.h"
+#include "mm/paging.h"
+#include "mm/heap.h"
+#include "sched/proc.h"
+#include "errno.h"
+#include "dev/serial.h"
 
 // kernel/mm reaching into kernel/sched for struct process matches what
 // kernel/fs/vfs.c already does; the alternative is threading four
@@ -137,23 +137,60 @@ static int vma_reserve_locked(struct process *p, uint64_t start, uint64_t len,
            ? 0 : -ENOMEM;
 }
 
+// Splits `v` at `at`, leaving `v` as [v->start, at) and inserting a new
+// vma [at, old_end) after it with the same prot and flags. Returns 0 on
+// allocation failure, in which case nothing has changed.
+static int vma_split_at(struct vma *v, uint64_t at) {
+    struct vma *tail = (struct vma *)kmalloc(sizeof(struct vma));
+    if (!tail) { return 0; }
+    tail->start = at;
+    tail->end   = v->end;
+    tail->prot  = v->prot;
+    tail->flags = v->flags;
+    tail->next  = v->next;
+    v->end  = at;
+    v->next = tail;
+    return 1;
+}
+
 static int vma_mprotect_locked(struct process *p, uint64_t addr, uint64_t len, uint32_t prot) {
     if (addr & 0xFFF) { return -EINVAL; }
+    if (len == 0) { return 0; }
     uint64_t start = addr, end = page_up(addr + len);
+    if (end <= start) { return -EINVAL; }
 
+    // A partial mprotect SPLITS the mapping it lands in.
+    //
+    // This used to return -EINVAL, on the reasoning that "musl only
+    // protects whole mappings". That is not true of musl's allocator:
+    // mallocng reserves a large region PROT_NONE and then mprotects
+    // PIECES of it read-write as it hands them out. Refusing the split
+    // made every malloc() fail with EINVAL -- which is what a real musl
+    // program hit first, before it could allocate a single byte.
     for (struct vma *v = p->vmas; v; v = v->next) {
         if (v->end <= start) { continue; }
         if (v->start >= end) { break; }
-        if (v->start < start || v->end > end) {
-            // Splitting for a partial mprotect is not needed by musl,
-            // which only protects whole mappings. Refusing is honest;
-            // silently protecting more than asked would not be.
-            return -EINVAL;
+
+        // Trim a leading piece that keeps its old protection.
+        if (v->start < start) {
+            if (!vma_split_at(v, start)) { return -ENOMEM; }
+            continue;   // the tail is now v->next; revisit it
         }
+        // Trim a trailing piece that keeps its old protection.
+        if (v->end > end) {
+            if (!vma_split_at(v, end)) { return -ENOMEM; }
+        }
+
         v->prot = prot;
-        // Already-populated pages keep their old PTE bits until they are
-        // faulted again. musl mprotects before touching, so this is
-        // sufficient -- and stated rather than assumed.
+
+        // Already-populated pages keep their old PTE bits until they
+        // are faulted again. A mapping being made MORE permissive is
+        // fine -- the next fault re-evaluates. A mapping being made
+        // LESS permissive must lose its pages now, or a stale writable
+        // PTE would outlive the mprotect that removed the right.
+        if (!(prot & PROT_WRITE)) {
+            unmap_range(p, v->start, v->end);
+        }
     }
     return 0;
 }

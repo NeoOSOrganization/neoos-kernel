@@ -1,8 +1,8 @@
-#include "heap.h"
-#include "pmm.h"
-#include "paging.h"
-#include "serial.h"
-#include "../lock.h"
+#include "mm/heap.h"
+#include "mm/pmm.h"
+#include "mm/paging.h"
+#include "dev/serial.h"
+#include "sync/lock.h"
 
 // One lock over the heap's free lists and page arrays. Takes pmm_lock
 // beneath it when it needs more pages -- HEAP (12) then PMM (13) is

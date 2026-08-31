@@ -2,19 +2,19 @@
 // thread exit. Split out of the former kernel/process.c; the code is
 // unchanged, only relocated.
 
-#include "sched.h"
-#include "thread_table.h"
-#include "../mm/pmm.h"
-#include "../mm/paging.h"
-#include "../mm/heap.h"
-#include "../tss.h"
-#include "../serial.h"
-#include "../fs/vfs.h"
-#include "../elf.h"
-#include "../cpu.h"
-#include "../cpu_local.h"
-#include "../waitq.h"
-#include "../errno.h"
+#include "sched/sched.h"
+#include "sched/thread_table.h"
+#include "mm/pmm.h"
+#include "mm/paging.h"
+#include "mm/heap.h"
+#include "arch/tss.h"
+#include "dev/serial.h"
+#include "fs/vfs.h"
+#include "elf.h"
+#include "arch/cpu.h"
+#include "arch/cpu_local.h"
+#include "sync/waitq.h"
+#include "errno.h"
 
 extern void context_switch(uint64_t *old_rsp, uint64_t *new_rsp);
 extern void kernel_thread_entry_trampoline(void);

@@ -104,7 +104,7 @@ static void list(const char *path) {
     printf("[vfstest] listing %s:\n", path);
     struct dirent *e;
     while ((e = readdir(d)) != 0) {
-        printf("[vfstest]   %s type=%d\n", e->name, e->type);
+        printf("[vfstest]   %s type=%d\n", e->d_name, e->d_type);
     }
     closedir(d);
 }

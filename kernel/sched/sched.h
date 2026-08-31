@@ -5,7 +5,7 @@
 // API the rest of the kernel uses lives in proc.h; nothing outside this
 // directory should include this header.
 
-#include "proc.h"
+#include "sched/proc.h"
 
 extern uint64_t p4_table[512]; // boot.asm's live PML4
 

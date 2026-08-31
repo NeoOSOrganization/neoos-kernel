@@ -2,7 +2,7 @@
 #define NEOOS_RCU_H
 
 #include <stdint.h>
-#include "../lock.h"
+#include "sync/lock.h"
 
 /*
  * Read-Copy-Update (RCU) synchronization

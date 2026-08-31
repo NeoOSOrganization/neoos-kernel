@@ -4,18 +4,18 @@
 #include <errno.h>
 
 // Buffering exists so a listing loop is not one syscall per entry. The
-// batch is small on purpose: a DIR sits in .bss, and there are only a
-// handful of entries in a FAT 8.3 directory anyway.
-#define DIRENT_BATCH   8
-#define MAX_OPEN_DIRS  4
+// buffer is a BYTE buffer now, not an array of fixed structs: getdents64
+// records are variable length, so how many fit depends on the names.
+#define DIRENT_BUF_SIZE 512
+#define MAX_OPEN_DIRS   4
 
 struct DIR {
-    int           in_use;
-    int           fd;
-    struct dirent buf[DIRENT_BATCH];
-    int           count;    // entries currently in buf
-    int           next;     // index of the next entry to hand out
-    int           at_end;   // the kernel has reported end of directory
+    int     in_use;
+    int     fd;
+    char    buf[DIRENT_BUF_SIZE] __attribute__((aligned(8)));
+    int     valid;    // bytes of buf the kernel filled
+    int     next;     // byte offset of the next record to hand out
+    int     at_end;   // the kernel has reported end of directory
 };
 
 static struct DIR dirs[MAX_OPEN_DIRS];
@@ -31,31 +31,37 @@ DIR *opendir(const char *path) {
     if (fd < 0) { return 0; }
 
     // Reject a regular file here rather than at the first readdir, so a
-    // successful opendir means the listing loop is safe to enter.
-    struct dirent probe;
-    int rc = getdents(fd, &probe, 1);
+    // successful opendir means the listing loop is safe to enter. The
+    // first batch is read eagerly for the same reason -- getdents on a
+    // non-directory is what returns -ENOTDIR.
+    int rc = getdents(fd, d->buf, DIRENT_BUF_SIZE);
     if (rc < 0) { close(fd); return 0; }
 
     d->in_use = 1;
     d->fd     = fd;
-    d->count  = rc;
+    d->valid  = rc;
     d->next   = 0;
     d->at_end = (rc == 0);
-    if (rc > 0) { d->buf[0] = probe; }
     return d;
 }
 
 struct dirent *readdir(DIR *d) {
     if (!d || !d->in_use) { return 0; }
-    if (d->next >= d->count) {
+
+    if (d->next >= d->valid) {
         if (d->at_end) { return 0; }
-        int rc = getdents(d->fd, d->buf, DIRENT_BATCH);
+        int rc = getdents(d->fd, d->buf, DIRENT_BUF_SIZE);
         if (rc <= 0) { d->at_end = 1; return 0; }
-        d->count = rc;
+        d->valid = rc;
         d->next  = 0;
-        if (rc < DIRENT_BATCH) { d->at_end = 1; }
     }
-    return &d->buf[d->next++];
+
+    // The record is handed back IN PLACE. d_reclen is what steps to the
+    // next one -- the whole reason the layout has that field, and why
+    // the caller must not hold the pointer across another readdir.
+    struct dirent *e = (struct dirent *)(d->buf + d->next);
+    d->next += e->d_reclen;
+    return e;
 }
 
 int closedir(DIR *d) {
@@ -63,7 +69,7 @@ int closedir(DIR *d) {
     int rc = close(d->fd);
     d->in_use = 0;
     d->fd     = -1;
-    d->count  = 0;
+    d->valid  = 0;
     d->next   = 0;
     d->at_end = 0;
     return rc;

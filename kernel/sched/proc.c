@@ -2,22 +2,22 @@
 // teardown and reaping. Split out of the former kernel/process.c; the
 // code is unchanged, only relocated.
 
-#include "sched.h"
-#include "proc_table.h"
-#include "thread_table.h"
-#include "fd_table.h"
-#include "../mm/pmm.h"
-#include "../mm/paging.h"
-#include "../mm/heap.h"
-#include "../tss.h"
-#include "../serial.h"
-#include "../fs/vfs.h"
-#include "../elf.h"
-#include "../cpu.h"
-#include "../cpu_local.h"
-#include "../waitq.h"
-#include "../errno.h"
-#include "../timer.h"
+#include "sched/sched.h"
+#include "sched/proc_table.h"
+#include "sched/thread_table.h"
+#include "sched/fd_table.h"
+#include "mm/pmm.h"
+#include "mm/paging.h"
+#include "mm/heap.h"
+#include "arch/tss.h"
+#include "dev/serial.h"
+#include "fs/vfs.h"
+#include "elf.h"
+#include "arch/cpu.h"
+#include "arch/cpu_local.h"
+#include "sync/waitq.h"
+#include "errno.h"
+#include "dev/timer.h"
 
 extern void context_switch(uint64_t *old_rsp, uint64_t *new_rsp);
 extern void kernel_thread_entry_trampoline(void);
@@ -32,6 +32,15 @@ struct spinlock proc_lock;
 // Allocate a new PID (uses new proc_table allocator)
 int alloc_id(void) {
     return proc_table_alloc_pid();
+}
+
+// A cwd is a fixed-size, always-NUL-terminated buffer, and the only
+// string this file copies. vfs.c's str_copy is static to that file and
+// not worth exporting for one caller.
+static void cwd_copy(char *dst, const char *src) {
+    uint64_t i = 0;
+    for (; i < VFS_MAX_PATH - 1 && src[i]; i++) { dst[i] = src[i]; }
+    dst[i] = '\0';
 }
 
 static struct process *proc_alloc(void) {
@@ -53,6 +62,12 @@ static struct process *proc_alloc(void) {
 
     p->pid   = alloc_id();  // Uses new proc_table_alloc_pid()
     p->state = PROC_ALIVE;
+    // Set HERE, not at each creation site, so that "every process has a
+    // cwd" is a property of the allocator rather than a rule each new
+    // caller has to remember. fork and spawn overwrite it with the
+    // parent's immediately below; anything else inherits the root.
+    p->cwd[0] = '/';
+    p->cwd[1] = '\0';
     p->vmas      = 0;
     p->mmap_next = MMAP_BASE;
     spin_init(&p->mm_lock, LOCK_RANK_MM, "mm");
@@ -343,6 +358,10 @@ struct process *spawn_argv(const char *path, const struct spawn_args *args) {
     }
     p->pml4_phys   = pml4_phys;
     p->elf          = info;   // the auxv and every thread's TLS come from here
+    // A spawn from a running process inherits its cwd, as a fork does.
+    // The FIRST process has no caller and keeps proc_alloc's "/".
+    struct process *spawner = current_proc();
+    if (spawner) { cwd_copy(p->cwd, spawner->cwd); }
     p->parent_pid  = current_proc() ? current_proc()->pid : 0;
     if (current_proc()) { p->pgid = current_proc()->pgid; p->sid = current_proc()->sid; }
 
@@ -541,6 +560,7 @@ struct thread *fork_task(struct syscall_frame *frame) {
         serial_write_string("[process] fork FAILED: out of memory for process\n");
         return 0;
     }
+    cwd_copy(child_proc->cwd, parent->cwd);
 
     uint64_t child_pml4_phys = paging_alloc_pml4();
     uint64_t *child_pml4 = (uint64_t *)phys_to_virt(child_pml4_phys);

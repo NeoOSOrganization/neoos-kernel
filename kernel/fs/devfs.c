@@ -1,7 +1,8 @@
-#include "devfs.h"
-#include "../errno.h"
-#include "../serial.h"
-#include "../vga.h"
+#include "fs/devfs.h"
+#include "errno.h"
+#include "dev/serial.h"
+#include "dev/vga.h"
+#include "dev/tty.h"
 
 // Static device table. inode_id is the index into it; id 0 is the root
 // directory, so real devices start at 1.
@@ -12,20 +13,15 @@ struct devfs_node {
     int64_t (*write)(const void *buf, uint32_t len);
 };
 
+// The console IS the terminal now: both ends go through the line
+// discipline, so a read blocks for a line, ^C signals the foreground
+// group, and writes get ONLCR.
 static int64_t console_read(void *buf, uint32_t len) {
-    (void)buf; (void)len;
-    return 0; // no keyboard-to-process input path yet; always EOF
+    return tty_read(buf, len);
 }
 
 static int64_t console_write(const void *buf, uint32_t len) {
-    const char *s = (const char *)buf;
-    // One locked serial call for the whole write, so a userland
-    // printf() cannot be split down the middle by a kernel message.
-    serial_write_string_n(s, len);
-    for (uint32_t i = 0; i < len; i++) {
-        vga_putc(s[i]);
-    }
-    return (int64_t)len;
+    return tty_write(buf, len);
 }
 
 static int64_t null_read(void *buf, uint32_t len) { (void)buf; (void)len; return 0; }
@@ -40,6 +36,7 @@ static int64_t zero_read(void *buf, uint32_t len) {
 static const struct devfs_node devices[] = {
     { "/",       VNODE_DIR,    0,            0             },
     { "CONSOLE", VNODE_DEVICE, console_read, console_write },
+    { "TTY",     VNODE_DEVICE, console_read, console_write },
     { "NULL",    VNODE_DEVICE, null_read,    null_write    },
     { "ZERO",    VNODE_DEVICE, zero_read,    null_write    },
 };
@@ -105,7 +102,7 @@ static int devfs_unlink(struct vnode *dir, const char *name) {
 }
 static int devfs_truncate(struct vnode *vn) { (void)vn; return -EPERM; }
 
-static int devfs_readdir(struct vnode *dir, uint32_t index, struct dirent *out) {
+static int devfs_readdir(struct vnode *dir, uint32_t index, struct vfs_dirent *out) {
     (void)dir;
     uint64_t id = index + 1; // skip the root entry at index 0
     if (id >= DEVFS_COUNT) { return -ENOENT; }
@@ -113,6 +110,7 @@ static int devfs_readdir(struct vnode *dir, uint32_t index, struct dirent *out) 
     while (devices[id].name[i] && i < VFS_NAME_MAX - 1) { out->name[i] = devices[id].name[i]; i++; }
     out->name[i] = '\0';
     out->type = DT_CHR;
+    out->ino  = id;
     return 0;
 }
 
@@ -130,3 +128,12 @@ const struct vfs_ops devfs_ops = {
     .truncate   = devfs_truncate,
     .readdir    = devfs_readdir,
 };
+
+// CONSOLE and TTY are the same underlying terminal; NULL and ZERO are
+// not terminals and must report -ENOTTY, or isatty() would claim a
+// redirect to /dev/null was a tty.
+int devfs_vnode_is_tty(struct vnode *vn) {
+    if (!vn || vn->type != VNODE_DEVICE) { return 0; }
+    return name_eq(devices[vn->inode_id].name, "CONSOLE") ||
+           name_eq(devices[vn->inode_id].name, "TTY");
+}

@@ -2,8 +2,8 @@
 #define NEOOS_FATFS_H
 
 #include <stdint.h>
-#include "../errno.h"
-#include "vfs.h"
+#include "errno.h"
+#include "fs/vfs.h"
 
 // FAT inode identity is the file's directory-entry location on disk,
 // (dir_entry_lba << 16) | dir_entry_offset -- unique per file per

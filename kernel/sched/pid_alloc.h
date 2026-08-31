@@ -2,7 +2,7 @@
 #define NEOOS_PID_ALLOC_H
 
 #include <stdint.h>
-#include "../lock.h"
+#include "sync/lock.h"
 
 /*
  * Process ID allocator using radix tree (IDR)

@@ -2,9 +2,9 @@
 #define NEOOS_PROC_TABLE_H
 
 #include <stdint.h>
-#include "../lock.h"
-#include "../sync/rcu.h"
-#include "pid_alloc.h"
+#include "sync/lock.h"
+#include "sync/rcu.h"
+#include "sched/pid_alloc.h"
 
 /*
  * Process hash table with per-bucket locking and RCU protection

@@ -1,0 +1,234 @@
+// NeoOS's musl syscall shim.
+//
+// TRANSLATION, NEVER EMULATION (see /CLAUDE.md). Everything here does
+// one of exactly two things:
+//
+//   1. maps a Linux syscall number onto NeoOS's own number, or
+//   2. reshapes the ARGUMENTS of a call whose NeoOS form differs.
+//
+// It never implements a primitive musl asked for. If a call cannot be
+// forwarded, it returns -ENOSYS and the primitive belongs in the
+// kernel instead.
+//
+// The one systematic reshaping is paths. Linux passes a NUL-terminated
+// `const char *`; NeoOS's path syscalls take a (pointer, length) PAIR,
+// so the shim measures the string and shifts the remaining arguments
+// along. That is argument translation, not emulation -- the kernel
+// still does the work, and nothing is faked.
+
+#include <errno.h>
+
+// ---- NeoOS's own numbers (kernel/syscall/syscall_nr.h) --------------
+#define NEO_EXIT             0
+#define NEO_WRITE            1
+#define NEO_YIELD            2
+#define NEO_GETPID           3
+#define NEO_READ             6
+#define NEO_OPEN             7
+#define NEO_CLOSE            8
+#define NEO_MKDIR            9
+#define NEO_UNLINK          10
+#define NEO_LSEEK           11
+#define NEO_FORK            12
+#define NEO_GETDENTS        16
+#define NEO_RT_SIGACTION    21
+#define NEO_RT_SIGPROCMASK  22
+#define NEO_RT_SIGRETURN    23
+#define NEO_RT_SIGPENDING   24
+#define NEO_RT_SIGSUSPEND   25
+#define NEO_SIGALTSTACK     28
+#define NEO_KILL            29
+#define NEO_TKILL           30
+#define NEO_TGKILL          31
+#define NEO_WAIT4           32
+#define NEO_SETPGID         33
+#define NEO_GETPGID         34
+#define NEO_SETSID          35
+#define NEO_GETSID          36
+#define NEO_MMAP            37
+#define NEO_MUNMAP          38
+#define NEO_MPROTECT        39
+#define NEO_FUTEX           42
+#define NEO_PIPE2           43
+#define NEO_ARCH_PRCTL      44
+#define NEO_SOCKET          45
+#define NEO_BIND            46
+#define NEO_CONNECT         47
+#define NEO_SENDTO          48
+#define NEO_RECVFROM        49
+#define NEO_GETSOCKNAME     50
+#define NEO_FCNTL           52
+#define NEO_CHDIR           53
+#define NEO_GETCWD          54
+#define NEO_STAT            55
+#define NEO_LSTAT           56
+#define NEO_FSTAT           57
+#define NEO_NEWFSTATAT      58
+#define NEO_SET_TID_ADDRESS 59
+#define NEO_EXIT_GROUP      60
+#define NEO_WRITEV          61
+#define NEO_READV           62
+#define NEO_IOCTL           63
+#define NEO_CLOCK_GETTIME   64
+#define NEO_NANOSLEEP       65
+
+// ---- Linux x86-64 numbers, as musl issues them ----------------------
+#define LX_READ              0
+#define LX_WRITE             1
+#define LX_OPEN              2
+#define LX_CLOSE             3
+#define LX_STAT              4
+#define LX_FSTAT             5
+#define LX_LSTAT             6
+#define LX_LSEEK             8
+#define LX_MMAP              9
+#define LX_MPROTECT         10
+#define LX_MUNMAP           11
+#define LX_RT_SIGACTION     13
+#define LX_RT_SIGPROCMASK   14
+#define LX_RT_SIGRETURN     15
+#define LX_IOCTL            16
+#define LX_READV            19
+#define LX_WRITEV           20
+#define LX_PIPE             22
+#define LX_SCHED_YIELD      24
+#define LX_NANOSLEEP        35
+#define LX_GETPID           39
+#define LX_SOCKET           41
+#define LX_CONNECT          42
+#define LX_SENDTO           44
+#define LX_RECVFROM         45
+#define LX_BIND             49
+#define LX_GETSOCKNAME      51
+#define LX_FORK             57
+#define LX_EXIT             60
+#define LX_WAIT4            61
+#define LX_KILL             62
+#define LX_FCNTL            72
+#define LX_GETCWD           79
+#define LX_CHDIR            80
+#define LX_MKDIR            83
+#define LX_UNLINK           87
+#define LX_GETDENTS64      217
+#define LX_SETPGID         109
+#define LX_GETPGID         121
+#define LX_SETSID          112
+#define LX_GETSID          124
+#define LX_SIGALTSTACK     131
+#define LX_ARCH_PRCTL      158
+#define LX_TKILL           200
+#define LX_FUTEX           202
+#define LX_SET_TID_ADDRESS 218
+#define LX_CLOCK_GETTIME   228
+#define LX_EXIT_GROUP      231
+#define LX_TGKILL          234
+#define LX_NEWFSTATAT      262
+#define LX_PIPE2           293
+#define LX_RT_SIGPENDING   127
+#define LX_RT_SIGSUSPEND   130
+
+static long neo_strlen(const char *s) {
+    long n = 0;
+    if (!s) { return 0; }
+    while (s[n]) { n++; }
+    return n;
+}
+
+// The raw NeoOS syscall. Six argument slots, matching what
+// syscall_entry.asm reads.
+static long neo(long n, long a, long b, long c, long d, long e, long f) {
+    unsigned long ret;
+    register long r10 __asm__("r10") = d;
+    register long r8  __asm__("r8")  = e;
+    register long r9  __asm__("r9")  = f;
+    __asm__ __volatile__ ("syscall"
+        : "=a"(ret)
+        : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8), "r"(r9)
+        : "rcx", "r11", "memory");
+    return (long)ret;
+}
+
+long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6)
+{
+    switch (n) {
+
+    // ---- straight renumbering, arguments unchanged ------------------
+    case LX_READ:            return neo(NEO_READ, a1, a2, a3, 0, 0, 0);
+    case LX_WRITE:           return neo(NEO_WRITE, a1, a2, a3, 0, 0, 0);
+    case LX_CLOSE:           return neo(NEO_CLOSE, a1, 0, 0, 0, 0, 0);
+    case LX_LSEEK:           return neo(NEO_LSEEK, a1, a2, a3, 0, 0, 0);
+    case LX_FSTAT:           return neo(NEO_FSTAT, a1, a2, 0, 0, 0, 0);
+    case LX_MMAP:            return neo(NEO_MMAP, a1, a2, a3, a4, a5, a6);
+    case LX_MPROTECT:        return neo(NEO_MPROTECT, a1, a2, a3, 0, 0, 0);
+    case LX_MUNMAP:          return neo(NEO_MUNMAP, a1, a2, 0, 0, 0, 0);
+    case LX_IOCTL:           return neo(NEO_IOCTL, a1, a2, a3, 0, 0, 0);
+    case LX_READV:           return neo(NEO_READV, a1, a2, a3, 0, 0, 0);
+    case LX_WRITEV:          return neo(NEO_WRITEV, a1, a2, a3, 0, 0, 0);
+    case LX_SCHED_YIELD:     return neo(NEO_YIELD, 0, 0, 0, 0, 0, 0);
+    case LX_GETPID:          return neo(NEO_GETPID, 0, 0, 0, 0, 0, 0);
+    case LX_FORK:            return neo(NEO_FORK, 0, 0, 0, 0, 0, 0);
+    case LX_EXIT:            return neo(NEO_EXIT, a1, 0, 0, 0, 0, 0);
+    case LX_EXIT_GROUP:      return neo(NEO_EXIT_GROUP, a1, 0, 0, 0, 0, 0);
+    case LX_WAIT4:           return neo(NEO_WAIT4, a1, a2, a3, a4, 0, 0);
+    case LX_KILL:            return neo(NEO_KILL, a1, a2, 0, 0, 0, 0);
+    case LX_TKILL:           return neo(NEO_TKILL, a1, a2, 0, 0, 0, 0);
+    case LX_TGKILL:          return neo(NEO_TGKILL, a1, a2, a3, 0, 0, 0);
+    case LX_FCNTL:           return neo(NEO_FCNTL, a1, a2, a3, 0, 0, 0);
+    case LX_GETCWD:          return neo(NEO_GETCWD, a1, a2, 0, 0, 0, 0);
+    case LX_GETDENTS64:      return neo(NEO_GETDENTS, a1, a2, a3, 0, 0, 0);
+    case LX_SETPGID:         return neo(NEO_SETPGID, a1, a2, 0, 0, 0, 0);
+    case LX_GETPGID:         return neo(NEO_GETPGID, a1, 0, 0, 0, 0, 0);
+    case LX_SETSID:          return neo(NEO_SETSID, 0, 0, 0, 0, 0, 0);
+    case LX_GETSID:          return neo(NEO_GETSID, a1, 0, 0, 0, 0, 0);
+    case LX_ARCH_PRCTL:      return neo(NEO_ARCH_PRCTL, a1, a2, 0, 0, 0, 0);
+    case LX_FUTEX:           return neo(NEO_FUTEX, a1, a2, a3, a4, 0, 0);
+    case LX_SET_TID_ADDRESS: return neo(NEO_SET_TID_ADDRESS, a1, 0, 0, 0, 0, 0);
+    case LX_CLOCK_GETTIME:   return neo(NEO_CLOCK_GETTIME, a1, a2, 0, 0, 0, 0);
+    case LX_NANOSLEEP:       return neo(NEO_NANOSLEEP, a1, a2, 0, 0, 0, 0);
+    case LX_RT_SIGACTION:    return neo(NEO_RT_SIGACTION, a1, a2, a3, a4, 0, 0);
+    case LX_RT_SIGPROCMASK:  return neo(NEO_RT_SIGPROCMASK, a1, a2, a3, a4, 0, 0);
+    case LX_RT_SIGRETURN:    return neo(NEO_RT_SIGRETURN, 0, 0, 0, 0, 0, 0);
+    case LX_RT_SIGPENDING:   return neo(NEO_RT_SIGPENDING, a1, a2, 0, 0, 0, 0);
+    case LX_RT_SIGSUSPEND:   return neo(NEO_RT_SIGSUSPEND, a1, a2, 0, 0, 0, 0);
+    case LX_SIGALTSTACK:     return neo(NEO_SIGALTSTACK, a1, a2, 0, 0, 0, 0);
+    case LX_SOCKET:          return neo(NEO_SOCKET, a1, a2, a3, 0, 0, 0);
+    case LX_BIND:            return neo(NEO_BIND, a1, a2, a3, 0, 0, 0);
+    case LX_CONNECT:         return neo(NEO_CONNECT, a1, a2, a3, 0, 0, 0);
+    case LX_SENDTO:          return neo(NEO_SENDTO, a1, a2, a3, a4, a5, a6);
+    case LX_RECVFROM:        return neo(NEO_RECVFROM, a1, a2, a3, a4, a5, a6);
+    case LX_GETSOCKNAME:     return neo(NEO_GETSOCKNAME, a1, a2, a3, 0, 0, 0);
+
+    // ---- argument RESHAPING: Linux's char* becomes NeoOS's ptr+len --
+    //
+    // The mode argument of open and mkdir is DROPPED, not forwarded:
+    // NeoOS has no permission bits to store it in, and stat synthesizes
+    // what it reports. Passing it to a kernel that ignores it would be
+    // the same result with a misleading signature.
+    case LX_OPEN:
+        return neo(NEO_OPEN, a1, neo_strlen((const char *)a1), a2, 0, 0, 0);
+    case LX_STAT:
+        return neo(NEO_STAT, a1, neo_strlen((const char *)a1), a2, 0, 0, 0);
+    case LX_LSTAT:
+        return neo(NEO_LSTAT, a1, neo_strlen((const char *)a1), a2, 0, 0, 0);
+    case LX_MKDIR:
+        return neo(NEO_MKDIR, a1, neo_strlen((const char *)a1), 0, 0, 0, 0);
+    case LX_UNLINK:
+        return neo(NEO_UNLINK, a1, neo_strlen((const char *)a1), 0, 0, 0, 0);
+    case LX_CHDIR:
+        return neo(NEO_CHDIR, a1, neo_strlen((const char *)a1), 0, 0, 0, 0);
+    case LX_NEWFSTATAT:
+        // (dirfd, path, buf, flags) -> (dirfd, ptr, len, buf, flags)
+        return neo(NEO_NEWFSTATAT, a1, a2, neo_strlen((const char *)a2), a3, a4, 0);
+
+    // pipe(fds) is pipe2(fds, 0). Supplying the flags word is argument
+    // translation; NeoOS deliberately has only the two-argument form,
+    // exactly as Linux does on newer architectures.
+    case LX_PIPE:            return neo(NEO_PIPE2, a1, 0, 0, 0, 0, 0);
+    case LX_PIPE2:           return neo(NEO_PIPE2, a1, a2, 0, 0, 0, 0);
+
+    default:
+        // Not forwarded. This is the signal that a primitive belongs in
+        // the kernel -- NOT an invitation to implement it here.
+        return -ENOSYS;
+    }
+}
