@@ -68,6 +68,15 @@ int paging_map(uint64_t virt, uint64_t phys, uint64_t flags) {
     return paging_map_into(p4_table, virt, phys, flags);
 }
 
+int paging_map_range(uint64_t virt, uint64_t phys, uint64_t len, uint64_t flags) {
+    uint64_t pages = (len + 0xFFF) >> 12;
+    for (uint64_t i = 0; i < pages; i++) {
+        int rc = paging_map_into(p4_table, virt + i * 4096, phys + i * 4096, flags);
+        if (rc != 0) { return rc; }
+    }
+    return 0;
+}
+
 void paging_unmap(uint64_t virt) {
     uint64_t *pdpt = table_entry(p4_table, PML4_INDEX(virt), 0, 0);
     uint64_t *pd   = pdpt ? table_entry(pdpt, PDPT_INDEX(virt), 0, 0) : 0;

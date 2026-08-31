@@ -1,5 +1,8 @@
 #include "kernel.h"
 #include "dev/vga.h"
+#include "dev/fb.h"
+#include "dev/fbcon.h"
+#include "dev/console.h"
 #include "dev/serial.h"
 #include "arch/tss.h"
 #include "arch/gdt.h"
@@ -61,6 +64,10 @@ void kmain(void *multiboot_info) {
     serial_write_hex64((uint64_t)(uintptr_t)kmain);
     serial_write_string("\n");
 
+    // Parse the framebuffer tag now (identity-mapped MBI, no allocation);
+    // the mapping waits for pmm + the physmap in paging_init below.
+    fb_init(multiboot_info);
+
     // BEFORE pmm_init: every rank-checked spinlock calls this_cpu(),
     // which reads gs:0. Until cpu_local_init() installs a GS base that
     // read returns 0 and the lock dereferences physical address 0. pmm
@@ -87,8 +94,14 @@ void kmain(void *multiboot_info) {
     paging_init();
     paging_selftest();
 
-    vga_clear();
-    vga_print_string("NeoOS booted");
+    // Framebuffer console up as early as possible: from here on a panic
+    // renders through fbcon (fb.virt lives in the physmap, so it works
+    // from any address space).
+    fb_map();
+    fbcon_init();
+    fbcon_selftest();
+    console_clear();
+    console_write("NeoOS booted\n", 13);
 
     idt_init();
     serial_write_string("[idt] loaded\n");

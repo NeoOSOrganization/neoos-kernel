@@ -1,6 +1,6 @@
 #include "arch/isr.h"
 #include "dev/serial.h"
-#include "dev/vga.h"
+#include "dev/console.h"
 #include "dev/timer.h"
 #include "smp/smp.h"
 #include "smp/tlb.h"
@@ -48,7 +48,7 @@ static void exception_dump_and_halt(struct registers *regs) {
     }
     serial_write_string("\n");
 
-    vga_print_string("EXCEPTION - HALTED");
+    console_write("EXCEPTION - HALTED\n", 18);
 
     __asm__ volatile ("cli");
     for (;;) {
@@ -61,7 +61,7 @@ static void unhandled_interrupt(uint64_t vector) {
     serial_write_hex64(vector);
     serial_write_string("\n");
 
-    vga_print_string("UNHANDLED IRQ - HALTED");
+    console_write("UNHANDLED IRQ - HALTED\n", 22);
 
     __asm__ volatile ("cli");
     for (;;) {

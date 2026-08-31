@@ -11,7 +11,23 @@ header_start:
     dd MULTIBOOT2_ARCH
     dd MULTIBOOT2_LEN
     dd MULTIBOOT2_CHECKSUM
+
+    ; --- framebuffer request (type 5) ---
+    ; GRUB gives us a linear RGB mode instead of leaving VGA text mode.
+    ; The width/height/depth are hints; GRUB substitutes the closest
+    ; mode it can set. fb.c parses the resulting framebuffer info tag.
+    align 8
+fb_tag_start:
+    dw 5            ; MULTIBOOT_HEADER_TAG_FRAMEBUFFER
+    dw 0            ; flags (0 = required; GRUB still substitutes)
+    dd fb_tag_end - fb_tag_start
+    dd 1280        ; width  hint
+    dd 800         ; height hint
+    dd 32          ; depth  hint
+fb_tag_end:
+
     ; required end tag
+    align 8
     dw 0    ; type
     dw 0    ; flags
     dd 8    ; size

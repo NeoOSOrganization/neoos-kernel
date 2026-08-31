@@ -367,6 +367,8 @@ REQUIRED_MARKERS := \
 	"[evtest] ALL PASSED" \
 	"[tty] selftest passed" \
 	"[wxorx] kernel selftest passed" \
+	"[fb] framebuffer" \
+	"[fbcon] selftest passed" \
 	"[rtc] selftest passed" \
 	"[keyboard] decode selftest passed" \
 	"[input] selftest passed"

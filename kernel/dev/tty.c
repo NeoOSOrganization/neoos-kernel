@@ -1,6 +1,6 @@
 #include "dev/tty.h"
 #include "dev/serial.h"
-#include "dev/vga.h"
+#include "dev/console.h"
 #include "fs/file.h"
 #include "sync/waitq.h"
 #include "sync/lock.h"
@@ -99,7 +99,7 @@ void tty_init(void) {
 // serial_write_string_n inserts the CR before a LF itself.
 static void tty_emit(char c) {
     serial_write_string_n(&c, 1);
-    vga_putc(c);
+    console_putc(c);
 }
 
 int64_t tty_write(const void *buf, uint32_t len) {
@@ -117,7 +117,7 @@ int64_t tty_write(const void *buf, uint32_t len) {
     } else {
         serial_write_raw_n(s, len);
     }
-    for (uint32_t i = 0; i < len; i++) { vga_putc(s[i]); }
+    for (uint32_t i = 0; i < len; i++) { console_putc(s[i]); }
     return (int64_t)len;
 }
 

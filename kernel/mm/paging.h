@@ -26,6 +26,11 @@
 // invalid by construction, so range checks can reject it cheaply.
 #define USER_ADDR_LIMIT  0x0000800000000000ULL
 
+// Higher-half window for an explicitly mapped framebuffer (PML4[384]).
+// Only used when the framebuffer physical range does not fit under the
+// 4 GiB physmap -- see dev/fb.c:fb_map().
+#define FB_VIRT_BASE     0xFFFFC00000000000ULL
+
 // Converts a physical address to its always-valid virtual alias in the
 // direct physmap (see paging_init). Valid for any address within the
 // first 4GiB (the physmap's coverage -- see Global Constraints).
@@ -75,6 +80,11 @@ uint64_t paging_alloc_pml4(void);
 // of the kernel's own live p4_table -- used by spawn() to build a new
 // process's address space before it's ever loaded into CR3.
 int paging_map_into(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags);
+
+// Map [phys, phys+len) at [virt, virt+len) in the kernel PML4, 4 KiB at
+// a time. len is rounded up to a page. Returns 0, or <0 on the first
+// allocation failure (partial mapping left in place -- caller's problem).
+int paging_map_range(uint64_t virt, uint64_t phys, uint64_t len, uint64_t flags);
 
 // Clears one PTE in an arbitrary address space, freeing the frame when
 // `free_frame` is set. Returns 1 if a mapping was removed, 0 if the
