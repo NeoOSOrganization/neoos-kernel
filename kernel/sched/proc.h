@@ -62,11 +62,12 @@ struct fd_table;      // opaque; defined in fd_table.h
 
 struct process {
     int pid, parent_pid;
-    // One reference per LIVE thread. When it reaches zero the address
-    // space is freed and the process becomes a zombie carrying only
-    // its exit code; the struct itself outlives the address space and
-    // is freed by wait_for_pid's reap.
-    uint32_t refcount;
+    // One count per LIVE thread. When it reaches zero the address space
+    // is freed and the process becomes a zombie carrying only its exit
+    // code (see proc_put). This is a liveness count, NOT a reference
+    // count -- the struct itself outlives the address space and is
+    // freed by wait_for_pid's reap.
+    uint32_t live_threads;
     uint64_t pml4_phys;             // 0 = shares the kernel address space
     // What the ELF loader learned about the image: where its program
     // headers landed, and its PT_TLS template. Kept for the whole life
@@ -104,7 +105,10 @@ struct process {
     // per-thread as well as here. POSIX's model, and the one musl
     // expects.
     struct k_sigaction actions[NSIG];
-    struct spinlock    sig_lock;
+    // The per-process lock. Guards the signal dispositions, `pending`,
+    // `queued` and the stop state below, AND thread membership
+    // (`threads`, `zombies`, `live_threads`). Rank LOCK_RANK_PROCESS.
+    struct spinlock    lock;
     sigset_t_k         pending;         // process-directed: kill()
     struct sigqueue   *queued;          // RT payloads, process-directed
     int                pgid, sid;
@@ -163,7 +167,7 @@ struct thread {
     struct sigqueue *queued;
     sigset_t_k    saved_blocked;    // sigsuspend / sigreturn
     int           in_sigsuspend;
-    // Set under p->sig_lock the moment this thread takes a stop signal
+    // Set under p->lock the moment this thread takes a stop signal
     // out of its pending set, cleared under the same lock by SIGCONT
     // and by the stop itself. It is what lets a SIGCONT cancel a stop
     // that has been decided but not yet committed -- see signal_do_stop.

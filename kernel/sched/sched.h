@@ -29,8 +29,11 @@ void sched_post_switch(void);
 
 // Kernel threads park here on exit; the idle thread reclaims them,
 // since they have no parent to reap them and cannot free the stack
-// they are running on.
-extern struct thread *kzombies;
+// they are running on. Guarded by kzombies_lock (rank
+// LOCK_RANK_PROCTABLE) -- thread_exit_self's kernel-thread branch and
+// idle_entry's drain hold nothing else when they touch the list.
+extern struct thread   *kzombies;
+extern struct spinlock  kzombies_lock;
 
 // thread.c
 struct thread *thread_alloc(struct process *p);

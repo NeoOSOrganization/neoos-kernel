@@ -104,6 +104,7 @@ void process_init(void) {
 
     // DEPRECATED: Keep old proc_list for transition
     spin_init(&proc_lock, LOCK_RANK_PROCTABLE, "proc_list");
+    spin_init(&kzombies_lock, LOCK_RANK_PROCTABLE, "kzombies");
 
     signal_queue_init();
     proc_list  = 0;
@@ -667,7 +668,7 @@ int signal_kill(int pid, int sig, struct siginfo *info) {
 
     int target_pgid = (pid == 0) ? current_proc()->pgid : -pid;
     int found = 0, rc = 0;
-    // proc_lock (rank PROCTABLE=0) is held across sig_lock
+    // proc_lock (rank PROCTABLE=0) is held across p->lock
     // (rank PROCESS=1). Ascending, so legal -- never reverse it.
     uint64_t f = spin_lock_irqsave(&proc_lock);
     for (struct process *p = proc_list; p; p = p->next) {
@@ -688,6 +689,10 @@ int signal_tkill(int tgid, int tid, int sig, struct siginfo *info) {
     uint64_t f = spin_lock_irqsave(&proc_lock);
     for (struct process *p = proc_list; p; p = p->next) {
         if (tgid > 0 && p->pid != tgid) { continue; }
+        // FIXME(Task 4): this walks p->threads under proc_lock, not
+        // p->lock -- under-locked now that thread membership moved to
+        // p->lock. The signal-send rework restructures this to find the
+        // target and deliver under one p->lock hold.
         for (struct thread *t = p->threads; t; t = t->proc_next) {
             if (t->tid != tid) { continue; }
             spin_unlock_irqrestore(&proc_lock, f);
@@ -698,14 +703,14 @@ int signal_tkill(int tgid, int tid, int sig, struct siginfo *info) {
     return -ESRCH;
 }
 
-void proc_get(struct process *p) { p->refcount++; }
+void proc_get(struct process *p) { p->live_threads++; }
 
-// Drops one live-thread reference. On the last one, frees the address
+// Drops one live-thread count. On the last one, frees the address
 // space and the file descriptors, and turns the process into a zombie
 // carrying only its exit code -- the struct itself outlives its
 // address space and is freed by wait_for_pid's reap.
 void proc_put(struct process *p) {
-    if (--p->refcount > 0) { return; }
+    if (--p->live_threads > 0) { return; }
 
     if (p->pml4_phys) {
         // Leave the dying address space BEFORE freeing it. A freed frame
@@ -771,22 +776,22 @@ void process_exit(int code) {
 
         // Every sibling dies too. The LAST thread to actually leave --
         // which may be a killed sibling rather than this one -- drops
-        // the refcount to zero and frees the address space.
+        // live_threads to zero and frees the address space.
         //
-        // Snapshot the sibling pointers under proc_lock -- the list
+        // Snapshot the sibling pointers under p->lock -- the list
         // mutates on other CPUs as threads exit -- then deliver SIGKILL
         // with the lock released: thread_kill -> signal_send_thread can
         // reach thread_wait_off_cpu(), which spins on a sibling that may
-        // itself be blocked on proc_lock in thread_exit_self.
+        // itself be blocked on p->lock in thread_exit_self.
         // MAX_THREADS_PER_PROC bounds the snapshot.
         struct thread *victims[MAX_THREADS_PER_PROC];
         int nv = 0;
-        uint64_t sf = spin_lock_irqsave(&proc_lock);
+        uint64_t sf = spin_lock_irqsave(&p->lock);
         for (struct thread *t = p->threads;
              t && nv < MAX_THREADS_PER_PROC; t = t->proc_next) {
             if (t != self) { victims[nv++] = t; }
         }
-        spin_unlock_irqrestore(&proc_lock, sf);
+        spin_unlock_irqrestore(&p->lock, sf);
         for (int i = 0; i < nv; i++) { thread_kill(victims[i]); }
     }
 
@@ -803,13 +808,13 @@ static int encode_status(struct process *p) {
 // Frees a zombie's threads and struct. Safe only once nothing is
 // running on any of them.
 static void proc_reap(struct process *p) {
-    // Detach the whole zombie list under proc_lock, then walk it with
-    // the lock released -- thread_wait_off_cpu() spins on another CPU.
-    // Callers (wait4, wait_for_pid) do not hold proc_lock.
-    uint64_t zf = spin_lock_irqsave(&proc_lock);
+    // Detach the whole zombie list under p->lock, then walk it with the
+    // lock released -- thread_wait_off_cpu() spins on another CPU.
+    // Callers (wait4, wait_for_pid) do not hold p->lock.
+    uint64_t zf = spin_lock_irqsave(&p->lock);
     struct thread *z = p->zombies;
     p->zombies = 0;
-    spin_unlock_irqrestore(&proc_lock, zf);
+    spin_unlock_irqrestore(&p->lock, zf);
     while (z) {
         struct thread *next = z->proc_next;
         // thread_exit_self parks a thread on p->zombies before it

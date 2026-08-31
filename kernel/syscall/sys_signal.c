@@ -32,13 +32,13 @@ int64_t sys_rt_sigaction(struct syscall_args *a) {
     if (act && (sig == SIGKILL || sig == SIGSTOP)) { return -EINVAL; }
 
     struct process *p = current_proc();
-    uint64_t fl = spin_lock_irqsave(&p->sig_lock);
+    uint64_t fl = spin_lock_irqsave(&p->lock);
     if (old) { *old = p->actions[sig]; }
     if (act) {
         p->actions[sig] = *act;
         p->actions[sig].mask &= ~SIGSET_UNBLOCKABLE;
     }
-    spin_unlock_irqrestore(&p->sig_lock, fl);
+    spin_unlock_irqrestore(&p->lock, fl);
     return 0;
 }
 

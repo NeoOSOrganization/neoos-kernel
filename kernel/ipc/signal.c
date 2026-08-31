@@ -23,7 +23,7 @@ int signal_default_action(int sig) {
 }
 
 void signal_init_process(struct process *p) {
-    spin_init(&p->sig_lock, LOCK_RANK_PROCESS, "signal");
+    spin_init(&p->lock, LOCK_RANK_PROCESS, "proc");
     for (int i = 0; i < NSIG; i++) {
         p->actions[i].handler  = SIG_DFL;
         p->actions[i].flags    = 0;
@@ -145,13 +145,13 @@ int signal_send_thread(struct thread *t, int sig, struct siginfo *info) {
     signal_stop_cont_interlock(p, sig);
     if (signal_is_ignored(p, sig)) { return 0; }
 
-    uint64_t f = spin_lock_irqsave(&p->sig_lock);
+    uint64_t f = spin_lock_irqsave(&p->lock);
     if (sig >= SIGRTMIN && info) {
         int rc = queue_append(&t->queued, info);
-        if (rc != 0) { spin_unlock_irqrestore(&p->sig_lock, f); return rc; }
+        if (rc != 0) { spin_unlock_irqrestore(&p->lock, f); return rc; }
     }
     sigset_add(&t->pending, sig);
-    spin_unlock_irqrestore(&p->sig_lock, f);
+    spin_unlock_irqrestore(&p->lock, f);
 
     signal_wake_for_delivery(t);
     return 0;
@@ -162,13 +162,13 @@ int signal_send_process(struct process *p, int sig, struct siginfo *info) {
     signal_stop_cont_interlock(p, sig);
     if (signal_is_ignored(p, sig)) { return 0; }
 
-    uint64_t f = spin_lock_irqsave(&p->sig_lock);
+    uint64_t f = spin_lock_irqsave(&p->lock);
     if (sig >= SIGRTMIN && info) {
         int rc = queue_append(&p->queued, info);
-        if (rc != 0) { spin_unlock_irqrestore(&p->sig_lock, f); return rc; }
+        if (rc != 0) { spin_unlock_irqrestore(&p->lock, f); return rc; }
     }
     sigset_add(&p->pending, sig);
-    spin_unlock_irqrestore(&p->sig_lock, f);
+    spin_unlock_irqrestore(&p->lock, f);
 
     // Deliver to any one thread that does not block it; prefer one that
     // is already awake so a sleeping thread is not woken unnecessarily.
@@ -301,11 +301,11 @@ void signal_do_stop(struct thread *t, int sig) {
         }
     }
 
-    uint64_t f = spin_lock_irqsave(&p->sig_lock);
+    uint64_t f = spin_lock_irqsave(&p->lock);
     if (!t->stopping) {
         // A SIGCONT overtook us between taking the signal and getting
         // here. Nothing to do: the continue already cleared the stop.
-        spin_unlock_irqrestore(&p->sig_lock, f);
+        spin_unlock_irqrestore(&p->lock, f);
         return;
     }
     p->stopped_count++;
@@ -319,7 +319,7 @@ void signal_do_stop(struct thread *t, int sig) {
         }
     }
     if (all_stopped) { p->stop_reported = 0; }
-    spin_unlock_irqrestore(&p->sig_lock, f);
+    spin_unlock_irqrestore(&p->lock, f);
 
     // BEFORE parking, not after: a thread that has already published
     // THREAD_STOPPED can be preempted before it reaches this line and
@@ -349,21 +349,21 @@ void signal_do_stop(struct thread *t, int sig) {
     // is guaranteed to see THREAD_STOPPED and wake it. thread_wake()
     // then handles the remaining hazard -- that the thread has not yet
     // finished leaving its CPU.
-    f = spin_lock_irqsave(&p->sig_lock);
+    f = spin_lock_irqsave(&p->lock);
     if (!t->stopping) {
-        spin_unlock_irqrestore(&p->sig_lock, f);
+        spin_unlock_irqrestore(&p->lock, f);
         return;
     }
     t->stopping = 0;
     t->state    = THREAD_STOPPED;
-    spin_unlock_irqrestore(&p->sig_lock, f);
+    spin_unlock_irqrestore(&p->lock, f);
 
     schedule();
     // Resumed by SIGCONT.
 }
 
 void signal_do_continue(struct process *p) {
-    uint64_t f = spin_lock_irqsave(&p->sig_lock);
+    uint64_t f = spin_lock_irqsave(&p->lock);
     sigset_del(&p->pending, SIGSTOP);
     p->stopped_count = 0;
     for (struct thread *t = p->threads; t; t = t->proc_next) {
@@ -374,7 +374,7 @@ void signal_do_continue(struct process *p) {
         sigset_del(&t->pending, SIGSTOP);
         t->stopping = 0;
     }
-    spin_unlock_irqrestore(&p->sig_lock, f);
+    spin_unlock_irqrestore(&p->lock, f);
 
     // Outside the lock: thread_wake can spin waiting for a thread to
     // finish leaving its CPU, and it takes a run queue lock.
@@ -402,13 +402,13 @@ extern void sigreturn_to_user(struct iret_ctx *ctx) __attribute__((noreturn));
 // synthesised SI_USER.
 void signal_take_pending(struct thread *t, int sig, struct siginfo *out) {
     struct process *p = t->proc;
-    uint64_t f = spin_lock_irqsave(&p->sig_lock);
+    uint64_t f = spin_lock_irqsave(&p->lock);
 
     // The atomic point of "this thread is going to stop". Once the
     // signal leaves the pending set, a SIGCONT arriving afterwards can
     // no longer cancel the stop by clearing the pending bit -- there is
     // no bit left to clear -- so it has to cancel this flag instead.
-    // Both happen under sig_lock, which is what makes them exclusive.
+    // Both happen under p->lock, which is what makes them exclusive.
     if (signal_default_action(sig) == SIGACT_STOP) { t->stopping = 1; }
 
     struct sigqueue **head = 0;
@@ -436,7 +436,7 @@ void signal_take_pending(struct thread *t, int sig, struct siginfo *out) {
             }
         }
     }
-    spin_unlock_irqrestore(&p->sig_lock, f);
+    spin_unlock_irqrestore(&p->lock, f);
 
     if (found) {
         *out = found->info;

@@ -71,9 +71,10 @@
 #define LOCK_RANK_HEAP       17
 #define LOCK_RANK_PMM        18
 // The signal-queue pool: a leaf allocator taken while a process's
-// sig_lock (rank 1) is held, and holding nothing itself. It sits
-// innermost rather than beside sig_lock because equal ranks are an
-// inversion -- acquisition must be strictly ascending.
+// p->lock (rank 1, LOCK_RANK_PROCESS) is held, and holding nothing
+// itself. It sits innermost rather than beside LOCK_RANK_PROCESS
+// because equal ranks are an inversion -- acquisition must be strictly
+// ascending.
 #define LOCK_RANK_SIGQUEUE   19
 // TLB shootdown bookkeeping: the deferred-free queue is filled from
 // paging_unmap_from, which runs UNDER a process's mm_lock (rank 3), so

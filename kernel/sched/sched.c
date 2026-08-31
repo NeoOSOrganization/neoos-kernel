@@ -221,14 +221,15 @@ static struct thread *steal_work(struct cpu *self) {
 // free the stack they are running on, so they park here and the idle
 // thread reclaims them. Without this every selftest thread would leak
 // its 16KiB kernel stack for the life of the boot.
-struct thread *kzombies;
+struct thread   *kzombies;
+struct spinlock  kzombies_lock;
 
 static void idle_entry(void) {
     for (;;) {
-        uint64_t f = spin_lock_irqsave(&proc_lock);
+        uint64_t f = spin_lock_irqsave(&kzombies_lock);
         struct thread *z = kzombies;
         kzombies = 0;
-        spin_unlock_irqrestore(&proc_lock, f);
+        spin_unlock_irqrestore(&kzombies_lock, f);
         while (z) {
             struct thread *next = z->proc_next;
             // thread_exit_self publishes a thread to kzombies BEFORE it

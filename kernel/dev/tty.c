@@ -161,9 +161,9 @@ void tty_input_char(char c) {
             if (o->c_lflag & ECHO) { tty_emit('^'); tty_emit((char)('@' + c)); tty_emit('\n'); }
             spin_unlock_irqrestore(&t->lock, f);
             // Signalling is done with the tty lock DROPPED: delivery
-            // takes proc_lock and sig_lock, both of which rank above
-            // this one, and a wake can spin waiting for a thread to
-            // leave its CPU.
+            // takes the proc_table bucket lock and per-process p->lock,
+            // both of which rank above this one, and a wake can spin
+            // waiting for a thread to leave its CPU.
             if (pgid > 0) { signal_kill(-pgid, sig, 0); }
             waitq_wake_all(&t->readers);
             return;
