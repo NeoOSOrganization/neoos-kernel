@@ -1,8 +1,8 @@
 # NeoOS Linux ABI Compatibility Report
 
-**Generated:** 2026-08-31, after Phase 12 (IPC, TLS, networking) and the
-coreutils-porting ABI work that followed it (musl, the `stat` family,
-the working directory, VFAT long names, TTY, RTC).
+**Generated:** 2026-08-31, close of Phase 13 (the coreutils ABI surface:
+musl, the `stat` family, the working directory, VFAT long names, TTY,
+RTC, Tier-0 syscalls).
 **Previous:** 2026-08-30, close of Phase 10 (SMP).
 **Refreshed:** at the end of every milestone, per `CLAUDE.md`.
 
