@@ -64,7 +64,16 @@ struct thread *thread_alloc(struct process *p) {
     // from the same counter, so a tid never collides with a pid, and a
     // single-threaded process consumes exactly one id -- which is what
     // keeps pids stable across this refactor.
-    t->tid        = (p && !p->threads) ? p->pid : alloc_id();
+    // The tid is decided BEFORE proc_lock is taken: alloc_id() reaches
+    // the pid allocator, whose own lock is rank LOCK_RANK_PROCTABLE --
+    // the same rank as proc_lock -- so calling it under proc_lock is an
+    // equal-rank inversion. The "first thread takes the pid" test reads
+    // p->threads, but the first thread is only ever allocated from
+    // spawn()/fork_task() on a process not yet visible to any other
+    // CPU, so that read is not racy. Every later thread goes through
+    // alloc_id() unconditionally.
+    int tid = (p && !p->threads) ? p->pid : alloc_id();
+    t->tid        = tid;
     t->proc       = p;
     t->state      = THREAD_READY;
     t->stack_slot = -1;
@@ -73,15 +82,24 @@ struct thread *thread_alloc(struct process *p) {
     cpu_state_init(t->xstate);
     signal_init_thread(t);
     if (p) {
+        // p->threads / p->refcount are shared with every other CPU that
+        // might be running a sibling of this thread. proc_lock (rank
+        // LOCK_RANK_PROCTABLE, the outermost) guards them here and at
+        // every other mutation site -- matching what the signal paths in
+        // proc.c already do when they walk p->threads.
+        uint64_t f = spin_lock_irqsave(&proc_lock);
+
         // Add to per-process thread table (if initialized)
         if (p->thread_table) {
-            thread_table_insert(p->thread_table, t->tid, t);
+            thread_table_insert(p->thread_table, tid, t);
         }
 
         // Keep proc_next for backward compat during transition
         t->proc_next = p->threads;
         p->threads   = t;
         p->refcount++;
+
+        spin_unlock_irqrestore(&proc_lock, f);
     }
     return t;
 }
@@ -169,11 +187,22 @@ void thread_exit_self(int code) {
         // Unlink from the live list, then park on the zombie list. We
         // cannot free our own kernel stack -- we are running on it --
         // so thread_join or wait_for_pid's reap frees it later.
+        //
+        // proc_lock is scoped to JUST this list move. It must NOT be
+        // held across proc_put() (switches CR3, frees the address space,
+        // signals the parent) or schedule() (panics if any lock is
+        // held). It is also NOT held across waitq_wake_all(): a waker
+        // reaches thread_wait_off_cpu(), which spins until the target
+        // thread has left its CPU -- and a sibling in process_exit()
+        // waiting on proc_lock could be that target, which would
+        // deadlock.
+        uint64_t f = spin_lock_irqsave(&proc_lock);
         struct thread **pp = &p->threads;
         while (*pp && *pp != t) { pp = &(*pp)->proc_next; }
         if (*pp) { *pp = t->proc_next; }
         t->proc_next = p->zombies;
         p->zombies   = t;
+        spin_unlock_irqrestore(&proc_lock, f);
 
         waitq_wake_all(&p->join_waiters);
         proc_put(p);
@@ -255,16 +284,29 @@ int thread_join(int tid, int *out_code) {
     if (tid == current_thread()->tid) { return -EDEADLK; }
 
     for (;;) {
+        // Both list scans happen under proc_lock: without it, a sibling
+        // exiting on another CPU can be mid-flight between the live list
+        // and the zombie list -- unlinked from one, not yet linked to
+        // the other -- and this scan misses it in both and wrongly
+        // returns -ESRCH. (Observed as `[smptest] FAILED: thread_join`.)
+        uint64_t f = spin_lock_irqsave(&proc_lock);
+
         // Already exited? Reclaim it here -- nothing is running on it.
         struct thread **pp = &p->zombies;
         while (*pp && (*pp)->tid != tid) { pp = &(*pp)->proc_next; }
         if (*pp) {
             struct thread *z = *pp;
             *pp = z->proc_next;
-            if (out_code) { *out_code = z->exit_code; }
+            int code = z->exit_code;
+            spin_unlock_irqrestore(&proc_lock, f);
+
+            if (out_code) { *out_code = code; }
             // Reaching p->zombies does not mean the thread has finished
             // with its kernel stack: thread_exit_self publishes it there
-            // before calling schedule(). See idle_entry's drain.
+            // before calling schedule(). See idle_entry's drain. This --
+            // and the frees -- must happen with proc_lock released:
+            // thread_wait_off_cpu() spins on another CPU, and
+            // thread_stack_free() takes p->mm_lock.
             thread_wait_off_cpu(z);
             thread_stack_free(p, z->stack_slot);
             pmm_free(z->kernel_stack_phys, KERNEL_STACK_ORDER);
@@ -276,8 +318,13 @@ int thread_join(int tid, int *out_code) {
         // Still running?
         struct thread *t = p->threads;
         while (t && t->tid != tid) { t = t->proc_next; }
-        if (!t) { return -ESRCH; }
+        if (!t) { spin_unlock_irqrestore(&proc_lock, f); return -ESRCH; }
 
-        if (waitq_sleep(&p->join_waiters, 0) == -EINTR) { return -EINTR; }
+        // waitq_sleep() drops proc_lock atomically with the block and
+        // re-acquires it before returning (see kernel/ipc/futex.c). The
+        // saved flags `f` still describe the pre-acquire state.
+        int rc = waitq_sleep(&p->join_waiters, &proc_lock);
+        spin_unlock_irqrestore(&proc_lock, f);
+        if (rc == -EINTR) { return -EINTR; }
     }
 }

@@ -756,9 +756,22 @@ void process_exit(int code) {
         // Every sibling dies too. The LAST thread to actually leave --
         // which may be a killed sibling rather than this one -- drops
         // the refcount to zero and frees the address space.
-        for (struct thread *t = p->threads; t; t = t->proc_next) {
-            if (t != self) { thread_kill(t); }
+        //
+        // Snapshot the sibling pointers under proc_lock -- the list
+        // mutates on other CPUs as threads exit -- then deliver SIGKILL
+        // with the lock released: thread_kill -> signal_send_thread can
+        // reach thread_wait_off_cpu(), which spins on a sibling that may
+        // itself be blocked on proc_lock in thread_exit_self.
+        // MAX_THREADS_PER_PROC bounds the snapshot.
+        struct thread *victims[MAX_THREADS_PER_PROC];
+        int nv = 0;
+        uint64_t sf = spin_lock_irqsave(&proc_lock);
+        for (struct thread *t = p->threads;
+             t && nv < MAX_THREADS_PER_PROC; t = t->proc_next) {
+            if (t != self) { victims[nv++] = t; }
         }
+        spin_unlock_irqrestore(&proc_lock, sf);
+        for (int i = 0; i < nv; i++) { thread_kill(victims[i]); }
     }
 
     thread_exit_self(code);
@@ -774,7 +787,13 @@ static int encode_status(struct process *p) {
 // Frees a zombie's threads and struct. Safe only once nothing is
 // running on any of them.
 static void proc_reap(struct process *p) {
+    // Detach the whole zombie list under proc_lock, then walk it with
+    // the lock released -- thread_wait_off_cpu() spins on another CPU.
+    // Callers (wait4, wait_for_pid) do not hold proc_lock.
+    uint64_t zf = spin_lock_irqsave(&proc_lock);
     struct thread *z = p->zombies;
+    p->zombies = 0;
+    spin_unlock_irqrestore(&proc_lock, zf);
     while (z) {
         struct thread *next = z->proc_next;
         // thread_exit_self parks a thread on p->zombies before it
@@ -786,7 +805,6 @@ static void proc_reap(struct process *p) {
         kfree(z);
         z = next;
     }
-    p->zombies = 0;
 
     // Free the per-process tables before removing from the process
     // table. task_exit already released every fd; this drops the
