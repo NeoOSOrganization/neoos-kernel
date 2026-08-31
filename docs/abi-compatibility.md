@@ -125,6 +125,8 @@ that is fine -- musl's mallocng falls back to `mmap`. See
 | `struct dirent` | **Matches** — Linux's `getdents64` record: d_ino/d_off/d_reclen/d_type and a variable-length d_name at offset 19, 8-byte aligned. `DT_*` are Linux's values. Names carry the full VFAT long name (up to 255 characters). |
 | `struct stat` | **Matches** — Linux's x86-64 144-byte layout, asserted at compile time and from userland. Field *values* diverge: mode bits, owner and link count are synthesized, and all three timestamps are 0, because FAT stores none of them (`CLOCK_REALTIME` now exists but nothing records file times with it). See `docs/stdlib.md`. |
 | `struct termios` | **Matches** Linux's 36-byte kernel `termios` (NCCS 19), a prefix of musl's larger userland struct — the TTY writes only that prefix. `struct winsize` matches. c_cc indices, `I*`/`O*`/`C*`/`L*` flags and the `TC*`/`TIOC*` ioctl numbers are Linux's. |
+| `struct input_event` | **Matches** — 24 bytes: two `int64_t` timestamps, two `uint16_t` type/code, one `int32_t` value. Linux x86-64 layout. Asserted in userland and kernel. |
+| `struct input_id` | **Matches** — 8 bytes: four `uint16_t` (bustype, vendor, product, version). |
 | `struct utsname` | **Absent.** No `uname`. |
 | `pthread_mutex_t`, `sem_t` | **DIVERGE**, and deliberately: they are NeoOS's own definitions, and musl replaces them wholesale. Nothing is compiled against them yet, so there is no compatibility to preserve. |
 
@@ -143,6 +145,12 @@ that is fine -- musl's mallocng falls back to `mmap`. See
 | `O_*` (open) | **Match** (`O_RDONLY` 0, `O_WRONLY` 1, `O_RDWR` 2, `O_CREAT` 0x40, `O_EXCL` 0x80, `O_TRUNC` 0x200, `O_APPEND` 0x400, `O_NONBLOCK` 0x800, `O_DIRECTORY` 0x10000, `O_CLOEXEC` 0x80000). |
 | `CLOCK_*` | **Match** (`CLOCK_REALTIME` 0, `CLOCK_MONOTONIC` 1, ...). All ids resolve; `CLOCK_REALTIME` is wall time anchored to the CMOS RTC, the rest count from boot. Resolution is one 10ms tick (§8a). |
 | `TCGETS`/`TCSETS`/`TIOCGWINSZ` etc. | **Match** — Linux's ioctl numbers (§8b). |
+| `EV_*` (input event types) | **Match** (`EV_SYN` 0, `EV_KEY` 1, `EV_MSC` 4, etc.). `EV_VERSION` is 0x010001. |
+| `KEY_*` (keyboard codes) | **Match** Linux x86-64 values for the US keyboard subset (Set-1 AT scancode mapping). |
+| `MSC_*` (miscellaneous codes) | **Match** (`MSC_SCAN` 4). |
+| `SYN_*` (sync codes) | **Match** (`SYN_REPORT` 0). |
+| `BUS_*` (bus type) | **Match** (`BUS_I8042` 0x11 for the AT keyboard). |
+| `EVIOC*` ioctl numbers | **Match** Linux's `<linux/input.h>`: `EVIOCGVERSION`, `EVIOCGID`, `EVIOCGNAME`, `EVIOCGBIT`, `EVIOCGKEY`, `EVIOCGRAB`, etc. One device only, `/dev/input/event0`. |
 
 
 ## 6. futex, and what is built on it
@@ -210,6 +218,21 @@ and line editing, `TCGETS`/`TCSETS`/`TCSETSW`/`TCSETSF`,
 `SIGQUIT`/`SIGTSTP` generated from `c_cc`. `struct termios` is Linux's
 36-byte kernel layout. `isatty` on it returns 1; on a file, pipe or
 socket `ioctl` returns `-ENOTTY` as Linux does.
+
+### 8c. evdev — raw keyboard input
+
+`/dev/input/event0` is a Linux evdev character device (a single input
+device for the AT keyboard). It exports `struct input_event` records
+(24 bytes, Linux x86-64 layout) with wall-clock timestamps, event types
+(`EV_MSC`, `EV_KEY`, `EV_SYN`), and key codes (`KEY_*`) for the US
+keyboard layout (Set-1 AT scancodes).
+
+Supported `ioctl`s: `EVIOCGVERSION`, `EVIOCGID`, `EVIOCGNAME`, `EVIOCGBIT`,
+`EVIOCGKEY`, `EVIOCGRAB`. Ring buffer holds 256 events per open fd; on
+overflow the oldest event is dropped (value field of `SYN_REPORT`
+incremented to signal it). **Diverges:** US keyboard only, no other
+input devices, no `EVIOCSCLOCKID`, ring overflow behavior differs from
+Linux (oldest-drop with a counter vs. a kernel-wide shared buffer).
 
 ## 9. What a real ported application hits, in order
 

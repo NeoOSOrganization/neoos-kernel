@@ -954,6 +954,71 @@ No `TCXONC` (flow control), no `TCFLSH`, no `TIOCSCTTY`/`TIOCNOTTY`
 Baud rate is stored but meaningless — the backing device is a fixed
 serial line plus a PS/2 keyboard.
 
+## `<linux/input.h>` and the evdev interface
+
+`/dev/input/event0` is the raw keyboard event device; applications can
+read from it to receive key events without the TTY line discipline. The
+device is a standard Linux evdev character device with a 256-entry
+ring buffer per open file descriptor, returning `struct input_event`
+records (24 bytes each: two `int64_t` timestamps, two `uint16_t` type/code,
+one `int32_t` value).
+
+- `read(fd, &ev, sizeof(ev))` — reads one `struct input_event` from the
+  next available slot in the ring buffer. Returns 24 (one event), or
+  `-EAGAIN` if the buffer is empty and `O_NONBLOCK` was set, or
+  `-EINVAL` if the buffer request is smaller than 24 bytes.
+- `ioctl(fd, EVIOCGVERSION, &ver)` — returns `0x010001` in `ver`.
+- `ioctl(fd, EVIOCGNAME(len), name)` — copies up to `len` bytes of
+  the device name (`"NeoOS AT keyboard"`) and returns the actual name
+  length. Returns a negative value if `len` is too small.
+- `ioctl(fd, EVIOCGID, &id)` — fills `struct input_id` with
+  `{.bustype = BUS_I8042, .vendor = 0x0001, .product = 0x0001, .version = 0x0100}`.
+- `ioctl(fd, EVIOCGBIT(EV_KEY, len), buf)` — copies a bitmap of the
+  supported KEY_* codes (e.g., `KEY_A`, `KEY_LCTRL`, arrow keys); US
+  keyboard subset only.
+- `ioctl(fd, EVIOCGBIT(EV_MSC, len), buf)` — returns a bitmap with only
+  `MSC_SCAN` set.
+- `ioctl(fd, EVIOCGBIT(0, len), buf)` — returns a bitmap with `EV_SYN`,
+  `EV_KEY`, and `EV_MSC` set.
+- `ioctl(fd, EVIOCGKEY(len), buf)` — returns a bitmap of keys currently
+  held down (which KEY_* codes are pressed).
+- `ioctl(fd, EVIOCGRAB, 1)` — acquires an exclusive grab: while held,
+  keyboard input does not reach the TTY. Only one fd can hold the grab
+  at a time; a second grab attempt returns `-EBUSY`. Returns 0 on success.
+- `ioctl(fd, EVIOCGRAB, 0)` — releases the grab.
+- `poll(fd, ...)` or `select(fd, ...)` — returns `POLLIN` when events
+  are available in the buffer, `POLLOUT` always.
+
+### Event format
+
+Each `struct input_event` carries:
+- `tv_sec`, `tv_usec`: wall-clock timestamp (from `CLOCK_REALTIME`).
+- `type`: one of `EV_MSC`, `EV_KEY`, `EV_SYN` (others are reserved).
+- `code`: the key code (e.g., `KEY_A`, `MSC_SCAN`) or sync type
+  (e.g., `SYN_REPORT`).
+- `value`: key pressed (1), released (0), or sync count (0 for `SYN_REPORT`).
+
+A key event emits three records: `EV_MSC/MSC_SCAN/(raw_scancode)`,
+`EV_KEY/(KEY_*)/(1 or 0)`, `EV_SYN/SYN_REPORT/0`.
+
+### Ring buffer and overflow
+
+The buffer holds 256 events per open fd. When full, the oldest event
+is dropped (no notification to userland — the `value` field of the last
+`EV_SYN/SYN_REPORT` is incremented by 1 each time an event is discarded,
+to make the drop discoverable by monitoring it).
+
+### DIVERGENCE
+
+- **US keyboard layout only** — the decoder produces only Set-1 PC keyboard
+  codes. Non-US layouts are not supported.
+- **No `EVIOCSCLOCKID`** — timestamps are always `CLOCK_REALTIME`; the
+  ioctl is not implemented and returns `-EINVAL`.
+- **No events other than keyboard** — `/dev/input/event0` is the sole
+  device, and it speaks only `EV_SYN`, `EV_KEY`, and `EV_MSC/MSC_SCAN`.
+- The "name" and "phys" strings are fixed. `EVIOCGPHYS` and `EVIOCGUNIQ`
+  return `-ENOENT`.
+
 ## The working directory
 
 **Every process has a working directory from the moment it is created.**
