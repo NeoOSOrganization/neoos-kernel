@@ -24,11 +24,6 @@ extern void kernel_thread_entry_trampoline(void);
 extern void kernel_thread_trampoline(void);
 extern void fork_trampoline(void);
 
-// DEPRECATED: Replaced by proc_table (hash-based with RCU)
-// Keeping for backwards compatibility during transition
-struct process *proc_list;
-struct spinlock proc_lock;
-
 // Allocate a new PID (uses new proc_table allocator)
 int alloc_id(void) {
     return proc_table_alloc_pid();
@@ -82,14 +77,9 @@ static struct process *proc_alloc(void) {
     p->pgid = p->pid;
     p->sid  = p->pid;
 
-    // Insert into new hash-based process table
+    // The process is discoverable (proc_find, proc_table_for_each_ref)
+    // from this point; it already carries ref = 1.
     proc_table_insert(p->pid, p);
-
-    // DEPRECATED: Keep old proc_list updated during transition
-    uint64_t f = spin_lock_irqsave(&proc_lock);
-    p->next   = proc_list;
-    proc_list = p;
-    spin_unlock_irqrestore(&proc_lock, f);
 
     return p;
 }
@@ -100,15 +90,10 @@ struct process *proc_find(int pid) {
 }
 
 void process_init(void) {
-    // Initialize new hash-based process table
     proc_table_init();
-
-    // DEPRECATED: Keep old proc_list for transition
-    spin_init(&proc_lock, LOCK_RANK_PROCTABLE, "proc_list");
     spin_init(&kzombies_lock, LOCK_RANK_PROCTABLE, "kzombies");
 
     signal_queue_init();
-    proc_list  = 0;
     // Phase 7: Per-CPU ready queues (removed global ready_head/ready_tail init)
     // Now initialized per-CPU
     this_cpu()->ready_head = 0;
@@ -653,6 +638,26 @@ struct thread *fork_task(struct syscall_frame *frame) {
     return child;
 }
 
+struct kill_ctx {
+    int pid;          // the original pid arg (-1 means "everyone")
+    int target_pgid;
+    int sig;
+    struct siginfo *info;
+    int found;
+    int rc;
+};
+
+static void kill_one(struct process *p, void *v) {
+    struct kill_ctx *c = (struct kill_ctx *)v;
+    if (p->state == PROC_ZOMBIE) { return; }
+    if (c->pid != -1 && p->pgid != c->target_pgid) { return; }
+    c->found = 1;
+    if (c->sig) {
+        int r = signal_send_process(p, c->sig, c->info);
+        if (r != 0) { c->rc = r; }
+    }
+}
+
 // pid  > 0   that process
 // pid == 0   every process in the caller's group
 // pid <  -1  every process in group -pid
@@ -670,22 +675,30 @@ int signal_kill(int pid, int sig, struct siginfo *info) {
         return rc;
     }
 
-    int target_pgid = (pid == 0) ? current_proc()->pgid : -pid;
-    int found = 0, rc = 0;
-    // proc_lock (rank PROCTABLE=0) is held across p->lock
-    // (rank PROCESS=1). Ascending, so legal -- never reverse it.
-    uint64_t f = spin_lock_irqsave(&proc_lock);
-    for (struct process *p = proc_list; p; p = p->next) {
-        if (p->state == PROC_ZOMBIE) { continue; }
-        if (pid != -1 && p->pgid != target_pgid) { continue; }
-        found = 1;
-        if (sig) {
-            int r = signal_send_process(p, sig, info);
-            if (r != 0) { rc = r; }
-        }
+    struct kill_ctx c = {
+        .pid = pid,
+        .target_pgid = (pid == 0) ? current_proc()->pgid : -pid,
+        .sig = sig, .info = info, .found = 0, .rc = 0,
+    };
+    proc_table_for_each_ref(kill_one, &c);
+    return c.found ? c.rc : -ESRCH;
+}
+
+struct tkill_ctx {
+    int tgid;
+    int tid;
+    struct thread *victim;   // ref'd via thread_get
+};
+
+static void tkill_scan(struct process *p, void *v) {
+    struct tkill_ctx *c = (struct tkill_ctx *)v;
+    if (c->victim) { return; }
+    if (c->tgid > 0 && p->pid != c->tgid) { return; }
+    uint64_t pf = spin_lock_irqsave(&p->lock);
+    for (struct thread *t = p->threads; t; t = t->proc_next) {
+        if (t->tid == c->tid) { thread_get(t); c->victim = t; break; }
     }
-    spin_unlock_irqrestore(&proc_lock, f);
-    return found ? rc : -ESRCH;
+    spin_unlock_irqrestore(&p->lock, pf);
 }
 
 int signal_tkill(int tgid, int tid, int sig, struct siginfo *info) {
@@ -693,25 +706,15 @@ int signal_tkill(int tgid, int tid, int sig, struct siginfo *info) {
 
     // Find the target thread under its process's p->lock (which guards
     // p->threads) and take a reference on it, so it cannot be freed by
-    // a concurrent thread_join between here and the delivery. Then drop
-    // every lock and deliver through the normal signal_send_thread --
-    // which takes p->lock itself, so there is no lock held across it
-    // and no recursion.
-    struct thread *victim = 0;
-    uint64_t f = spin_lock_irqsave(&proc_lock);
-    for (struct process *p = proc_list; p && !victim; p = p->next) {
-        if (tgid > 0 && p->pid != tgid) { continue; }
-        uint64_t pf = spin_lock_irqsave(&p->lock);
-        for (struct thread *t = p->threads; t; t = t->proc_next) {
-            if (t->tid == tid) { thread_get(t); victim = t; break; }
-        }
-        spin_unlock_irqrestore(&p->lock, pf);
-    }
-    spin_unlock_irqrestore(&proc_lock, f);
+    // a concurrent thread_join between here and the delivery. Then
+    // deliver through the normal signal_send_thread -- it takes p->lock
+    // itself, so there is no lock held across it and no recursion.
+    struct tkill_ctx c = { .tgid = tgid, .tid = tid, .victim = 0 };
+    proc_table_for_each_ref(tkill_scan, &c);
 
-    if (!victim) { return -ESRCH; }
-    int rc = sig ? signal_send_thread(victim, sig, info) : 0;
-    thread_put(victim);
+    if (!c.victim) { return -ESRCH; }
+    int rc = sig ? signal_send_thread(c.victim, sig, info) : 0;
+    thread_put(c.victim);
     return rc;
 }
 
@@ -834,13 +837,18 @@ static int encode_status(struct process *p) {
 }
 #define STATUS_STOPPED(sig)  (0x7f | ((sig) << 8))
 
-// Frees a zombie's threads and struct. Safe only once nothing is
-// running on any of them.
-static void proc_reap(struct process *p) {
+// Frees a zombie's threads and drops the process table's reference.
+// Safe only once nothing is running on any of the threads. Returns 1 if
+// this call did the reaping, 0 if another waiter got there first (two
+// threads can both see the zombie in the table before either unlinks
+// it) -- the caller must not report a pid it did not reap.
+static int proc_reap(struct process *p) {
     // Detach the whole zombie list under p->lock, then walk it with the
     // lock released -- thread_wait_off_cpu() spins on another CPU.
     // Callers (wait4, wait_for_pid) do not hold p->lock.
     uint64_t zf = spin_lock_irqsave(&p->lock);
+    if (p->reaped) { spin_unlock_irqrestore(&p->lock, zf); return 0; }
+    p->reaped = 1;
     struct thread *z = p->zombies;
     p->zombies = 0;
     spin_unlock_irqrestore(&p->lock, zf);
@@ -869,15 +877,8 @@ static void proc_reap(struct process *p) {
         p->thread_table = 0;
     }
 
-    // Unlink from the hash table (and, until Task 6, the legacy list).
+    // Unlink from the process table.
     proc_table_remove(p);
-
-    // DEPRECATED: Also remove from old proc_list during transition
-    uint64_t f = spin_lock_irqsave(&proc_lock);
-    struct process **pp = &proc_list;
-    while (*pp && *pp != p) { pp = &(*pp)->next; }
-    if (*pp) { *pp = p->next; }
-    spin_unlock_irqrestore(&proc_lock, f);
 
     // Drop the proc_table's reference. Until Task 7 wires this into
     // proc_table_remove, proc_reap owns it: proc_table_remove's
@@ -885,6 +886,36 @@ static void proc_reap(struct process *p) {
     // is the only thing that frees the struct + pid. A lookup still in
     // flight keeps its own ref and does the actual free.
     proc_put(p);
+    return 1;
+}
+
+struct wait_ctx {
+    struct process *self;
+    int pid;
+    int options;
+    int found;
+    struct process *zombie;   // ref'd; caller reaps + proc_puts
+    int stopped_pid;          // >0 once a WUNTRACED stop has been reported
+};
+
+static void wait_scan(struct process *p, void *v) {
+    struct wait_ctx *c = (struct wait_ctx *)v;
+    if (c->zombie || c->stopped_pid) { return; }   // already have a result
+    if (p->parent_pid != c->self->pid) { return; }
+    if (c->pid > 0  && p->pid  != c->pid)          { return; }
+    if (c->pid == 0 && p->pgid != c->self->pgid)   { return; }
+    if (c->pid < -1 && p->pgid != -c->pid)         { return; }
+    c->found = 1;
+
+    if (p->state == PROC_ZOMBIE) {
+        proc_get(p);            // keep it alive past the iteration's own put
+        c->zombie = p;
+        return;
+    }
+    if ((c->options & WUNTRACED) && p->stopped_count > 0 && !p->stop_reported) {
+        p->stop_reported = 1;
+        c->stopped_pid = p->pid;
+    }
 }
 
 // POSIX-shaped, and what musl's waitpid maps onto. NeoOS's own wait()
@@ -894,28 +925,26 @@ int64_t wait4(int pid, int *status, int options) {
     if (!self) { return -ECHILD; }   // a kernel thread has no children
 
     for (;;) {
-        int found = 0;
-        for (struct process *p = proc_list; p; p = p->next) {
-            if (p->parent_pid != self->pid) { continue; }
-            if (pid > 0  && p->pid  != pid)        { continue; }
-            if (pid == 0 && p->pgid != self->pgid) { continue; }
-            if (pid < -1 && p->pgid != -pid)       { continue; }
-            found = 1;
+        struct wait_ctx c = { .self = self, .pid = pid, .options = options,
+                              .found = 0, .zombie = 0, .stopped_pid = 0 };
+        proc_table_for_each_ref(wait_scan, &c);
 
-            if (p->state == PROC_ZOMBIE) {
-                int st = encode_status(p);
-                int reaped = p->pid;
+        if (c.zombie) {
+            int st = encode_status(c.zombie);
+            int reaped = c.zombie->pid;
+            int did = proc_reap(c.zombie);   // 0 if another waiter won
+            proc_put(c.zombie);              // drops our iteration ref
+            if (did) {
                 if (status) { *status = st; }
-                proc_reap(p);
                 return reaped;
             }
-            if ((options & WUNTRACED) && p->stopped_count > 0 && !p->stop_reported) {
-                p->stop_reported = 1;
-                if (status) { *status = STATUS_STOPPED(SIGSTOP); }
-                return p->pid;
-            }
+            continue;   // lost the race; re-scan
         }
-        if (!found) { return -ECHILD; }
+        if (c.stopped_pid) {
+            if (status) { *status = STATUS_STOPPED(SIGSTOP); }
+            return c.stopped_pid;
+        }
+        if (!c.found) { return -ECHILD; }
         if (options & WNOHANG) { return 0; }
         if (waitq_sleep(&self->child_waiters, 0) == -EINTR) { return -EINTR; }
     }
@@ -935,8 +964,9 @@ int64_t wait_for_pid(int pid) {
         if (waitq_sleep(&p->exit_waiters, 0) == -EINTR) { proc_put(p); return -EINTR; }
     }
 
-    int st = encode_status(p);
-    proc_reap(p);       // drops the proc_table's ref
-    proc_put(p);        // drops ours -- frees the struct here
+    int st  = encode_status(p);
+    int did = proc_reap(p);   // drops the proc_table's ref
+    proc_put(p);              // drops ours
+    if (!did) { return -1; }  // another waiter reaped it
     return ((st & 0x7f) == 0) ? ((st >> 8) & 0xff) : -(st & 0x7f);
 }

@@ -10,8 +10,6 @@
 extern uint64_t p4_table[512]; // boot.asm's live PML4
 
 // proc.c
-extern struct process  *proc_list;
-extern struct spinlock  proc_lock;
 int alloc_id(void);
 
 // sched.c (Phase 7: Per-CPU ready queues, no global ready_head/ready_tail)

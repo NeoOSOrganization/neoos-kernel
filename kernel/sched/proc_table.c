@@ -19,6 +19,9 @@ void proc_table_init(void) {
     // Initialize PID allocator
     pid_allocator_init(&global_proc_table.pid_alloc);
 
+    global_proc_table.iter_gen = 0;
+    spin_init(&global_proc_table.iter_lock, LOCK_RANK_PROCTABLE, "proc_iter");
+
     serial_write_string("[proc_table] initialized with ");
     serial_write_hex64(PROC_HASH_BUCKETS);
     serial_write_string(" buckets\n");
@@ -116,6 +119,37 @@ void proc_table_remove(struct process *proc) {
         call_rcu(&proc->rcu, proc_rcu_free);
     } else {
         spin_unlock_irqrestore(&b->lock, f);
+    }
+}
+
+void proc_table_for_each_ref(void (*fn)(struct process *, void *), void *ctx) {
+    uint64_t gf = spin_lock_irqsave(&global_proc_table.iter_lock);
+    uint32_t gen = ++global_proc_table.iter_gen;
+    spin_unlock_irqrestore(&global_proc_table.iter_lock, gf);
+
+    for (int i = 0; i < PROC_HASH_BUCKETS; i++) {
+        struct proc_bucket *b = &global_proc_table.buckets[i];
+        for (;;) {
+            struct process *batch[8];
+            int n = 0;
+            uint64_t f = spin_lock_irqsave(&b->lock);
+            for (struct process *p = b->head; p && n < 8; p = p->proc_next_hash) {
+                if (p->iter_gen == gen) { continue; }
+                p->iter_gen = gen;
+                proc_get(p);
+                batch[n++] = p;
+            }
+            spin_unlock_irqrestore(&b->lock, f);
+
+            // fn runs with NO lock held: it may take p->lock, deliver a
+            // signal, or reap the process. The iteration's own ref keeps
+            // p alive until the matching proc_put below.
+            for (int k = 0; k < n; k++) {
+                fn(batch[k], ctx);
+                proc_put(batch[k]);
+            }
+            if (n < 8) { break; }   // bucket fully stamped this pass
+        }
     }
 }
 

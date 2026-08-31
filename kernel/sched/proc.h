@@ -73,6 +73,11 @@ struct process {
     // returns the pointer with this raised; the caller drops it with
     // proc_put. The struct + pid are freed when this hits zero.
     uint32_t ref;
+    // Set by proc_table_for_each_ref to the current iteration's
+    // generation as each process is visited, so a bucket that must be
+    // scanned in more than one batch does not double-visit. Starts 0
+    // (proc_alloc zeroes); the generation counter starts at 1.
+    uint32_t iter_gen;
     uint64_t pml4_phys;             // 0 = shares the kernel address space
     // What the ELF loader learned about the image: where its program
     // headers landed, and its PT_TLS template. Kept for the whole life
@@ -104,6 +109,10 @@ struct process {
     uint16_t stack_slots;           // bitmap of live thread user stacks
     int exiting;
     int exit_code;
+    // Set under p->lock by the first proc_reap(); a second waiter that
+    // also saw the zombie before it was unlinked bails instead of
+    // double-freeing.
+    int reaped;
     enum { PROC_ALIVE, PROC_ZOMBIE } state;
 
     // Signal dispositions are per-PROCESS; masks and pending sets are
@@ -126,14 +135,10 @@ struct process {
     struct waitq exit_waiters;      // threads blocked in wait_for_pid
     struct waitq join_waiters;      // threads blocked in thread_join
 
-    // Hash table linkage (NEW: replacing global linked list)
-    struct process *proc_next_hash; // hash bucket chain (RCU-protected)
+    struct process *proc_next_hash; // proc_table bucket chain
 
     // RCU deferred cleanup (NEW: for safe deallocation)
     struct rcu_head rcu;           // for synchronize_rcu() cleanup
-
-    // Legacy (DEPRECATED: will remove in Phase 2)
-    struct process *next;           // global process list (being replaced)
 };
 
 struct thread {

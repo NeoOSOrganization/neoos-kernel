@@ -34,6 +34,11 @@ struct proc_table {
     int process_count;           // Approximate count (for stats)
     struct spinlock count_lock;  // Protect process_count
     struct pid_allocator pid_alloc;
+    // proc_table_for_each_ref's generation counter. Bumped once per
+    // iteration under iter_lock; each visited process is stamped with
+    // the value so a multi-batch bucket scan does not double-visit.
+    uint32_t iter_gen;
+    struct spinlock iter_lock;   // LOCK_RANK_PROCTABLE
 };
 
 /*
@@ -68,6 +73,14 @@ void proc_table_insert(int pid, struct process *proc);
 // Remove process from table (takes bucket lock, uses RCU for cleanup)
 // Process freed after grace period
 void proc_table_remove(struct process *proc);
+
+// Calls fn(p, ctx) for every process present during the walk, with a
+// reference held on p and NO lock held. fn must not insert into or
+// remove from the table directly, and must not call
+// proc_table_for_each_ref again (not reentrant). Iteration order is
+// unspecified. A process created or removed mid-walk may or may not be
+// visited; fn must re-check p->state.
+void proc_table_for_each_ref(void (*fn)(struct process *p, void *ctx), void *ctx);
 
 // Allocate PID 0 specifically (for idle process)
 int proc_table_alloc_pid_zero(void);

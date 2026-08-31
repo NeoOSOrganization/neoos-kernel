@@ -214,7 +214,7 @@ void siginfo_user(struct siginfo *out, int sig, int sender_pid);
 int signal_send_thread(struct thread *t, int sig, struct siginfo *info);
 int signal_send_process(struct process *p, int sig, struct siginfo *info);
 
-// Group targeting lives with proc_list, so these are implemented in
+// Group targeting walks the process table, so these are implemented in
 // kernel/sched/proc.c.
 int signal_kill(int pid, int sig, struct siginfo *info);
 int signal_tkill(int tgid, int tid, int sig, struct siginfo *info);

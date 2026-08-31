@@ -1,9 +1,28 @@
 #include <unistd.h>
 #include <stdio.h>
+#include <signal.h>
 
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
+
+    // PID visibility: a child must be findable by pid the instant fork
+    // returns and gone the instant it is reaped. Guards proc_table
+    // becoming the sole process store -- there is no proc_list shadow
+    // to drift out of sync. kill(pid, 0) is an existence probe.
+    int vpid = fork();
+    if (vpid == 0) { exit(7); }
+    if (vpid > 0) {
+        if (kill(vpid, 0) != 0) {
+            printf("[fork_test] FAILED: child not visible by pid after fork\n");
+        }
+        wait(vpid);
+        if (kill(vpid, 0) == 0) {
+            printf("[fork_test] FAILED: reaped child still visible by pid\n");
+        } else {
+            printf("[fork_test] pid visibility passed\n");
+        }
+    }
 
     volatile int shared_until_written = 100;
 
