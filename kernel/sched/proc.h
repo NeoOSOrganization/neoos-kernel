@@ -9,7 +9,6 @@
 #include "fs/vfs.h"
 #include "mm/pmm.h"
 #include "mm/vma.h"
-#include "sync/rcu.h"
 #include "elf.h"
 
 #define KERNEL_STACK_ORDER 2 // 4 frames = 16KiB
@@ -136,9 +135,6 @@ struct process {
     struct waitq join_waiters;      // threads blocked in thread_join
 
     struct process *proc_next_hash; // proc_table bucket chain
-
-    // RCU deferred cleanup (NEW: for safe deallocation)
-    struct rcu_head rcu;           // for synchronize_rcu() cleanup
 };
 
 struct thread {
@@ -196,14 +192,8 @@ struct thread {
     // the extended-state design spec.
     void *xstate;
 
-    // Hash table linkage (NEW: replacing linear scan)
-    struct thread *tid_next_hash;   // hash bucket chain (RCU-protected)
-
-    // RCU deferred cleanup (NEW: for safe deallocation)
-    struct rcu_head rcu;           // for synchronize_rcu() cleanup
-
-    // Legacy (DEPRECATED: being replaced by hash table)
-    struct thread *proc_next;       // sibling / zombie list link
+    struct thread *tid_next_hash;   // thread_table bucket chain (secondary index)
+    struct thread *proc_next;       // p->threads / p->zombies list link
     struct thread *next;            // ready-queue link
 };
 

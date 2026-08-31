@@ -9,8 +9,8 @@
  * Container_of macro: Given a pointer to a member of a struct,
  * calculate the pointer to the containing struct.
  *
- * Usage: struct rcu_head *rh = ...;
- *        struct process *p = container_of(rh, struct process, rcu);
+ * Usage: struct waitq *q = ...;
+ *        struct mutex *m = container_of(q, struct mutex, waiters);
  */
 #define container_of(ptr, type, member) \
     ((type *)((char *)(ptr) - __builtin_offsetof(type, member)))

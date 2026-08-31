@@ -877,15 +877,10 @@ static int proc_reap(struct process *p) {
         p->thread_table = 0;
     }
 
-    // Unlink from the process table.
+    // Unlink from the process table and drop its reference. If a
+    // lookup is mid-flight it holds its own ref and does the real free;
+    // otherwise the struct + pid are freed right here.
     proc_table_remove(p);
-
-    // Drop the proc_table's reference. Until Task 7 wires this into
-    // proc_table_remove, proc_reap owns it: proc_table_remove's
-    // call_rcu(proc_rcu_free) is inert (rcu is never driven), so this
-    // is the only thing that frees the struct + pid. A lookup still in
-    // flight keeps its own ref and does the actual free.
-    proc_put(p);
     return 1;
 }
 

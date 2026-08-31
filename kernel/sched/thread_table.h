@@ -3,7 +3,6 @@
 
 #include <stdint.h>
 #include "sync/lock.h"
-#include "sync/rcu.h"
 
 /*
  * Per-process thread hash table

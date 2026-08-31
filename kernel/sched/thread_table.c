@@ -46,7 +46,7 @@ void thread_table_insert(struct thread_table *table, int tid, struct thread *t) 
 
     // Insert at head of bucket chain
     t->tid_next_hash = b->head;
-    rcu_assign_pointer(b->head, t);
+    __atomic_store_n(&b->head, t, __ATOMIC_RELEASE);
 
     // Update thread count
     uint64_t f2 = spin_lock_irqsave(&table->count_lock);
@@ -56,39 +56,23 @@ void thread_table_insert(struct thread_table *table, int tid, struct thread *t) 
     spin_unlock_irqrestore(&b->lock, f);
 }
 
+// Lookup by tid under the bucket lock. NOTE: does NOT take a reference
+// -- today the only caller path that matters (thread_join) walks the
+// legacy p->threads list under p->lock instead, and this table is a
+// secondary index. If a caller ever needs the result past p->lock it
+// must thread_get() it here first.
 struct thread *thread_table_lookup(struct thread_table *table, int tid) {
     if (!table || tid <= 0) {
         return 0;
     }
 
-    unsigned bucket = thread_hash(tid);
-    struct thread_bucket *b = &table->buckets[bucket];
-
-    // RCU read-side: No lock needed
-    struct thread *t = rcu_dereference(b->head);
-
-    while (t) {
-        if (t->tid == tid) {
-            return t;
-        }
-        t = rcu_dereference(t->tid_next_hash);
+    struct thread_bucket *b = &table->buckets[thread_hash(tid)];
+    uint64_t f = spin_lock_irqsave(&b->lock);
+    for (struct thread *t = b->head; t; t = t->tid_next_hash) {
+        if (t->tid == tid) { spin_unlock_irqrestore(&b->lock, f); return t; }
     }
-
+    spin_unlock_irqrestore(&b->lock, f);
     return 0;
-}
-
-/*
- * Callback invoked after RCU grace period
- * Completes thread destruction (free struct and resources)
- */
-static void thread_rcu_free(struct rcu_head *rh) {
-    struct thread *t = container_of(rh, struct thread, rcu);
-
-    // Free thread structure and extended state
-    if (t->xstate) {
-        kfree(t->xstate);
-    }
-    kfree(t);
 }
 
 void thread_table_remove(struct thread_table *table, struct thread *t) {
@@ -115,9 +99,11 @@ void thread_table_remove(struct thread_table *table, struct thread *t) {
         table->thread_count--;
         spin_unlock_irqrestore(&table->count_lock, f2);
 
-        // Defer destruction until RCU grace period
         spin_unlock_irqrestore(&b->lock, f);
-        call_rcu(&t->rcu, thread_rcu_free);
+        // No free here: the thread struct is owned by the legacy
+        // p->threads / p->zombies list reference and freed by
+        // thread_put() when that list drops it. This table is just a
+        // secondary index; unlinking the bucket is all that is needed.
     } else {
         spin_unlock_irqrestore(&b->lock, f);
     }

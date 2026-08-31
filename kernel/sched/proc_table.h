@@ -3,14 +3,16 @@
 
 #include <stdint.h>
 #include "sync/lock.h"
-#include "sync/rcu.h"
 #include "sched/pid_alloc.h"
 
 /*
- * Process hash table with per-bucket locking and RCU protection
+ * Process hash table with per-bucket locking.
  *
- * Replaces the old global proc_list linked list.
- * Provides O(1) average process lookup with minimal contention.
+ * The sole process store (proc_list is gone). O(1) average lookup.
+ * Lookups take the bucket lock and return a ref'd pointer; removal
+ * takes the same lock and drops the table's reference. Iteration is
+ * proc_table_for_each_ref (batched, ref'd, no lock held in the
+ * callback).
  *
  * Structure:
  *   Hash buckets protected by per-bucket spinlocks
@@ -57,9 +59,9 @@ static inline unsigned proc_hash(int pid) {
     return (unsigned)pid % PROC_HASH_BUCKETS;
 }
 
-// Lookup process by PID (RCU-protected, no lock needed)
-// Returns pointer to process struct, or NULL if not found
-// Caller must use rcu_read_lock()/rcu_read_unlock() if needed
+// Lookup process by PID. Takes the bucket lock and returns the process
+// with a reference held (p->ref raised), or NULL. The caller MUST
+// proc_put() the result.
 struct process *proc_table_lookup(int pid);
 
 // Allocate new PID and reserve entry (takes bucket lock)

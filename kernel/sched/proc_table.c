@@ -66,7 +66,7 @@ void proc_table_insert(int pid, struct process *proc) {
 
     // Insert at head of bucket chain
     proc->proc_next_hash = b->head;
-    rcu_assign_pointer(b->head, proc);
+    __atomic_store_n(&b->head, proc, __ATOMIC_RELEASE);
 
     // Update process count
     uint64_t f2 = spin_lock_irqsave(&global_proc_table.count_lock);
@@ -76,20 +76,11 @@ void proc_table_insert(int pid, struct process *proc) {
     spin_unlock_irqrestore(&b->lock, f);
 }
 
-/*
- * Callback invoked after RCU grace period
- * Completes process destruction (free struct and PID)
- */
-static void proc_rcu_free(struct rcu_head *rh) {
-    struct process *proc = container_of(rh, struct process, rcu);
-
-    // Free PID for reuse
-    pid_free(&global_proc_table.pid_alloc, proc->pid);
-
-    // Free process structure
-    kfree(proc);
-}
-
+// Unlinks proc from its bucket and drops the process table's reference
+// on it (proc_put frees the struct + pid when it was the last one). A
+// lookup that is mid-flight holds its own reference and does the real
+// free. Safe against proc_table_lookup because both take the bucket
+// lock.
 void proc_table_remove(struct process *proc) {
     if (!proc || proc->pid <= 0) {
         return;
@@ -114,9 +105,8 @@ void proc_table_remove(struct process *proc) {
         global_proc_table.process_count--;
         spin_unlock_irqrestore(&global_proc_table.count_lock, f2);
 
-        // Defer destruction until RCU grace period
         spin_unlock_irqrestore(&b->lock, f);
-        call_rcu(&proc->rcu, proc_rcu_free);
+        proc_put(proc);   // drops the table's reference
     } else {
         spin_unlock_irqrestore(&b->lock, f);
     }
