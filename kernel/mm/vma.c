@@ -60,11 +60,11 @@ static int vma_insert(struct process *p, uint64_t start, uint64_t end,
 // Pages a mapping covers but that were never touched have no frame and
 // must not be freed -- that distinction is what demand paging buys, and
 // getting it wrong either leaks or double-frees.
-static void unmap_range(struct process *p, uint64_t start, uint64_t end) {
+static void unmap_range(struct process *p, uint64_t start, uint64_t end, int free_frames) {
     if (!p->pml4_phys) { return; }
     uint64_t *pml4 = (uint64_t *)phys_to_virt(p->pml4_phys);
     for (uint64_t v = start; v < end; v += PMM_FRAME_SIZE) {
-        paging_unmap_from(pml4, v, 1);
+        paging_unmap_from(pml4, v, free_frames);
     }
 }
 
@@ -81,7 +81,7 @@ static int vma_munmap_locked(struct process *p, uint64_t addr, uint64_t len) {
 
         uint64_t lo = v->start > start ? v->start : start;
         uint64_t hi = v->end   < end   ? v->end   : end;
-        unmap_range(p, lo, hi);
+        unmap_range(p, lo, hi, !(v->flags & VMA_PHYS));
 
         if (v->start < start && v->end > end) {
             // Punching the middle: keep the head, add a tail.
@@ -132,6 +132,33 @@ static int64_t vma_mmap_locked(struct process *p, uint64_t addr, uint64_t len,
     }
     if (!vma_insert(p, addr, addr + len, prot, flags)) { return -ENOMEM; }
     // Nothing is mapped yet: the fault handler populates on first touch.
+    return (int64_t)addr;
+}
+
+static int64_t vma_map_phys_locked(struct process *p, uint64_t phys, uint64_t len,
+                uint32_t prot) {
+    if (len == 0) { return -EINVAL; }
+    if (prot & PROT_EXEC) { return -EINVAL; }          // W^X: no executable device map
+    len = page_up(len);
+    uint64_t addr = p->mmap_next;
+    if (addr + len > MMAP_LIMIT || addr + len < addr) { return -ENOMEM; }
+    if (!vma_insert(p, addr, addr + len, prot, MAP_SHARED | VMA_PHYS)) { return -ENOMEM; }
+    p->mmap_next = addr + len;
+
+    uint64_t pf = PAGE_USER | PAGE_NO_EXECUTE | PAGE_NOFREE;
+    if (prot & PROT_WRITE) { pf |= PAGE_WRITABLE; }
+    uint64_t *pml4 = (uint64_t *)phys_to_virt(p->pml4_phys);
+    for (uint64_t off = 0; off < len; off += PMM_FRAME_SIZE) {
+        if (paging_map_into(pml4, addr + off, phys + off, pf) != 0) {
+            // Roll back the pages mapped so far, then the vma. Frames are
+            // device-owned, so don't free them.
+            for (uint64_t b = 0; b < off; b += PMM_FRAME_SIZE) {
+                paging_unmap_from(pml4, addr + b, 0);
+            }
+            vma_munmap_locked(p, addr, len);
+            return -ENOMEM;
+        }
+    }
     return (int64_t)addr;
 }
 
@@ -195,7 +222,7 @@ static int vma_mprotect_locked(struct process *p, uint64_t addr, uint64_t len, u
         // LESS permissive must lose its pages now, or a stale writable
         // PTE would outlive the mprotect that removed the right.
         if (!(prot & PROT_WRITE)) {
-            unmap_range(p, v->start, v->end);
+            unmap_range(p, v->start, v->end, !(v->flags & VMA_PHYS));
         }
     }
     return 0;
@@ -206,6 +233,9 @@ static int vma_fault_locked(struct process *p, uint64_t addr, int write) {
     if (!v) { return 0; }                                  // -> SIGSEGV
     if (v->prot == PROT_NONE) { return 0; }
     if (write && !(v->prot & PROT_WRITE)) { return 0; }
+    // A device mapping is populated eagerly at creation; a not-present
+    // fault inside one means the page was unmapped under it -> SIGSEGV.
+    if (v->flags & VMA_PHYS) { return 0; }
 
     uint64_t frame = pmm_alloc(0);
     if (!frame) { return 0; }
@@ -228,7 +258,7 @@ static void vma_destroy_all_locked(struct process *p) {
     struct vma *v = p->vmas;
     while (v) {
         struct vma *next = v->next;
-        unmap_range(p, v->start, v->end);
+        unmap_range(p, v->start, v->end, !(v->flags & VMA_PHYS));
         kfree(v);
         v = next;
     }
@@ -264,6 +294,13 @@ int vma_reserve(struct process *p, uint64_t start, uint64_t len,
                 uint32_t prot, uint32_t flags) {
     uint64_t f = spin_lock_irqsave(&p->mm_lock);
     int rc = vma_reserve_locked(p, start, len, prot, flags);
+    spin_unlock_irqrestore(&p->mm_lock, f);
+    return rc;
+}
+
+int64_t vma_map_phys(struct process *p, uint64_t phys, uint64_t len, uint32_t prot) {
+    uint64_t f = spin_lock_irqsave(&p->mm_lock);
+    int64_t rc = vma_map_phys_locked(p, phys, len, prot);
     spin_unlock_irqrestore(&p->mm_lock, f);
     return rc;
 }

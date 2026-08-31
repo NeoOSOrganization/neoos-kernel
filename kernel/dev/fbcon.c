@@ -1,6 +1,7 @@
 #include "dev/fbcon.h"
 #include "dev/fb.h"
 #include "dev/serial.h"
+#include "sync/lock.h"
 
 extern const uint8_t font8x16[256][16];
 
@@ -10,6 +11,7 @@ extern const uint8_t font8x16[256][16];
 #define BG 0x00000000u   // black
 
 static uint32_t cols, rows, cx, cy;
+static struct spinlock fbcon_lock;
 
 static inline volatile uint32_t *pixel(uint32_t px, uint32_t py) {
     return (volatile uint32_t *)(fb.virt + (uint64_t)py * fb.pitch + (uint64_t)px * 4);
@@ -26,22 +28,47 @@ static void put_glyph(uint32_t gx, uint32_t gy, unsigned char ch) {
     }
 }
 
+// Shift the visible area up one text row. 64-bit stores -- a byte loop
+// over 4 MiB is far too slow to run on every newline.
 static void scroll_one(void) {
-    volatile uint8_t *base = fb.virt;
-    uint64_t row_bytes = (uint64_t)fb.pitch * GLYPH_H;
-    uint64_t moved = (uint64_t)(rows - 1) * row_bytes;
-    for (uint64_t i = 0; i < moved; i++) { base[i] = base[i + row_bytes]; }
-    for (uint64_t i = moved; i < (uint64_t)rows * row_bytes; i++) { base[i] = 0; }
+    volatile uint64_t *base = (volatile uint64_t *)fb.virt;
+    uint64_t row_words = ((uint64_t)fb.pitch * GLYPH_H) / 8;
+    uint64_t total_words = row_words * rows;
+    for (uint64_t i = 0; i + row_words < total_words; i++) {
+        base[i] = base[i + row_words];
+    }
+    for (uint64_t i = total_words - row_words; i < total_words; i++) {
+        base[i] = 0;
+    }
+}
+
+static void clear_locked(void) {
+    volatile uint64_t *p = (volatile uint64_t *)fb.virt;
+    for (uint64_t i = 0; i < fb.size / 8; i++) { p[i] = 0; }
+    cx = cy = 0;
+}
+
+static void putc_locked(char c) {
+    if (c == '\n')      { cx = 0; cy++; }
+    else if (c == '\r') { cx = 0; }
+    else if (c == '\b') { if (cx) { cx--; put_glyph(cx, cy, ' '); } }
+    else if (c == '\t') { cx = (cx + 8u) & ~7u; }
+    else                { put_glyph(cx, cy, (unsigned char)c); cx++; }
+
+    if (cx >= cols) { cx = 0; cy++; }
+    if (cy >= rows) { scroll_one(); cy = rows - 1; }
 }
 
 void fbcon_clear(void) {
     if (!fb.present) { return; }
-    for (uint64_t i = 0; i < fb.size; i++) { fb.virt[i] = 0; }
-    cx = cy = 0;
+    uint64_t f = spin_lock_raw(&fbcon_lock);
+    clear_locked();
+    spin_unlock_raw(&fbcon_lock, f);
 }
 
 void fbcon_init(void) {
     if (!fb.present) { return; }
+    spin_init(&fbcon_lock, LOCK_RANK_FBCON, "fbcon");
     cols = fb.width / GLYPH_W;
     rows = fb.height / GLYPH_H;
     fbcon_clear();
@@ -54,18 +81,16 @@ void fbcon_init(void) {
 
 void fbcon_putc(char c) {
     if (!fb.present) { return; }
-    if (c == '\n')      { cx = 0; cy++; }
-    else if (c == '\r') { cx = 0; }
-    else if (c == '\b') { if (cx) { cx--; put_glyph(cx, cy, ' '); } }
-    else if (c == '\t') { cx = (cx + 8u) & ~7u; }
-    else                { put_glyph(cx, cy, (unsigned char)c); cx++; }
-
-    if (cx >= cols) { cx = 0; cy++; }
-    if (cy >= rows) { scroll_one(); cy = rows - 1; }
+    uint64_t f = spin_lock_raw(&fbcon_lock);
+    putc_locked(c);
+    spin_unlock_raw(&fbcon_lock, f);
 }
 
 void fbcon_write(const char *s, uint64_t n) {
-    for (uint64_t i = 0; i < n; i++) { fbcon_putc(s[i]); }
+    if (!fb.present) { return; }
+    uint64_t f = spin_lock_raw(&fbcon_lock);
+    for (uint64_t i = 0; i < n; i++) { putc_locked(s[i]); }
+    spin_unlock_raw(&fbcon_lock, f);
 }
 
 void fbcon_selftest(void) {
@@ -73,12 +98,13 @@ void fbcon_selftest(void) {
         serial_write_string("[fbcon] selftest skipped (no framebuffer)\n");
         return;
     }
-    // Draw 'A' at the origin and read back a pixel that its glyph sets
-    // (row 9, column 1 -- the left stem of the crossbar area).
+    uint64_t f = spin_lock_raw(&fbcon_lock);
     put_glyph(0, 0, 'A');
-    volatile uint32_t *p = pixel(1, 9);
+    volatile uint32_t *p = pixel(1, 9);   // a set bit of the 'A' crossbar
     uint32_t got = *p;
-    fbcon_clear();
+    clear_locked();
+    spin_unlock_raw(&fbcon_lock, f);
+
     if (got != FG) {
         serial_write_string("[fbcon] selftest FAILED: glyph readback ");
         serial_write_hex64(got);

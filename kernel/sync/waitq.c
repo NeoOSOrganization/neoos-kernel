@@ -7,10 +7,16 @@
 #include "dev/timer.h"
 #include "dev/serial.h"
 
+static struct waitq poll_broadcast;   // see the poll/select section below
+
 void waitq_init(struct waitq *q) {
     q->head = 0;
     q->tail = 0;
     spin_init(&q->lock, LOCK_RANK_WAITQ, "waitq");
+}
+
+void waitq_global_init(void) {
+    waitq_init(&poll_broadcast);
 }
 
 void waitq_lock_selftest(void) {
@@ -220,6 +226,7 @@ void waitq_wake_one(struct waitq *q) {
     struct thread *t = waitq_dequeue(q);
     spin_unlock_irqrestore(&q->lock, f);
     if (t) { waitq_make_ready(t); }
+    if (waitq_poll_active && q != &poll_broadcast) { waitq_poll_notify(); }
 }
 
 void waitq_wake_all(struct waitq *q) {
@@ -240,6 +247,25 @@ void waitq_wake_all(struct waitq *q) {
         waitq_make_ready(woken);
         woken = next;
     }
+
+    // A readiness change on any object may satisfy a poll/select.
+    if (waitq_poll_active && q != &poll_broadcast) { waitq_poll_notify(); }
+}
+
+// ---- poll/select broadcast ----------------------------------------
+
+volatile int waitq_poll_active;
+
+void waitq_poll_notify(void) {
+    waitq_wake_all(&poll_broadcast);
+}
+
+void waitq_poll_enter(void) { __atomic_add_fetch(&waitq_poll_active, 1, __ATOMIC_ACQ_REL); }
+void waitq_poll_leave(void) { __atomic_sub_fetch(&waitq_poll_active, 1, __ATOMIC_ACQ_REL); }
+
+int waitq_poll_wait(uint64_t deadline) {
+    // Poll waiters never hold a lock across this, so pass none.
+    return waitq_sleep_timeout(&poll_broadcast, 0, deadline);
 }
 
 // ---------------------------------------------------------------- selftest

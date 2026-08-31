@@ -296,21 +296,25 @@ int getpgid(int pid)           { return (int)syscall1(SYS_GETPGID, pid); }
 int setsid(void)               { return (int)syscall0(SYS_SETSID); }
 int getsid(int pid)            { return (int)syscall1(SYS_GETSID, pid); }
 
-long mmap_raw(unsigned long addr, unsigned long len, int prot, int flags) {
-    // Raw NeoOS-native wrappers so the mmap path can be tested before
-    // musl exists. mmap's 5th/6th args (fd, offset) go in r8/r9; passing
-    // fd = -1 requires reaching them, so this uses inline asm rather
-    // than the 4-argument helpers.
+long mmap_fd_raw(unsigned long addr, unsigned long len, int prot, int flags,
+                int fd, long offset) {
+    // Raw NeoOS-native wrapper so the mmap path can be tested before
+    // musl exists. mmap's 5th/6th args (fd, offset) go in r8/r9, so this
+    // uses inline asm rather than the 4-argument helpers.
     long ret;
     register long r10 __asm__("r10") = flags;
-    register long r8  __asm__("r8")  = -1;   /* fd */
-    register long r9  __asm__("r9")  = 0;    /* offset */
+    register long r8  __asm__("r8")  = fd;
+    register long r9  __asm__("r9")  = offset;
     __asm__ volatile ("syscall"
                       : "=a"(ret)
                       : "a"((long)SYS_MMAP), "D"(addr), "S"(len), "d"(prot),
                         "r"(r10), "r"(r8), "r"(r9)
                       : "rcx", "r11", "memory");
     return ret;
+}
+
+long mmap_raw(unsigned long addr, unsigned long len, int prot, int flags) {
+    return mmap_fd_raw(addr, len, prot, flags, -1, 0);
 }
 
 int munmap_raw(unsigned long addr, unsigned long len) {
@@ -322,8 +326,10 @@ int munmap_raw(unsigned long addr, unsigned long len) {
 // does so because these three names have a return convention every
 // caller already knows.
 void *mmap(void *addr, uint64_t length, int prot, int flags, int fd, int64_t offset) {
-    if (fd >= 0 || offset != 0) { return MAP_FAILED; }   // no file mappings yet
-    long rc = mmap_raw((unsigned long)(uintptr_t)addr, length, prot, flags);
+    // Anonymous mappings and device fds that implement mmap (/dev/fb0).
+    // A regular-file fd still gets -ENOSYS from the kernel.
+    long rc = mmap_fd_raw((unsigned long)(uintptr_t)addr, length, prot, flags,
+                          fd, (long)offset);
     if (rc < 0) { return MAP_FAILED; }
     return (void *)(uintptr_t)rc;
 }
@@ -374,6 +380,32 @@ int pipe2(int fds[2], int flags) {
 // musl supplies it over pipe2 there. Same arrangement here: one
 // syscall, and the legacy spelling is library code.
 int pipe(int fds[2]) { return pipe2(fds, 0); }
+
+// ------------------------------------------------------------- poll/select
+
+#include "poll.h"
+#define SYS_POLL_NR   67
+#define SYS_SELECT_NR 68
+
+int poll(struct pollfd *fds, unsigned long nfds, int timeout_ms) {
+    return (int)syscall3(SYS_POLL_NR, (int64_t)(uint64_t)(uintptr_t)fds,
+                         (int64_t)nfds, timeout_ms);
+}
+
+int select(int nfds, fd_set *rd, fd_set *wr, fd_set *ex, struct timeval *tv) {
+    // nfds/rd/wr/ex in the usual arg registers; tv (5th) in r8, which
+    // the kernel reads as frame->r8 -- same trick as mmap_fd_raw.
+    long ret;
+    register long r10 __asm__("r10") = (long)(uintptr_t)ex;
+    register long r8  __asm__("r8")  = (long)(uintptr_t)tv;
+    __asm__ volatile ("syscall"
+                      : "=a"(ret)
+                      : "a"((long)SYS_SELECT_NR), "D"((long)nfds),
+                        "S"((long)(uintptr_t)rd), "d"((long)(uintptr_t)wr),
+                        "r"(r10), "r"(r8)
+                      : "rcx", "r11", "memory");
+    return (int)ret;
+}
 
 int fcntl(int fd, int cmd, int arg) {
     return (int)syscall3(SYS_FCNTL, fd, cmd, arg);

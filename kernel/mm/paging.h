@@ -17,6 +17,12 @@
 // read-only user page was a COW page and no marker was needed.
 #define PAGE_COW         (1ULL << 9)
 
+// Bit 10: this leaf maps a frame the kernel owns permanently (a device
+// BAR -- the framebuffer). free_address_space() must not pmm_free() it
+// and fork() must not pmm_frame_share() it: the physical address is not
+// RAM and has no place in the frame allocator.
+#define PAGE_NOFREE      (1ULL << 10)
+
 // The physical-frame address field of a page-table entry: bits 12-51.
 // Masking with this (rather than ~0xFFF) also strips the reserved
 // high bits and PAGE_NO_EXECUTE, leaving just the frame address.

@@ -29,4 +29,15 @@ void fb_init(void *multiboot_info);
 // paging_init(). No-op when !fb.present.
 void fb_map(void);
 
+// /dev/fb0. fb_open is the devfs open hook; it wires fb_file_ops.
+struct file_descriptor;
+struct file_ops;
+extern const struct file_ops fb_file_ops;
+int fb_open(struct file_descriptor *f);
+
+// Linux fbdev ioctl numbers (asm-generic values).
+#define FBIOGET_VSCREENINFO 0x4600
+#define FBIOPUT_VSCREENINFO 0x4601
+#define FBIOGET_FSCREENINFO 0x4602
+
 #endif

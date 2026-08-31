@@ -87,6 +87,7 @@ void kmain(void *multiboot_info) {
     cpu_local_selftest();
     lock_selftest();
     waitq_lock_selftest();
+    waitq_global_init();
 
     pmm_init(multiboot_info);
     pmm_selftest();
@@ -252,6 +253,8 @@ void kmain(void *multiboot_info) {
     spawn("/BIN/FAULTER.ELF");
     spawn("/BIN/AVXTEST.ELF");
     spawn("/BIN/MMAPTEST.ELF");
+    spawn("/BIN/FBTEST.ELF");
+    spawn("/BIN/POLLTEST.ELF");
     spawn("/BIN/SMPTEST.ELF");
     spawn("/BIN/EVTEST.ELF");
     spawn("/BIN/IPCTEST.ELF");

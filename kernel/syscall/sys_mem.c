@@ -32,9 +32,20 @@ int64_t sys_mmap(struct syscall_args *a) {
     uint64_t addr = a->a1, len = a->a2;
     uint32_t prot = (uint32_t)a->a3, flags = (uint32_t)a->a4;
     int64_t  fd   = (int64_t)a->frame->r8;
-    // Anonymous only this milestone; the dynamic linker adds
-    // file-backed mappings when it needs them.
-    if (!(flags & MAP_ANONYMOUS) || fd >= 0) { return -ENOSYS; }
+
+    // A device fd whose file_ops implements mmap (only /dev/fb0 in M1a)
+    // handles its own placement and backing.
+    if (fd >= 0) {
+        struct file_descriptor *f = fd_get(current_proc(), (int)fd);
+        if (!f) { return -EBADF; }
+        struct mmap_req req = { addr, len, prot, flags, (uint64_t)a->frame->r9, 0 };
+        int64_t rc = file_mmap(f, &req);
+        return rc < 0 ? rc : (int64_t)req.out_addr;
+    }
+
+    // Anonymous only otherwise; the dynamic linker adds file-backed
+    // mappings when it needs them.
+    if (!(flags & MAP_ANONYMOUS)) { return -ENOSYS; }
     return vma_mmap(current_proc(), addr, len, prot, flags);
 }
 

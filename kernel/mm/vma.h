@@ -13,6 +13,12 @@
 #define MAP_FIXED     0x10
 #define MAP_ANONYMOUS 0x20
 
+// Internal vma->flags bit (above the MAP_* range): the mapping is backed
+// by fixed physical frames the kernel owns (a device, e.g. the
+// framebuffer). Its pages are mapped eagerly at creation and must NEVER
+// be pmm_free()d on unmap or teardown.
+#define VMA_PHYS      0x40
+
 // The gap between the ELF image (0x200000000000, see userland/user.ld)
 // and the thread stacks (0x700000000000). Grows up.
 #define MMAP_BASE  0x0000500000000000ULL
@@ -37,6 +43,12 @@ int     vma_mprotect(struct process *p, uint64_t addr, uint64_t len, uint32_t pr
 // addresses and populate the pages themselves.
 int     vma_reserve(struct process *p, uint64_t start, uint64_t len,
                     uint32_t prot, uint32_t flags);
+
+// Maps [phys, phys+len) into `p` at a kernel-chosen address, eagerly
+// (every page mapped now), backed by device-owned physical frames.
+// prot must not include PROT_EXEC (W^X). Returns the user address, or a
+// negative errno.
+int64_t vma_map_phys(struct process *p, uint64_t phys, uint64_t len, uint32_t prot);
 
 // Populates one page for a not-present fault at `addr`. Returns 1 if a
 // mapping covered it and a frame was mapped; 0 if the address belongs

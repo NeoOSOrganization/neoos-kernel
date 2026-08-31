@@ -31,6 +31,8 @@ int   mprotect(void *addr, uint64_t length, int prot);
 // way, and because the C runtime uses mmap before there is anywhere to
 // report an error to.
 long mmap_raw(unsigned long addr, unsigned long len, int prot, int flags);
+long mmap_fd_raw(unsigned long addr, unsigned long len, int prot, int flags,
+                 int fd, long offset);
 int  munmap_raw(unsigned long addr, unsigned long len);
 
 #endif

@@ -218,6 +218,12 @@ int file_poll(struct file_descriptor *f, int events) {
     return o->poll(f, events);
 }
 
+int64_t file_mmap(struct file_descriptor *f, struct mmap_req *req) {
+    const struct file_ops *o = ops_of(f);
+    if (!o || !o->mmap) { return -ENODEV; }   // mmap is optional, unlike the rest
+    return o->mmap(f, req);
+}
+
 void file_dup(struct file_descriptor *f) {
     const struct file_ops *o = ops_of(f);
     if (o) { o->dup(f); }

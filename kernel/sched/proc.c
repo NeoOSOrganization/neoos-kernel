@@ -541,6 +541,20 @@ static int fork_duplicate_user_pages(uint64_t *parent_pml4, uint64_t *child_pml4
                     uint64_t virt = ((uint64_t)i4 << 39) | ((uint64_t)i3 << 30) |
                                      ((uint64_t)i2 << 21) | ((uint64_t)i1 << 12);
 
+                    // A device mapping (PAGE_NOFREE -- the framebuffer):
+                    // the kernel owns the frame forever. Copy the entry
+                    // verbatim into the child (both see the same VRAM,
+                    // never copy-on-write) and do NOT touch the frame
+                    // allocator -- the physical address is not RAM.
+                    if (parent_pt[i1] & PAGE_NOFREE) {
+                        uint64_t nf_flags = parent_pt[i1] & (0xFFFULL | PAGE_NO_EXECUTE) & ~PAGE_PRESENT;
+                        if (paging_map_into(child_pml4, virt,
+                                            parent_pt[i1] & PAGE_ADDR_MASK, nf_flags) != 0) {
+                            return 0;
+                        }
+                        continue;
+                    }
+
                     // Only a WRITABLE page needs to become copy-on-write.
                     // A page that is already read-only is either a real
                     // W^X segment (.text/.rodata -- stays shared and RO

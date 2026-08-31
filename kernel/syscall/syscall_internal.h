@@ -146,4 +146,7 @@ int64_t sys_yield(struct syscall_args *a);
 // Always declared; returns -ENOSYS without -DNEOOS_TEST_HOOKS.
 int64_t sys_test_hook(struct syscall_args *a);
 
+int64_t sys_poll(struct syscall_args *a);
+int64_t sys_select(struct syscall_args *a);
+
 #endif

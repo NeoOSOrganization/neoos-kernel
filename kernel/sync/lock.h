@@ -36,6 +36,12 @@
 #define LOCK_RANK_VNODE       6
 #define LOCK_RANK_BLOCKDEV    7
 #define LOCK_RANK_DRIVER      8
+// A struct tty's lock (console and every pty slave). Same rank as
+// DRIVER -- it is what the old single console_tty lock used, and it is
+// handed to waitq_sleep() as `release` so it must sit below WAITQ. No
+// two tty locks are ever held at once (a pty master write takes only
+// the slave's), so sharing a rank number is safe.
+#define LOCK_RANK_TTY         LOCK_RANK_DRIVER
 // IPC object guards. Every one of these follows the same pattern the
 // mutex established: hold the guard, decide whether to block, and hand
 // the guard to waitq_sleep() as `release` so the decision and the sleep
@@ -89,6 +95,10 @@
 // can be acquired from anywhere -- including while holding any other
 // lock. Whatever holds it must never acquire another lock.
 #define LOCK_RANK_SERIAL    255
+// Same deal for the framebuffer console: taken from tty output on any
+// CPU and from the panic path, never nested. A 4 MiB scroll on a raced
+// cursor is a wild pointer, so the lock is not optional here.
+#define LOCK_RANK_FBCON     254
 
 #define LOCK_MAX_HELD 8
 

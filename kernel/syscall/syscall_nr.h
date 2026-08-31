@@ -121,7 +121,10 @@
 // Compiled only under -DNEOOS_TEST_HOOKS; returns -ENOSYS in production.
 #define SYS_TEST_HOOK       66
 
+#define SYS_POLL            67
+#define SYS_SELECT          68
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX             67
+#define SYS_MAX             69
 
 #endif

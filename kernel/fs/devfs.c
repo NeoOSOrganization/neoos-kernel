@@ -6,6 +6,7 @@
 #include "dev/vga.h"
 #include "dev/tty.h"
 #include "dev/evdev.h"
+#include "dev/fb.h"
 #include <stddef.h>
 
 // Forward declarations of file_ops implementations
@@ -114,6 +115,9 @@ static const struct devfs_dev devices[] = {
     { "ZERO",    VNODE_DEVICE, &zero_file_ops, zero_open },
     { "input",   VNODE_DIR,    NULL,           NULL },
     { "input/event0", VNODE_DEVICE, &evdev_file_ops, evdev_devfs_open },
+    // Appended AFTER input/* so the hardcoded inode ids in devfs_lookup /
+    // devfs_readdir for the input dir (5) and event0 (6) do not shift.
+    { "fb0",     VNODE_DEVICE, &fb_file_ops,  fb_open },
 };
 #define DEVFS_COUNT (sizeof(devices) / sizeof(devices[0]))
 

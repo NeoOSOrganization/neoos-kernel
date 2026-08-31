@@ -35,6 +35,17 @@ struct vfs_dirent;
 #define POLLHUP 0x010
 #define POLLNVAL 0x020
 
+// Passed to file_ops.mmap. out_addr is filled by the implementation on
+// success; the syscall layer returns it to userland.
+struct mmap_req {
+    uint64_t addr;      // hint (0 = kernel chooses)
+    uint64_t len;
+    uint64_t prot;      // PROT_*
+    uint64_t flags;     // MAP_*
+    uint64_t off;       // offset into the object
+    uint64_t out_addr;  // result
+};
+
 struct file_ops {
     const char *name;   // for diagnostics and the selftest
 
@@ -44,6 +55,10 @@ struct file_ops {
     int64_t (*getdents)(struct file_descriptor *f, void *buf, int bytes);
     int64_t (*ioctl)(struct file_descriptor *f, uint64_t request, void *arg);
     int     (*poll)(struct file_descriptor *f, int events);
+
+    // Optional (nullable). Only device fds that support mmap set it --
+    // /dev/fb0 in M1a. file_mmap() returns -ENODEV when it is null.
+    int64_t (*mmap)(struct file_descriptor *f, struct mmap_req *req);
 
     // Reference counting, called by the fd table rather than by the
     // syscall layer. `dup` is called once per new fd that comes to
@@ -68,6 +83,7 @@ int64_t file_getdents(struct file_descriptor *f, void *buf, int bytes);
 int64_t file_bind_vnode_ops(struct file_descriptor *f);
 int64_t file_ioctl(struct file_descriptor *f, uint64_t request, void *arg);
 int     file_poll(struct file_descriptor *f, int events);
+int64_t file_mmap(struct file_descriptor *f, struct mmap_req *req);
 void    file_dup(struct file_descriptor *f);
 void    file_close(struct file_descriptor *f);
 

@@ -413,7 +413,7 @@ void free_address_space(uint64_t pml4_phys) {
                 uint64_t *pt = (uint64_t *)phys_to_virt(pt_phys);
 
                 for (unsigned i1 = 0; i1 < 512; i1++) {
-                    if (pt[i1] & PAGE_PRESENT) {
+                    if ((pt[i1] & PAGE_PRESENT) && !(pt[i1] & PAGE_NOFREE)) {
                         pmm_free(pt[i1] & PAGE_ADDR_MASK, 0);
                     }
                 }
