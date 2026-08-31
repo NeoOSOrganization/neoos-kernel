@@ -152,6 +152,17 @@ static void sock_free(struct socket *s) {
     kfree(s);
 }
 
+// Drops one reference. The last one takes the socket off the demux
+// table and frees it. Callers must NOT hold s->lock -- table_remove()
+// takes sock_table_lock, which ranks below the socket lock.
+static void sock_put(struct socket *s) {
+    if (__atomic_sub_fetch(&s->refs, 1, __ATOMIC_ACQ_REL) != 0) { return; }
+    // Off the demux table BEFORE freeing, or a datagram arriving in the
+    // gap is delivered into freed memory.
+    if (s->bound) { table_remove(s); }
+    sock_free(s);
+}
+
 // ------------------------------------------------------------ receive path
 
 // Called from net.c's UDP input, which runs in the SENDER's context on
@@ -405,15 +416,27 @@ int64_t socket_sendto(int fd, const void *buf, uint64_t len, int flags,
 // with nowhere to report the sender.
 static int64_t recv_one(struct socket *s, int nonblock, void *buf, uint64_t len,
                         struct k_sockaddr *src, uint32_t *src_len) {
+    // Hold a reference across the (possibly blocking) wait. A close() on
+    // another thread of this process -- or this thread being SIGKILLed
+    // as its process exits, which closes every fd -- can drop the fd's
+    // reference to zero while we are parked on s->readers. Without this
+    // ref, sock_free() would pull s->lock and s->readers out from under
+    // waitq_sleep()'s own re-acquire, and schedule() would then run
+    // against a freed lock (seen as a bogus "[lock] PANIC: schedule()
+    // with a spinlock held ... holding=socktable").
+    __atomic_fetch_add(&s->refs, 1, __ATOMIC_ACQ_REL);
+
     uint64_t sf = spin_lock_irqsave(&s->lock);
     while (!s->rx_head) {
         if (nonblock) {
             spin_unlock_irqrestore(&s->lock, sf);
+            sock_put(s);
             return -EAGAIN;
         }
         int rc = waitq_sleep(&s->readers, &s->lock);
         if (rc == -EINTR) {
             spin_unlock_irqrestore(&s->lock, sf);
+            sock_put(s);
             return -EINTR;
         }
     }
@@ -434,6 +457,7 @@ static int64_t recv_one(struct socket *s, int nonblock, void *buf, uint64_t len,
 
     int rc = addr_out(src, src_len, d->src_ip_n, d->src_port_n);
     kfree(d);
+    sock_put(s);
     if (rc != 0) { return rc; }
     return (int64_t)give;
 }
@@ -494,12 +518,7 @@ static void sock_close(struct file_descriptor *f) {
     struct socket *s = (struct socket *)f->priv;
     if (!s) { return; }
     f->priv = 0;
-    if (__atomic_sub_fetch(&s->refs, 1, __ATOMIC_ACQ_REL) != 0) { return; }
-
-    // Off the demux table BEFORE freeing, or a datagram arriving in the
-    // gap is delivered into freed memory.
-    if (s->bound) { table_remove(s); }
-    sock_free(s);
+    sock_put(s);
 }
 
 static const struct file_ops sock_ops = {
