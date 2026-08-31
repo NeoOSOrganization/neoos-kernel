@@ -2,6 +2,7 @@
 #define NEOOS_CPU_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 // Upper bound on the extended state this kernel will ever enable:
 // x87 + SSE + AVX, which CPUID reports as 832 bytes on Haswell.
@@ -42,5 +43,23 @@ void cpu_state_restore(void *buf);
 void cpu_state_init(void *buf);
 
 void cpu_state_selftest(void);
+
+// CPUID instruction: query CPU features.
+// Declared here but implemented in arch/cpu.c (used by rand_init).
+void cpuid(uint32_t leaf, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx);
+
+// Read the TSC (time stamp counter).
+static inline uint64_t rdtsc(void) {
+    uint32_t lo, hi;
+    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+// Try to read a random 64-bit value via RDRAND. Returns true if successful.
+static inline bool rdrand64(uint64_t *out) {
+    uint8_t ok;
+    __asm__ volatile ("rdrand %%rax; setc %1" : "=a"(*out), "=q"(ok) :: "cc");
+    return (bool)ok;
+}
 
 #endif

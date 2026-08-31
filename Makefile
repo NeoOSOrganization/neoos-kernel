@@ -16,7 +16,7 @@ ISO_DIR := iso
 # act: a stray .c file in a new folder should fail to link, not get
 # picked up silently.
 KERNEL_DIRS := kernel kernel/arch kernel/dev kernel/ipc kernel/smp \
-	kernel/syscall kernel/mm kernel/fs kernel/sched kernel/sync kernel/net
+	kernel/syscall kernel/mm kernel/fs kernel/sched kernel/sync kernel/net kernel/lib
 C_SOURCES := $(foreach d,$(KERNEL_DIRS),$(wildcard $(d)/*.c))
 # Every kernel header, as a coarse prerequisite for every object. Without
 # this, editing a .h leaves stale .o files behind and a genuinely broken

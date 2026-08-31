@@ -18,6 +18,7 @@
 #include "sync/waitq.h"
 #include "errno.h"
 #include "dev/timer.h"
+#include "lib/rand.h"
 
 extern void context_switch(uint64_t *old_rsp, uint64_t *new_rsp);
 extern void kernel_thread_entry_trampoline(void);
@@ -289,18 +290,15 @@ static uint64_t build_initial_stack(uint64_t pml4_phys, uint64_t stack_top,
     }
 
     // AT_RANDOM: sixteen bytes musl uses to seed its stack guard and
-    // its malloc. NOT cryptographic here -- NeoOS has no entropy source
-    // -- and derived from the tick counter and the addresses at hand so
-    // that it at least differs between processes. Recorded as a
-    // divergence in docs/abi-compatibility.md; a real RNG replaces it.
+    // its malloc. Drawn from a seeded CSPRNG (xoshiro256**) rather than
+    // the tick counter. Still not a real entropy pool -- no reseeding, no
+    // /dev/random -- but adequate for the stack guard canary.
     sp -= 16;
     sp &= ~0xFULL;
     uint64_t at_random = sp;
-    uint64_t mix = timer_ticks() ^ (stack_top >> 12) ^ (info->entry << 7);
-    for (int i = 0; i < 2; i++) {
-        mix = mix * 6364136223846793005ULL + 1442695040888963407ULL;
-        if (!poke_user_u64(pml4_phys, at_random + (uint64_t)i * 8, mix)) { return 0; }
-    }
+    uint8_t at_random_bytes[16];
+    rand_bytes(at_random_bytes, 16);
+    if (!poke_user_bytes(pml4_phys, at_random, at_random_bytes, 16)) { return 0; }
 
     // The vector itself: argc(1) + argv(argc) + NULL(1) + envp NULL(1)
     // + 7 auxv pairs, in qwords.

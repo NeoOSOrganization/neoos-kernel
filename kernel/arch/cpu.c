@@ -29,7 +29,7 @@ static uint64_t xstate_mask;
 static int      have_avx, have_avx2;
 static enum { SAVE_FXSAVE, SAVE_XSAVE, SAVE_XSAVEOPT } save_mode = SAVE_FXSAVE;
 
-static void cpuid(uint32_t leaf, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx) {
+void cpuid(uint32_t leaf, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx) {
     __asm__ volatile ("cpuid"
                        : "=a"(*eax), "=b"(*ebx), "=c"(*ecx), "=d"(*edx)
                        : "a"(leaf));

@@ -34,6 +34,13 @@
 #include "ipc/pipe.h"
 #include "net/net.h"
 #include "net/socket.h"
+#include "lib/rand.h"
+
+void kernel_shutdown(void) {
+    serial_write_string("\n[kernel] all tests complete, shutting down\n");
+    cli();
+    for (;;) { __asm__ volatile ("hlt"); }
+}
 
 void kmain(void *multiboot_info) {
     serial_init();
@@ -98,6 +105,9 @@ void kmain(void *multiboot_info) {
     rtc_init();
     rtc_selftest();
 
+    // AFTER rtc_init: rand_init uses rtc_boot_epoch() as part of the seed.
+    rand_init();
+
     uint8_t keyboard_pin = acpi.irq1_gsi - acpi.ioapic_gsi_base;
     ioapic_set_redirection(keyboard_pin, VECTOR_KEYBOARD, acpi.irq1_polarity,
                             acpi.irq1_trigger, (uint8_t)lapic_get_id());
@@ -153,6 +163,7 @@ void kmain(void *multiboot_info) {
     runqueue_lock_selftest();
     syscall_init();
     syscall_table_selftest();
+    rand_selftest();
     futex_init();
     file_selftest();
     pipe_selftest();
