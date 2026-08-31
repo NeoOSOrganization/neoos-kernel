@@ -348,7 +348,7 @@ void signal_do_stop(struct thread *t, int sig) {
     // in wait4 waiting for the very stop report that is stuck here.
     if (all_stopped) {
         struct process *parent = proc_find(p->parent_pid);
-        if (parent) { waitq_wake_all(&parent->child_waiters); }
+        if (parent) { waitq_wake_all(&parent->child_waiters); proc_put(parent); }
     }
 
     // The commit, and the whole point of `stopping`.

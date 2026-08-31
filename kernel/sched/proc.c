@@ -47,6 +47,7 @@ static struct process *proc_alloc(void) {
     struct process *p = (struct process *)kmalloc(sizeof(struct process));
     if (!p) { return 0; }
     for (unsigned i = 0; i < sizeof(struct process); i++) { ((uint8_t *)p)[i] = 0; }
+    p->ref = 1;   // the proc_table's reference; dropped by proc_reap
 
     // Allocate per-process file descriptor table
     struct fd_table *ft = (struct fd_table *)kmalloc(sizeof(struct fd_table));
@@ -662,8 +663,11 @@ int signal_kill(int pid, int sig, struct siginfo *info) {
 
     if (pid > 0) {
         struct process *p = proc_find(pid);
-        if (!p || p->state == PROC_ZOMBIE) { return -ESRCH; }
-        return sig ? signal_send_process(p, sig, info) : 0;
+        if (!p) { return -ESRCH; }
+        int rc = (p->state == PROC_ZOMBIE) ? -ESRCH
+               : (sig ? signal_send_process(p, sig, info) : 0);
+        proc_put(p);
+        return rc;
     }
 
     int target_pgid = (pid == 0) ? current_proc()->pgid : -pid;
@@ -711,13 +715,26 @@ int signal_tkill(int tgid, int tid, int sig, struct siginfo *info) {
     return rc;
 }
 
-void proc_get(struct process *p) { p->live_threads++; }
+void proc_get(struct process *p) {
+    __atomic_add_fetch(&p->ref, 1, __ATOMIC_ACQ_REL);
+}
+
+void proc_put(struct process *p) {
+    if (__atomic_sub_fetch(&p->ref, 1, __ATOMIC_ACQ_REL) != 0) { return; }
+    // Last reference. The address space, fds and per-process tables are
+    // already gone (proc_put_live + proc_reap); only the struct and the
+    // pid remain.
+    pid_free(&global_proc_table.pid_alloc, p->pid);
+    kfree(p);
+}
+
+void proc_get_live(struct process *p) { p->live_threads++; }
 
 // Drops one live-thread count. On the last one, frees the address
 // space and the file descriptors, and turns the process into a zombie
 // carrying only its exit code -- the struct itself outlives its
-// address space and is freed by wait_for_pid's reap.
-void proc_put(struct process *p) {
+// address space and is freed by proc_reap dropping the last reference.
+void proc_put_live(struct process *p) {
     if (--p->live_threads > 0) { return; }
 
     if (p->pml4_phys) {
@@ -761,6 +778,7 @@ void proc_put(struct process *p) {
         info.fields.chld.si_status = p->exit_signal ? p->exit_signal : p->exit_code;
         signal_send_process(parent, SIGCHLD, &info);
         waitq_wake_all(&parent->child_waiters);
+        proc_put(parent);
     }
 }
 
@@ -851,7 +869,7 @@ static void proc_reap(struct process *p) {
         p->thread_table = 0;
     }
 
-    // Remove from new hash-based process table (uses RCU deferred cleanup)
+    // Unlink from the hash table (and, until Task 6, the legacy list).
     proc_table_remove(p);
 
     // DEPRECATED: Also remove from old proc_list during transition
@@ -861,7 +879,12 @@ static void proc_reap(struct process *p) {
     if (*pp) { *pp = p->next; }
     spin_unlock_irqrestore(&proc_lock, f);
 
-    // Note: p is freed via RCU callback from proc_table_remove, not here
+    // Drop the proc_table's reference. Until Task 7 wires this into
+    // proc_table_remove, proc_reap owns it: proc_table_remove's
+    // call_rcu(proc_rcu_free) is inert (rcu is never driven), so this
+    // is the only thing that frees the struct + pid. A lookup still in
+    // flight keeps its own ref and does the actual free.
+    proc_put(p);
 }
 
 // POSIX-shaped, and what musl's waitpid maps onto. NeoOS's own wait()
@@ -905,14 +928,15 @@ int64_t wait4(int pid, int *status, int options) {
 // parentage test would fail. (Found by the leak gate: routing this
 // through wait4 made five spawns run concurrently instead of in turn.)
 int64_t wait_for_pid(int pid) {
-    struct process *p = proc_find(pid);
+    struct process *p = proc_find(pid);   // ref held
     if (!p) { return -1; }
 
     while (p->state != PROC_ZOMBIE) {
-        if (waitq_sleep(&p->exit_waiters, 0) == -EINTR) { return -EINTR; }
+        if (waitq_sleep(&p->exit_waiters, 0) == -EINTR) { proc_put(p); return -EINTR; }
     }
 
     int st = encode_status(p);
-    proc_reap(p);
+    proc_reap(p);       // drops the proc_table's ref
+    proc_put(p);        // drops ours -- frees the struct here
     return ((st & 0x7f) == 0) ? ((st >> 8) & 0xff) : -(st & 0x7f);
 }

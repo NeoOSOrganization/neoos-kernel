@@ -115,12 +115,17 @@ int64_t sys_setpgid(struct syscall_args *a) {
     struct process *p = proc_find(pid);
     if (!p) { return -ESRCH; }
     p->pgid = pgid;
+    proc_put(p);
     return 0;
 }
 
 int64_t sys_getpgid(struct syscall_args *a) {
-    struct process *p = (int)a->a1 ? proc_find((int)a->a1) : current_proc();
-    return p ? p->pgid : -ESRCH;
+    int q = (int)a->a1;
+    struct process *p = q ? proc_find(q) : current_proc();
+    if (!p) { return -ESRCH; }
+    int pgid = p->pgid;
+    if (q) { proc_put(p); }
+    return pgid;
 }
 
 int64_t sys_setsid(struct syscall_args *a) {
@@ -132,8 +137,12 @@ int64_t sys_setsid(struct syscall_args *a) {
 }
 
 int64_t sys_getsid(struct syscall_args *a) {
-    struct process *p = (int)a->a1 ? proc_find((int)a->a1) : current_proc();
-    return p ? p->sid : -ESRCH;
+    int q = (int)a->a1;
+    struct process *p = q ? proc_find(q) : current_proc();
+    if (!p) { return -ESRCH; }
+    int sid = p->sid;
+    if (q) { proc_put(p); }
+    return sid;
 }
 
 int64_t sys_thread_create(struct syscall_args *a) {

@@ -24,25 +24,26 @@ void proc_table_init(void) {
     serial_write_string(" buckets\n");
 }
 
+// Returns the process with a reference held (p->ref raised), or NULL.
+// The caller must proc_put() the result. Holding the bucket lock across
+// the proc_get() is what makes this safe against a concurrent
+// proc_reap()/proc_put() freeing the struct: proc_table_remove() takes
+// the same bucket lock to unlink, so it cannot be mid-free here.
 struct process *proc_table_lookup(int pid) {
     if (pid <= 0) {
         return 0;
     }
 
-    unsigned bucket = proc_hash(pid);
-    struct proc_bucket *b = &global_proc_table.buckets[bucket];
-
-    // RCU read-side: No lock needed
-    // rcu_read_lock() / rcu_read_unlock() should wrap this in caller if needed
-    struct process *p = rcu_dereference(b->head);
-
-    while (p) {
+    struct proc_bucket *b = &global_proc_table.buckets[proc_hash(pid)];
+    uint64_t f = spin_lock_irqsave(&b->lock);
+    for (struct process *p = b->head; p; p = p->proc_next_hash) {
         if (p->pid == pid) {
+            proc_get(p);
+            spin_unlock_irqrestore(&b->lock, f);
             return p;
         }
-        p = rcu_dereference(p->proc_next_hash);
     }
-
+    spin_unlock_irqrestore(&b->lock, f);
     return 0;
 }
 

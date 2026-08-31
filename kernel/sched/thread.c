@@ -203,7 +203,7 @@ void thread_exit_self(int code) {
         // so thread_join or wait_for_pid's reap frees it later.
         //
         // p->lock is scoped to JUST this list move. It must NOT be
-        // held across proc_put() (switches CR3, frees the address space,
+        // held across proc_put_live() (switches CR3, frees the address space,
         // signals the parent) or schedule() (panics if any lock is
         // held). It is also NOT held across waitq_wake_all(): a waker
         // reaches thread_wait_off_cpu(), which spins until the target
@@ -219,7 +219,7 @@ void thread_exit_self(int code) {
         spin_unlock_irqrestore(&p->lock, f);
 
         waitq_wake_all(&p->join_waiters);
-        proc_put(p);
+        proc_put_live(p);
     } else {
         // idle_entry drains this same list under kzombies_lock. The
         // `cli` above is enough on one CPU and no protection at all on

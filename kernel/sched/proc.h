@@ -68,6 +68,11 @@ struct process {
     // count -- the struct itself outlives the address space and is
     // freed by wait_for_pid's reap.
     uint32_t live_threads;
+    // Reference count on this struct. Starts at 1 (the proc_table's
+    // entry). A lookup that outlives its bucket lock -- proc_find --
+    // returns the pointer with this raised; the caller drops it with
+    // proc_put. The struct + pid are freed when this hits zero.
+    uint32_t ref;
     uint64_t pml4_phys;             // 0 = shares the kernel address space
     // What the ELF loader learned about the image: where its program
     // headers landed, and its PT_TLS template. Kept for the whole life
@@ -304,9 +309,21 @@ void thread_put(struct thread *t);
 // -EDEADLK for a self-join, or -EINTR.
 int thread_join(int tid, int *out_code);
 
+// Looks up a process by pid. Returns it with a reference held (see
+// proc_get / proc_put) or NULL -- EVERY caller must proc_put the
+// result. A pointer from current_proc() is NOT ref-counted (you are
+// running in it) and must not be proc_put.
 struct process *proc_find(int pid);
 
+// Reference count on the struct itself (p->ref). proc_put frees the
+// struct + pid on the last drop.
 void proc_get(struct process *p);
 void proc_put(struct process *p);
+
+// Live-thread count (p->live_threads). proc_put_live on the last live
+// thread frees the address space + fds and makes the process a zombie;
+// the struct outlives that.
+void proc_get_live(struct process *p);
+void proc_put_live(struct process *p);
 
 #endif
