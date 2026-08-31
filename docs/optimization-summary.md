@@ -346,6 +346,62 @@ is left to do.
 (Phase 10, SMP & Concurrency, commits `bf7a7c8..af0345d`, is written up
 above.)
 
+### Phase 13.5: SMP hardening -- latent races found landing Phase 13
+
+Landing the pre-Phase-14 tree and running it through a 15-consecutive-
+`make test` gauntlet on 4 CPUs turned up SMP races the earlier handoff
+docs did not know about. Handoff:
+`docs/superpowers/specs/2026-08-31-smp-hardening-handoff.md`.
+
+**Fixed:**
+
+| # | Commit | Race |
+|---|---|---|
+| 1 | `a2a0014` | `tlb_shootdown` ran with the deferred-free lock held (`kmalloc` under it). Unbounded queue + overflow node allocated before the lock. Symptom: `[lock] PANIC`, serial log with zero `[timer] tick=` lines. **Verified gone** -- 15/15 clean boots, full tick logs. |
+| 2 | `69a3414` | `tty.c` wrote to COM1 through the unlocked `serial_putc`, so a userland `printf` interleaved byte-for-byte with a kernel `serial_write_string` on another CPU, ~1/9 splitting the boot marker so a completed boot was scored as failed. Now routes through the locked `serial_write_string_n` / `serial_write_raw_n`. |
+| 3 | `04e4866` | `p->threads` / `p->zombies` (linked via `thread->proc_next`) were mutated with only `cli` -- "no protection at all" on 4 CPUs. `thread_join` scanned zombies (miss), then the live list (miss -- a sibling exiting on another CPU had been unlinked from one list but not yet linked to the other) and wrongly returned `-ESRCH`. Seen as `[smptest] FAILED: thread_join`. `proc_lock` (rank `LOCK_RANK_PROCTABLE`) now guards every mutation and scan: `thread_alloc`, `thread_exit_self`, `thread_join`, `proc_reap`, `process_exit`. |
+| -- | `0e4c093` | `thread_stack_alloc` / `thread_stack_free` touched the `stack_slots` bitmap and the process page tables with no lock. Now hold `p->mm_lock` (rank `LOCK_RANK_MM`) across the whole body. |
+
+The `thread_join` failure is a pure timing race with no deterministic
+reproduction; the 15-run gauntlet
+(`.superpowers/sdd/2026-08-31-phase14-input-and-solidity/gauntlet.sh`)
+is its regression test. Status after these fixes: **15/15 green.**
+
+**Found, NOT fixed -- blocked on an architectural decision:**
+
+The per-process thread list is still read without `proc_lock` in
+`kernel/ipc/signal.c`: `signal_send_process` (walks `p->threads`, then
+acts on a stashed thread pointer via `signal_wake_for_delivery`),
+`signal_do_stop`, and `signal_do_continue`. Same race class as #3 -- a
+potential use-after-free against a concurrent `thread_join`.
+
+It is not a mechanical lock-add. `signal_send_process` /
+`signal_send_thread` are *designed* to be called with `proc_lock`
+already held (`signal_kill` / `signal_tkill` hold it across the send for
+process-group signal ordering -- see the comment at `proc.c:654`), so a
+plain `spin_lock_irqsave(&proc_lock)` inside them self-deadlocks. And
+`proc_table`'s per-bucket locks share rank `LOCK_RANK_PROCTABLE` with
+`proc_lock`, so an iterator cannot take a bucket lock while `proc_lock`
+is held. Detangling the `proc_lock` / `proc_table`-bucket / `sig_lock`
+relationship (an "already-locked" `_locked` variant of the signal-send
+path, or a proper thread refcount so "find thread, drop lock, act" is
+safe) is its own design task. Plan Task 6 (drop `proc_list`) sits on the
+same knot.
+
+**Also latent (same class, not triggered by the current suite):**
+
+- `wait4` iterates `proc_list` lock-free (`proc.c`). Plan Task 6.
+- RCU is inert: `rcu_init()` and `synchronize_rcu()` are never called,
+  so `call_rcu` callbacks (`thread_rcu_free`, `proc_rcu_free`) never
+  run. `proc_reap`'s "freed via RCU callback" comment is wrong --
+  processes are currently leaked; the legacy `p->zombies` / `proc_list`
+  paths are what actually free. The Phase 3/4 hash tables remain
+  half-migrated foundations.
+- `process_exit` snapshots sibling pointers under `proc_lock` then
+  delivers SIGKILL with it released (`0e4c093`... `04e4866`); a sibling
+  freed by a concurrent same-process `thread_join` in that window is a
+  narrow UAF. Closing it needs the same thread-refcount work.
+
 ---
 
 ## Key Design Decisions
@@ -421,7 +477,16 @@ and `docs/porting-coreutils.md`.
 
 Carried forward as known work, not yet done:
 - `proc_list` and `proc_lock` still shadow the hash table as a
-  "transition" path, and the process scan in `proc.c` is still linear.
+  "transition" path, and the process scan in `proc.c` is still linear
+  (`wait4` walks it lock-free). Plan Task 6. Blocked on designing the
+  `proc_lock` / `proc_table`-bucket / `sig_lock` relationship -- see
+  Phase 13.5.
+- The per-process thread list is read without `proc_lock` in
+  `kernel/ipc/signal.c` (`signal_send_process`, `signal_do_stop`,
+  `signal_do_continue`) -- same knot. See Phase 13.5.
+- RCU is inert (`rcu_init` / `synchronize_rcu` never called); the
+  Phase 3/4 hash tables are half-migrated and their `call_rcu` cleanups
+  never run. Processes leak on exit. See Phase 13.5.
 - The block cache is write-through, so FAT entry updates still do a
   full sector read-modify-write to disk per entry.
 

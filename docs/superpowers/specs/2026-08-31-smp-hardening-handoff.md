@@ -1,5 +1,38 @@
 # SMP hardening — handoff (2026-08-31)
 
+---
+
+## UPDATE (2026-08-31, second session): gauntlet is 15/15 green
+
+Races #1, #2, #3 and the `stack_slots` under-locking are **fixed and
+verified** — 15 consecutive clean `make test` runs on 4 CPUs. That is
+the "Phase 13 solid" bar. Full write-up:
+`docs/optimization-summary.md` → "Phase 13.5".
+
+| # | Commit | State |
+|---|---|---|
+| 1 tlb.c | `a2a0014` | **verified** — 15/15, full tick logs |
+| 2 serial | `69a3414` | fixed |
+| 3 thread-list | `04e4866` | fixed — `proc_lock` guards all 5 sites |
+| stack_slots | `0e4c093` | fixed — `p->mm_lock` |
+
+**Not done, and NOT mechanical:** the `signal.c` thread-list walks
+(`signal_send_process` etc.) and plan **Task 6** (drop `proc_list`) both
+sit on one architectural knot — `proc_lock`, the `proc_table` bucket
+locks (same rank `LOCK_RANK_PROCTABLE`), and `sig_lock` (rank above),
+with the process-group signal paths holding the outer lock across
+delivery. `signal_send_process` is *designed* to be called with
+`proc_lock` held (`signal_kill` does), so a plain lock-add
+self-deadlocks. This needs a design pass (brainstorm → spec): an
+`_locked` variant of the signal-send path, or a real thread refcount so
+"find thread, drop lock, act" is safe. RCU is also inert
+(`rcu_init`/`synchronize_rcu` never called) — processes leak on exit.
+
+Everything below is the ORIGINAL handoff, kept for context. Its "Races
+still open" and "Recommended order" are superseded by the above.
+
+---
+
 **Written for a fresh session.** The Phase 14 plan
 (`docs/superpowers/plans/2026-08-31-phase14-input-and-solidity.md`) is
 paused at Task 1: landing the pre-Phase-14 tree turned up **multiple
