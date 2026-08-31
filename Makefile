@@ -4,6 +4,10 @@ AS := nasm
 CFLAGS := -ffreestanding -fno-stack-protector -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -mcmodel=kernel -Wall -Wextra -std=gnu11 -O2 -Ikernel
 ASFLAGS := -f elf64
 
+ifdef NEOOS_DEBUG_STOP_WINDOW
+CFLAGS += -DNEOOS_DEBUG_STOP_WINDOW
+endif
+
 BUILD_DIR := build
 ISO_DIR := iso
 
@@ -380,7 +384,7 @@ fresh-disks:
 test: fresh-disks iso disk-image
 	@mkdir -p $(BUILD_DIR)
 	-@timeout $(BOOT_TIMEOUT) qemu-system-x86_64 $(QEMU_COMMON) \
-		-display none -serial file:$(BUILD_DIR)/serial.log \
+		-display gtk -serial file:$(BUILD_DIR)/serial.log \
 		> /dev/null 2>$(BUILD_DIR)/qemu.err
 	@echo "--- serial log: $(BUILD_DIR)/serial.log ---"
 	@if [ ! -s $(BUILD_DIR)/serial.log ]; then \
