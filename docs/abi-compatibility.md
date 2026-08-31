@@ -44,7 +44,7 @@ application hits, in order" list are now closed:
 | Was #2 | **No TLS, no `arch_prctl`** | **CLOSED.** `arch_prctl(ARCH_SET_FS)`, per-thread FS base restored on every context switch, `__thread` works across migration. |
 | Was #3 | **No `stat` family** | **CLOSED.** `stat`/`lstat`/`fstat`/`newfstatat`, Linux's 144-byte `struct stat`. Field values still synthesized — §4, and `docs/stdlib.md`. |
 | Was #4 | **`struct dirent` layout** | **CLOSED.** Linux's `getdents64` record, matching `DT_*`. |
-| Was #5 | **`O_CREAT` value diverges** | **STILL OPEN** — see §5. Cheap, and still worth doing. |
+| Was #5 | **`O_CREAT` value diverges** | **CLOSED** — fixed in Phase 14. |
 | Was #7 | **No `clone`/`futex`** | **HALF CLOSED.** `futex` exists with Linux semantics, and pthread mutexes, condvars and POSIX semaphores are built on it. There is still no `clone`. |
 | Was #8 | **No `clock_gettime`/`nanosleep`** | **MOSTLY CLOSED.** Both exist; resolution is 10ms and there are no absolute timeouts — §8a. |
 | Was #9 | **13-character filenames** | **CLOSED** (a FAT constraint, not an ABI one): VFAT long names, read and write. |
@@ -140,15 +140,10 @@ that is fine -- musl's mallocng falls back to `mmap`. See
 | `ARCH_SET_FS` (0x1002), `ARCH_GET_FS` (0x1003) | **Match.** |
 | `FUTEX_WAIT`/`FUTEX_WAKE`/`FUTEX_PRIVATE_FLAG` | **Match** (0, 1, 128). |
 | `F_GETFL`/`F_SETFL`, `O_NONBLOCK` (0x800), `O_CLOEXEC` (0x80000) | **Match.** |
-| `O_*` (open) | **`O_CREAT` STILL DIVERGES**: NeoOS 0x100, Linux 0x40. |
+| `O_*` (open) | **Match** (`O_RDONLY` 0, `O_WRONLY` 1, `O_RDWR` 2, `O_CREAT` 0x40, `O_EXCL` 0x80, `O_TRUNC` 0x200, `O_APPEND` 0x400, `O_NONBLOCK` 0x800, `O_DIRECTORY` 0x10000, `O_CLOEXEC` 0x80000). |
 | `CLOCK_*` | **Match** (`CLOCK_REALTIME` 0, `CLOCK_MONOTONIC` 1, ...). All ids resolve; `CLOCK_REALTIME` is wall time anchored to the CMOS RTC, the rest count from boot. Resolution is one 10ms tick (§8a). |
 | `TCGETS`/`TCSETS`/`TIOCGWINSZ` etc. | **Match** — Linux's ioctl numbers (§8b). |
 
-**`O_CREAT` remains a live bug.** A program compiled against Linux
-headers passes 0x40, which NeoOS does not recognise as create, so the
-open silently fails to create the file. It costs one constant. It was
-called out at the close of Phase 10 and is still here; it should be
-fixed before anything is ported.
 
 ## 6. futex, and what is built on it
 

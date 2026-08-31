@@ -32,15 +32,18 @@ typedef int64_t (*syscall_handler)(struct syscall_args *);
 // ---- flag values and shorthands shared by the handlers ---------------
 //
 // These cross the syscall boundary, so their VALUES are Linux's except
-// where docs/stdlib.md records otherwise (O_CREAT is 0x100 here, not
-// Linux's 0x40 -- a known live bug, not a design choice).
+// All values match Linux x86_64.
 
-#define O_RDONLY 0x0000
-#define O_WRONLY 0x0001
-#define O_RDWR   0x0002
-#define O_CREAT  0x0100
-#define O_TRUNC  0x0200
-#define O_APPEND 0x0400
+#define O_RDONLY    0x0000
+#define O_WRONLY    0x0001
+#define O_RDWR      0x0002
+#define O_CREAT     0x0040
+#define O_EXCL      0x0080
+#define O_TRUNC     0x0200
+#define O_APPEND    0x0400
+#define O_NONBLOCK  0x0800
+#define O_DIRECTORY 0x10000
+#define O_CLOEXEC   0x80000
 
 #define fs_lock_acquire() vfs_lock()
 #define fs_lock_release() vfs_unlock()

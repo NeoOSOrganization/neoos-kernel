@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/stat.h>
 
 static int check_bytes_equal(const char *a, const char *b, uint64_t len) {
     for (uint64_t i = 0; i < len; i++) {
@@ -104,6 +105,23 @@ int main(int argc, char **argv) {
         printf("[fileio] FILEIO.TXT still openable after unlink\n");
         return 1;
     }
+
+    // O_CREAT must be Linux's 0x40: a program compiled against Linux
+    // headers passes exactly this.
+#define LINUX_O_CREAT 0x40
+    fd = open("/OCREAT.TMP", 1 /*O_WRONLY*/ | LINUX_O_CREAT);
+    if (fd < 0) {
+        printf("[fileio] FAILED: O_CREAT 0x40 did not create, rc=%d\n", fd);
+        return 1;
+    }
+    close(fd);
+    struct stat st;
+    if (stat("/OCREAT.TMP", &st) != 0) {
+        printf("[fileio] FAILED: created file not stat-able\n");
+        return 1;
+    }
+    unlink("/OCREAT.TMP");
+    printf("[fileio] O_CREAT=0x40 passed\n");
 
     printf("[fileio] all checks passed\n");
     return 0;
