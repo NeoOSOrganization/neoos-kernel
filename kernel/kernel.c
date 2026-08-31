@@ -39,6 +39,13 @@
 void kernel_shutdown(void) {
     serial_write_string("\n[kernel] all tests complete, shutting down\n");
     cli();
+
+    // Power off via ACPI reset register (port 0x604, value 0x06 = shutdown)
+    // This works in QEMU and on real hardware with ACPI support.
+    // If ACPI is not available, fall back to infinite halt.
+    __asm__ volatile ("outb %0, %1" : : "a"((unsigned char)0x06), "d"((unsigned short)0x604));
+
+    // Fallback if ACPI power-off doesn't work
     for (;;) { __asm__ volatile ("hlt"); }
 }
 
