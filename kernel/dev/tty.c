@@ -87,16 +87,17 @@ void tty_init(void) {
 
 // ---- output ---------------------------------------------------------
 
-// One character out, with OPOST/ONLCR applied. Not locked: callers hold
-// the tty lock, or are the echo path which already does.
+// One character out, with ONLCR applied. Goes through the LOCKED serial
+// primitive: serial_lock is what stops a userland write from
+// interleaving byte-for-byte with kernel serial output. It used to call
+// the unlocked serial_putc directly, and ~1 boot in 10 a userland
+// printf landed in the middle of a kernel line -- e.g. the
+// "interrupts enabled, starting scheduler" marker split as
+// "...enabled, sta[looper pid=7] tick\ning scheduler", which then made
+// `make test` report a boot that had in fact completed.
+// serial_write_string_n inserts the CR before a LF itself.
 static void tty_emit(char c) {
-    if (c == '\n') {
-        // ONLCR: a bare LF leaves a serial terminal's cursor where it
-        // was. serial_putc already does this for kernel messages; a
-        // terminal has to do it for userland's bytes too.
-        serial_putc('\r');
-    }
-    serial_putc(c);
+    serial_write_string_n(&c, 1);
     vga_putc(c);
 }
 
@@ -106,14 +107,16 @@ int64_t tty_write(const void *buf, uint32_t len) {
     int post = (console_tty.tio.c_oflag & OPOST) && (console_tty.tio.c_oflag & ONLCR);
     spin_unlock_irqrestore(&console_tty.lock, f);
 
-    if (!post) {
-        // Raw output: one locked serial call for the whole write, so a
-        // userland printf cannot be split down the middle.
+    // One locked serial call for the whole write either way, so a
+    // userland printf cannot be split down the middle by kernel output
+    // on another CPU. The cooked path expands LF -> CRLF; the raw path
+    // (OPOST off) writes the bytes verbatim.
+    if (post) {
         serial_write_string_n(s, len);
-        for (uint32_t i = 0; i < len; i++) { vga_putc(s[i]); }
-        return (int64_t)len;
+    } else {
+        serial_write_raw_n(s, len);
     }
-    for (uint32_t i = 0; i < len; i++) { tty_emit(s[i]); }
+    for (uint32_t i = 0; i < len; i++) { vga_putc(s[i]); }
     return (int64_t)len;
 }
 
