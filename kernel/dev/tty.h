@@ -91,6 +91,14 @@ int64_t tty_write(const void *buf, uint32_t len);
 // Returns 0, or a negative errno. `arg` is a userland pointer.
 int64_t tty_ioctl(uint64_t request, void *arg);
 
+// File operations for the TTY device
+struct file_ops;
+extern const struct file_ops tty_file_ops;
+
+// Selftest helpers for tracking input delivery (test-only)
+void tty_selftest_reset(void);
+int  tty_selftest_saw(char c);
+
 void tty_selftest(void);
 
 #endif

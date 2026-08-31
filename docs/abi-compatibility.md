@@ -1,9 +1,10 @@
 # NeoOS Linux ABI Compatibility Report
 
-**Generated:** 2026-08-31, close of Phase 13 (the coreutils ABI surface:
+**Generated:** 2026-08-31, close of Phase 14 (the input subsystem: keyboard
+decoder, evdev device, Linux ABI ioctl surface, test-hook syscall).
+**Previous:** 2026-08-31, close of Phase 13 (the coreutils ABI surface:
 musl, the `stat` family, the working directory, VFAT long names, TTY,
 RTC, Tier-0 syscalls).
-**Previous:** 2026-08-30, close of Phase 10 (SMP).
 **Refreshed:** at the end of every milestone, per `CLAUDE.md`.
 
 **Phase 13.5 / 13.6 (SMP hardening — no ABI impact).** The SMP race
@@ -13,10 +14,17 @@ struct that crosses to userland and no syscall semantics.
 before — they are now *correct* under concurrent access rather than
 returning a spurious `-ESRCH` or racing a free. `proc_list`, the global
 `proc_lock`, and the kernel's dead RCU are gone; all internal.
-`docs/superpowers/specs/2026-08-31-post-smp-roadmap.md` tracks the
-milestones that *will* touch the ABI (NX/W^X rejects `PROT_WRITE|
-PROT_EXEC`; ASLR changes layout + `AT_RANDOM` backing; an OSS
-`/dev/dsp` audio ABI) — each records its divergences when it lands.
+
+**Phase 14 (input subsystem).** Added keyboard support, the evdev
+character device (`/dev/input/event0`), and Linux ABI-compatible ioctl
+surface (`EVIOCGVERSION`, `EVIOCGID`, `EVIOCGNAME`, `EVIOCGBIT`,
+`EVIOCGKEY`, `EVIOCGRAB`). The input subsystem has exclusive grab
+semantics: when grabbed, keyboard input does not reach the TTY. New
+userland test syscall `SYS_TEST_HOOK` (66) with subcommands for
+deterministic event injection (`TESTHOOK_INJECT_KEY`) and kernel
+statistics (`TESTHOOK_MIG_COUNT`); compiled only with `-DNEOOS_TEST_HOOKS`,
+returns `-ENOSYS` in production. See `docs/stdlib.md` §8b for evdev
+details and divergences.
 
 ## 1. Scope
 
@@ -65,11 +73,12 @@ a CMOS RTC behind `CLOCK_REALTIME`, and Tier 0 of the coreutils surface
 
 ## 3. Syscalls
 
-66 syscalls, numbered 0–65 in NeoOS's own space
+67 syscalls, numbered 0–66 in NeoOS's own space
 (`kernel/syscall/syscall_nr.h`). Linux x86_64 numbers are unrelated;
 the musl shim (`third_party/shim/`) maps them. Dispatch is a table
 indexed by the number; an unimplemented number returns `-ENOSYS`, as on
-Linux.
+Linux. (Number 66, `SYS_TEST_HOOK`, exists only in `-DNEOOS_TEST_HOOKS`
+builds; it is not part of the stable ABI.)
 
 | NeoOS | Name | Linux analogue | Status |
 |-------|------|----------------|--------|
@@ -100,6 +109,7 @@ Linux.
 | **53–54** | **chdir / getcwd** | same names | **NEW.** Per-process cwd; `..` resolved textually (§5) |
 | **55–58** | **stat / lstat / fstat / newfstatat** | same names | **NEW.** Linux's 144-byte `struct stat`; most fields synthesized (§4) |
 | **59–65** | **set_tid_address / exit_group / writev / readv / ioctl / clock_gettime / nanosleep** | same names | **NEW.** Tier 0: what musl needs before `main`. `ioctl` on a terminal answers `TCGETS`/`TCSETS`/`TIOCGWINSZ` (§8b); `CLOCK_REALTIME` is anchored to the CMOS RTC read at boot (§8a) |
+| **66** | **test_hook** | *(test-only, not part of stable ABI)* | **NEW.** `-DNEOOS_TEST_HOOKS` only: injects key events and exposes the user-migration counter for deterministic headless testing. Returns `-ENOSYS` in production. |
 
 **musl now runs.** The shim (`third_party/shim/`) translates Linux's
 numbers onto these, and `[musltest]` in `make test` is a real musl
@@ -232,7 +242,10 @@ Supported `ioctl`s: `EVIOCGVERSION`, `EVIOCGID`, `EVIOCGNAME`, `EVIOCGBIT`,
 overflow the oldest event is dropped (value field of `SYN_REPORT`
 incremented to signal it). **Diverges:** US keyboard only, no other
 input devices, no `EVIOCSCLOCKID`, ring overflow behavior differs from
-Linux (oldest-drop with a counter vs. a kernel-wide shared buffer).
+Linux (oldest-drop with a counter vs. a kernel-wide shared buffer), and
+`read` on an empty ring always returns `-EAGAIN` — it never blocks, so a
+reader must `poll`/`select` (both report `POLLIN` correctly) rather than
+rely on a blocking `read`. See `docs/stdlib.md` for the lock-rank reason.
 
 ## 9. What a real ported application hits, in order
 

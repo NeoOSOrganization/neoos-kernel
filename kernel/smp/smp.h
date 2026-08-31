@@ -29,6 +29,9 @@ void     smp_start_aps(void);
 int      smp_online_count(void);
 void     ap_main(int index);
 
+// Expose the user-thread migration counter for test hooks.
+uint64_t smp_user_migration_count(void);
+
 // ---- IPIs ------------------------------------------------------------
 #define VECTOR_IPI_RESCHEDULE 0xF0
 

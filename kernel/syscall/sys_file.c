@@ -91,7 +91,6 @@ int64_t sys_open(struct syscall_args *a) {
         return -EBADF;
     }
     f->vn = vn;   // the reference vfs_resolve/vnode_get took is now the fd's
-    f->ops = &vnode_file_ops;
     f->writable = (flags & (O_WRONLY | O_RDWR)) != 0;
     // Readable regardless of the open mode, which is what NeoOS has
     // always done -- O_WRONLY does not prevent a read. Recorded in
@@ -99,6 +98,17 @@ int64_t sys_open(struct syscall_args *a) {
     // it would break existing programs for no benefit this milestone.
     f->readable = 1;
     f->position = (flags & O_APPEND) ? vn->size : 0;
+
+    // Device files use per-device file_ops implementations, not
+    // vnode_file_ops; file_bind_vnode_ops picks the right table and runs
+    // the device's open hook.
+    int64_t brc = file_bind_vnode_ops(f);
+    if (brc != 0) {
+        vnode_put(vn);
+        fd_close(task, slot);
+        return brc;
+    }
+
     return slot;
 }
 
@@ -422,24 +432,13 @@ int64_t sys_readv(struct syscall_args *a)  { return rw_vectored(a, 0); }
 
 // ---- ioctl -----------------------------------------------------------
 //
-// musl asks TIOCGWINSZ two ways: isatty() uses it as the "is this a
-// terminal" probe, and __stdout_write uses it to choose line buffering
-// over full buffering.
-//
-// NeoOS has no terminal driver, so the honest answer is -ENOTTY --
-// which is also the USEFUL answer: isatty() reports false and stdio
-// picks full buffering, both correct for a serial console. Inventing a
-// window size would claim a terminal that cannot be resized, echoed or
-// put in raw mode.
+// Dispatches through the file_ops table, so the syscall layer is
+// indifferent to whether the fd points to a TTY, a regular file, a pipe,
+// or anything else. Each implementation supplies truthful responses:
+// TTY answers ioctl requests; regular files/pipes/sockets return -ENOTTY.
 
 int64_t sys_ioctl(struct syscall_args *a) {
     struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
     if (!f) { return -EBADF; }
-
-    // A terminal answers; everything else is -ENOTTY, which is what
-    // makes isatty() correct for a regular file, a pipe or a socket.
-    if (f->vn && f->vn->type == VNODE_DEVICE && devfs_vnode_is_tty(f->vn)) {
-        return tty_ioctl((uint64_t)a->a2, (void *)(uintptr_t)a->a3);
-    }
-    return -ENOTTY;
+    return file_ioctl(f, (uint64_t)a->a2, (void *)(uintptr_t)a->a3);
 }

@@ -253,12 +253,35 @@ static void pipe_close(struct file_descriptor *f) {
     if (no_readers) { waitq_wake_all(&p->writers); }
 }
 
+static int64_t pipe_ioctl(struct file_descriptor *f, uint64_t request, void *arg) {
+    (void)f; (void)request; (void)arg;
+    return -ENOTTY;
+}
+
+static int pipe_poll(struct file_descriptor *f, int events) {
+    struct pipe *p = (struct pipe *)f->priv;
+    if (!p) { return POLLERR; }
+
+    int mask = 0;
+    if (f->readable && p->count > 0) { mask |= POLLIN; }
+    if (f->writable && p->count < PIPE_CAPACITY) { mask |= POLLOUT; }
+
+    // If write end is closed and empty, signal EOF.
+    if (f->readable && __atomic_load_n(&p->writers_open, __ATOMIC_ACQUIRE) == 0 && p->count == 0) {
+        mask |= POLLHUP;
+    }
+
+    return mask & events;
+}
+
 static const struct file_ops pipe_ops = {
     .name     = "pipe",
     .read     = pipe_read,
     .write    = pipe_write,
     .lseek    = pipe_lseek,
     .getdents = pipe_getdents,
+    .ioctl    = pipe_ioctl,
+    .poll     = pipe_poll,
     .dup      = pipe_dup,
     .close    = pipe_close,
 };

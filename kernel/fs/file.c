@@ -7,6 +7,7 @@
 // same four syscalls without any of them learning what it is holding.
 
 #include "fs/file.h"
+#include "fs/devfs.h"
 #include "ipc/pipe.h"
 #include "net/socket.h"
 #include "sched/proc.h"
@@ -60,6 +61,17 @@ static int64_t vnode_lseek(struct file_descriptor *f, int64_t offset, int whence
 // Zero means end of directory. A buffer too small for even the first
 // record is -EINVAL, as on Linux: returning 0 there would look like an
 // empty directory and silently truncate a listing.
+static int64_t vnode_ioctl(struct file_descriptor *f, uint64_t request, void *arg) {
+    (void)f; (void)request; (void)arg;
+    return -ENOTTY;
+}
+
+static int vnode_poll(struct file_descriptor *f, int events) {
+    (void)f; (void)events;
+    // Vnode-backed files are always ready for read and write.
+    return POLLIN | POLLOUT;
+}
+
 static int64_t vnode_getdents(struct file_descriptor *f, void *buf, int bytes) {
     if (!f->vn) { return -EBADF; }
     if (f->vn->type != VNODE_DIR) { return -ENOTDIR; }
@@ -133,9 +145,29 @@ const struct file_ops vnode_file_ops = {
     .write    = vnode_write,
     .lseek    = vnode_lseek,
     .getdents = vnode_getdents,
+    .ioctl    = vnode_ioctl,
+    .poll     = vnode_poll,
     .dup      = vnode_dup,
     .close    = vnode_close,
 };
+
+// Bind the right ops to a freshly populated vnode-backed fd. A device
+// vnode gets its per-device file_ops (and the chance to set up f->priv
+// via dev->open); everything else keeps vnode_file_ops. Both sys_open
+// and the standard-stream setup that runs through fd_table_put go
+// through here, so /dev/CONSOLE behaves the same however it was opened.
+// Returns 0, or a negative errno if dev->open failed.
+int64_t file_bind_vnode_ops(struct file_descriptor *f) {
+    f->ops = &vnode_file_ops;
+    if (f->vn && f->vn->type == VNODE_DEVICE) {
+        const struct devfs_dev *dev = (const struct devfs_dev *)f->vn->fs_private;
+        if (dev && dev->fops) {
+            f->ops = dev->fops;
+            if (dev->open) { return dev->open(f); }
+        }
+    }
+    return 0;
+}
 
 // ------------------------------------------------------------- dispatch
 
@@ -174,6 +206,18 @@ int64_t file_getdents(struct file_descriptor *f, void *buf, int bytes) {
     return o->getdents(f, buf, bytes);
 }
 
+int64_t file_ioctl(struct file_descriptor *f, uint64_t request, void *arg) {
+    const struct file_ops *o = ops_of(f);
+    if (!o) { return -EBADF; }
+    return o->ioctl(f, request, arg);
+}
+
+int file_poll(struct file_descriptor *f, int events) {
+    const struct file_ops *o = ops_of(f);
+    if (!o) { return 0; }
+    return o->poll(f, events);
+}
+
 void file_dup(struct file_descriptor *f) {
     const struct file_ops *o = ops_of(f);
     if (o) { o->dup(f); }
@@ -192,7 +236,7 @@ void file_close(struct file_descriptor *f) {
 // -- worth one loop at boot to turn into a named failure.
 static int ops_complete(const struct file_ops *o) {
     return o && o->name && o->read && o->write && o->lseek &&
-           o->getdents && o->dup && o->close;
+           o->getdents && o->ioctl && o->poll && o->dup && o->close;
 }
 
 void file_selftest(void) {

@@ -1,6 +1,7 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <thread.h>
+#include <neoos_test.h>
 
 // Proves USER threads really run on more than one CPU, not just kernel
 // threads. Every thread is created on this process's current CPU and
@@ -122,6 +123,22 @@ static int check_join_stress(void) {
     return 1;
 }
 
+// Check that the kernel's migration counter records actual migrations.
+// The steal selftest runs before any user process, so it should be > 0.
+static int check_migration_counter(void) {
+    long count = neoos_test_migration_count();
+    if (count < 0) {
+        printf("[smptest] FAILED: neoos_test_migration_count returned error %ld\n", count);
+        return 0;
+    }
+    if (count == 0) {
+        printf("[smptest] FAILED: migration counter is 0; steal selftest did not run\n");
+        return 0;
+    }
+    printf("[smptest] migration counter=%ld (kernel steal selftest exercised)\n", count);
+    return 1;
+}
+
 // Exercises the SMP visibility calls from ring 3. The point is that a
 // user program can see the machine's CPU count and which CPU it is on
 // through POSIX-shaped calls, not a raw syscall number.
@@ -155,6 +172,7 @@ int main(int argc, char **argv) {
 
     printf("[smptest] cpus=%d, running on cpu %d\n", (int)online, cpu);
 
+    if (!check_migration_counter()) { return 1; }
     if (!check_thread_migration(online)) { return 1; }
     if (!check_join_stress()) { return 1; }
 

@@ -12,6 +12,7 @@
 #include "dev/rtc.h"
 #include "dev/tty.h"
 #include "dev/keyboard.h"
+#include "dev/input.h"
 #include "mm/pmm.h"
 #include "mm/paging.h"
 #include "mm/heap.h"
@@ -116,6 +117,10 @@ void kmain(void *multiboot_info) {
     // AFTER rtc_init: rand_init uses rtc_boot_epoch() as part of the seed.
     rand_init();
 
+    // Initialize the input subsystem BEFORE the keyboard IRQ is unmasked
+    input_init();
+    input_selftest();
+
     uint8_t keyboard_pin = acpi.irq1_gsi - acpi.ioapic_gsi_base;
     ioapic_set_redirection(keyboard_pin, VECTOR_KEYBOARD, acpi.irq1_polarity,
                             acpi.irq1_trigger, (uint8_t)lapic_get_id());
@@ -219,6 +224,7 @@ void kmain(void *multiboot_info) {
     spawn("/BIN/AVXTEST.ELF");
     spawn("/BIN/MMAPTEST.ELF");
     spawn("/BIN/SMPTEST.ELF");
+    spawn("/BIN/EVTEST.ELF");
     spawn("/BIN/IPCTEST.ELF");
     spawn("/BIN/PIPETEST.ELF");
     spawn("/BIN/TLSTEST.ELF");

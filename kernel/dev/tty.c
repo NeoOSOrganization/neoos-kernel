@@ -1,6 +1,7 @@
 #include "dev/tty.h"
 #include "dev/serial.h"
 #include "dev/vga.h"
+#include "fs/file.h"
 #include "sync/waitq.h"
 #include "sync/lock.h"
 #include "sched/proc.h"
@@ -329,6 +330,46 @@ int64_t tty_ioctl(uint64_t request, void *arg) {
     }
 }
 
+// Selftest helpers: track what characters were delivered to the TTY
+// without consuming them (so a reader can still get them).
+
+void tty_selftest_reset(void) {
+    struct tty *t = &console_tty;
+    uint64_t f = spin_lock_irqsave(&t->lock);
+    t->ready_len = 0;
+    t->ready_head = 0;
+    t->edit_len = 0;  // Also clear the edit buffer
+    spin_unlock_irqrestore(&t->lock, f);
+}
+
+int tty_selftest_saw(char c) {
+    struct tty *t = &console_tty;
+    uint64_t f = spin_lock_irqsave(&t->lock);
+    int found = 0;
+
+    // Check the ready buffer
+    for (uint32_t i = 0; i < t->ready_len; i++) {
+        uint32_t idx = (t->ready_head + i) % TTY_BUF;
+        if (t->ready[idx] == c) {
+            found = 1;
+            break;
+        }
+    }
+
+    // Also check the edit buffer (canonical mode characters waiting for line terminator)
+    if (!found) {
+        for (uint32_t i = 0; i < t->edit_len; i++) {
+            if (t->edit[i] == c) {
+                found = 1;
+                break;
+            }
+        }
+    }
+
+    spin_unlock_irqrestore(&t->lock, f);
+    return found;
+}
+
 void tty_selftest(void) {
     struct tty *t = &console_tty;
 
@@ -380,3 +421,62 @@ void tty_selftest(void) {
     }
     serial_write_string("[tty] selftest passed\n");
 }
+
+// File operations for /dev/CONSOLE and /dev/TTY
+static int64_t tty_fop_read(struct file_descriptor *f, void *buf, uint64_t len) {
+    (void)f;
+    return tty_read(buf, (uint32_t)len);
+}
+
+static int64_t tty_fop_write(struct file_descriptor *f, const void *buf, uint64_t len) {
+    (void)f;
+    return tty_write(buf, (uint32_t)len);
+}
+
+static int64_t tty_fop_lseek(struct file_descriptor *f, int64_t offset, int whence) {
+    (void)f;
+    (void)offset;
+    (void)whence;
+    return -ESPIPE;
+}
+
+static int64_t tty_fop_getdents(struct file_descriptor *f, void *buf, int bytes) {
+    (void)f;
+    (void)buf;
+    (void)bytes;
+    return -ENOTDIR;
+}
+
+static int64_t tty_fop_ioctl(struct file_descriptor *f, uint64_t request, void *arg) {
+    (void)f;
+    return tty_ioctl(request, arg);
+}
+
+static int tty_fop_poll(struct file_descriptor *f, int events) {
+    (void)f;
+    // For now, always return POLLIN | POLLOUT
+    // A real implementation would check if a line is ready for reading
+    return (events & (POLLIN | POLLOUT));
+}
+
+static void tty_fop_dup(struct file_descriptor *f) {
+    (void)f;
+    // TTY doesn't need special dup handling
+}
+
+static void tty_fop_close(struct file_descriptor *f) {
+    (void)f;
+    // TTY doesn't need special close handling
+}
+
+const struct file_ops tty_file_ops = {
+    .name     = "tty",
+    .read     = tty_fop_read,
+    .write    = tty_fop_write,
+    .lseek    = tty_fop_lseek,
+    .getdents = tty_fop_getdents,
+    .ioctl    = tty_fop_ioctl,
+    .poll     = tty_fop_poll,
+    .dup      = tty_fop_dup,
+    .close    = tty_fop_close,
+};

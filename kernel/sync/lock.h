@@ -81,6 +81,10 @@
 // it must rank strictly below it. It is a leaf -- tlb_flush_deferred
 // releases it before calling pmm_free.
 #define LOCK_RANK_TLB        20
+// Input subsystem: key event fan-out and grab. Taken from the keyboard
+// IRQ (so it must be a leaf-ish rank), but held only during ring-buffer
+// append -- never across tty_input_char or waitq_wake calls.
+#define LOCK_RANK_INPUT     21
 // Leaf lock: rank above every other, so it is always legal to take and
 // can be acquired from anywhere -- including while holding any other
 // lock. Whatever holds it must never acquire another lock.

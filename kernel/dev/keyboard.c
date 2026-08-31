@@ -1,5 +1,6 @@
 #include "dev/keyboard.h"
 #include "dev/keymap_us.h"
+#include "dev/input.h"
 #include "arch/io.h"
 #include "dev/serial.h"
 #include "dev/vga.h"
@@ -10,14 +11,6 @@
 // Stateful keyboard decoder
 static int e0_pending = 0;
 static uint32_t mods = 0;
-
-// Temporary stub: routes to tty_input_char for backward compatibility.
-// Task 10 will replace this with the real input core fan-out.
-static void input_key_event(const struct key_event *e) {
-    if (e->ascii >= 0) {
-        tty_input_char((char)e->ascii);
-    }
-}
 
 // Check if a keycode is a modifier key
 static int is_modifier(uint16_t keycode) {
@@ -78,7 +71,7 @@ int keyboard_decode(uint8_t byte, struct key_event *out) {
             // Note: CAPS and NUM are toggled, not released
         }
         out->ascii = -1;
-    } else if (pressed && keycode > 0 && keycode < 112) {
+    } else if (pressed && keycode > 0 && keycode < 59) {
         // Character key pressed - map to ASCII
         char base_char = keychar[keycode];
         if (base_char == -1) {

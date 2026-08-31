@@ -70,6 +70,12 @@
 #define SYS_IOCTL         63
 #define SYS_CLOCK_GETTIME 64
 #define SYS_NANOSLEEP     65
+#define SYS_TEST_HOOK     66
+
+// Test-hook request codes
+#define TESTHOOK_INJECT_KEY   1
+#define TESTHOOK_MIG_COUNT    2
+
 static inline int64_t syscall0(int64_t num) {
     int64_t ret;
     __asm__ volatile ("syscall" : "=a"(ret) : "a"(num) : "rcx", "r11", "memory");
@@ -474,4 +480,17 @@ int tcsetattr(int fd, int actions, const struct termios *t) {
     if (actions == TCSADRAIN) { req = TCSETSW; }
     else if (actions == TCSAFLUSH) { req = TCSETSF; }
     return ioctl(fd, req, (void *)t);
+}
+
+// ------------------------------------------------------------ test hooks
+
+#include "neoos_test.h"
+
+int neoos_test_inject_key(unsigned keycode, int pressed) {
+    return (int)syscall3(SYS_TEST_HOOK, TESTHOOK_INJECT_KEY,
+                         (int64_t)keycode, (int64_t)pressed);
+}
+
+long neoos_test_migration_count(void) {
+    return (long)syscall1(SYS_TEST_HOOK, TESTHOOK_MIG_COUNT);
 }

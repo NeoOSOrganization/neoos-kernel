@@ -521,12 +521,30 @@ static void sock_close(struct file_descriptor *f) {
     sock_put(s);
 }
 
+static int64_t sock_ioctl(struct file_descriptor *f, uint64_t request, void *arg) {
+    (void)f; (void)request; (void)arg;
+    return -ENOTTY;
+}
+
+static int sock_poll(struct file_descriptor *f, int events) {
+    struct socket *s = (struct socket *)f->priv;
+    if (!s) { return POLLERR; }
+
+    int mask = 0;
+    if (f->readable && s->rx_head) { mask |= POLLIN; }
+    if (f->writable) { mask |= POLLOUT; }
+
+    return mask & events;
+}
+
 static const struct file_ops sock_ops = {
     .name     = "socket",
     .read     = sock_read,
     .write    = sock_write,
     .lseek    = sock_lseek,
     .getdents = sock_getdents,
+    .ioctl    = sock_ioctl,
+    .poll     = sock_poll,
     .dup      = sock_dup,
     .close    = sock_close,
 };

@@ -963,10 +963,11 @@ ring buffer per open file descriptor, returning `struct input_event`
 records (24 bytes each: two `int64_t` timestamps, two `uint16_t` type/code,
 one `int32_t` value).
 
-- `read(fd, &ev, sizeof(ev))` — reads one `struct input_event` from the
-  next available slot in the ring buffer. Returns 24 (one event), or
-  `-EAGAIN` if the buffer is empty and `O_NONBLOCK` was set, or
-  `-EINVAL` if the buffer request is smaller than 24 bytes.
+- `read(fd, &ev, sizeof(ev))` — copies as many whole `struct input_event`
+  records as fit in the buffer and are available in the ring. Returns the
+  byte count (a multiple of 24), `-EAGAIN` if the ring is empty (see the
+  DIVERGENCE note — this is returned regardless of `O_NONBLOCK`), or
+  `-EINVAL` if the buffer is smaller than 24 bytes.
 - `ioctl(fd, EVIOCGVERSION, &ver)` — returns `0x010001` in `ver`.
 - `ioctl(fd, EVIOCGNAME(len), name)` — copies up to `len` bytes of
   the device name (`"NeoOS AT keyboard"`) and returns the actual name
@@ -1010,6 +1011,13 @@ to make the drop discoverable by monitoring it).
 
 ### DIVERGENCE
 
+- **`read` never blocks** — a `read` of an empty ring returns `-EAGAIN`
+  whether or not `O_NONBLOCK` is set, so a blocking reader must poll.
+  Linux blocks until an event arrives. The evdev ring is guarded by the
+  input lock, which ranks above the wait-queue lock, so the reader
+  cannot sleep on the queue without a lock-rank inversion; giving each
+  client its own ring lock is the fix, deferred to a later milestone.
+  Use `poll`/`select` (which report `POLLIN` correctly) to wait.
 - **US keyboard layout only** — the decoder produces only Set-1 PC keyboard
   codes. Non-US layouts are not supported.
 - **No `EVIOCSCLOCKID`** — timestamps are always `CLOCK_REALTIME`; the
@@ -1083,3 +1091,28 @@ and got one would use fd -1 as if it were open. `F_GETFL` reports only
 
 `O_NONBLOCK` is per-DESCRIPTOR, which is where POSIX puts it: two
 descriptors on one pipe can disagree about it.
+
+## Test Hooks (headless testing only)
+
+NeoOS test builds (compiled with `-DNEOOS_TEST_HOOKS`, automatically set
+by `make test`) expose two syscalls for deterministic testing in headless
+environments:
+
+```c
+#include <neoos_test.h>
+
+int neoos_test_inject_key(unsigned keycode, int pressed);
+long neoos_test_migration_count(void);
+```
+
+These are **not part of the stable ABI** and are **test-only**. They do
+not exist in production builds, where both functions return `-ENOSYS`.
+
+- `neoos_test_inject_key(keycode, pressed)` — injects a keyboard event
+  as if it came from hardware. `keycode` is a Linux `KEY_*` constant;
+  `pressed` is 1 (make) or 0 (break). The event fans out to open evdev
+  clients and, if no grab is held, to the TTY. Returns 0 on success.
+
+- `neoos_test_migration_count()` — returns the total number of user-thread
+  migrations across all CPUs since boot. Used to verify the kernel's work-stealing
+  scheduler is exercised. Returns -ENOSYS in production builds.

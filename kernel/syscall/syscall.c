@@ -258,6 +258,11 @@ static const struct syscall_desc syscall_table[SYS_MAX] = {
     [SYS_IOCTL]           = { sys_ioctl,           "ioctl" },
     [SYS_CLOCK_GETTIME]   = { sys_clock_gettime,   "clock_gettime" },
     [SYS_NANOSLEEP]       = { sys_nanosleep,       "nanosleep" },
+#ifdef NEOOS_TEST_HOOKS
+    [SYS_TEST_HOOK]       = { sys_test_hook,       "test_hook" },
+#else
+    [SYS_TEST_HOOK]       = { 0,                   "test_hook" },
+#endif
 };
 
 // Asserts what the table's shape is supposed to guarantee. Cheap, and

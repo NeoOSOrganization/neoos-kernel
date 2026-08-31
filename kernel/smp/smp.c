@@ -283,3 +283,14 @@ int smp_nmi_selftest(void) {
 // documents. Keep returning 0 -- and keep nmi_handler free of any
 // serial output.
 int smp_panic_handler_takes_serial_lock(void) { return 0; }
+
+// Sum of user-thread migrations across all CPUs. Used by the test hook
+// to verify the kernel steal path was exercised.
+uint64_t smp_user_migration_count(void) {
+    uint64_t total = 0;
+    int online = smp_online_count();
+    for (int i = 0; i < online; i++) {
+        total += __atomic_load_n(&cpus[i].steals_user, __ATOMIC_ACQUIRE);
+    }
+    return total;
+}

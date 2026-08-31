@@ -58,6 +58,10 @@ typedef int64_t (*syscall_handler)(struct syscall_args *);
 #define ARCH_SET_FS 0x1002
 #define ARCH_GET_FS 0x1003
 
+// Test-hook request codes (SYS_TEST_HOOK only in NEOOS_TEST_HOOKS builds)
+#define TESTHOOK_INJECT_KEY   1   // a2 = keycode, a3 = pressed
+#define TESTHOOK_MIG_COUNT    2   // returns the user-thread migration count
+
 // ---- shared helpers, defined in syscall.c ---------------------------
 
 struct file_descriptor *fd_get(struct process *p, int fd);
@@ -138,5 +142,9 @@ int64_t sys_wait(struct syscall_args *a);
 int64_t sys_wait4(struct syscall_args *a);
 int64_t sys_write(struct syscall_args *a);
 int64_t sys_yield(struct syscall_args *a);
+
+#ifdef NEOOS_TEST_HOOKS
+int64_t sys_test_hook(struct syscall_args *a);
+#endif
 
 #endif

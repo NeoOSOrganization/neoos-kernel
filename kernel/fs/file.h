@@ -28,6 +28,13 @@
 struct file_descriptor;
 struct vfs_dirent;
 
+// POLL* bits matching Linux x86_64 values for Phase 15 compatibility.
+#define POLLIN  0x001
+#define POLLOUT 0x004
+#define POLLERR 0x008
+#define POLLHUP 0x010
+#define POLLNVAL 0x020
+
 struct file_ops {
     const char *name;   // for diagnostics and the selftest
 
@@ -35,6 +42,8 @@ struct file_ops {
     int64_t (*write)(struct file_descriptor *f, const void *buf, uint64_t len);
     int64_t (*lseek)(struct file_descriptor *f, int64_t offset, int whence);
     int64_t (*getdents)(struct file_descriptor *f, void *buf, int bytes);
+    int64_t (*ioctl)(struct file_descriptor *f, uint64_t request, void *arg);
+    int     (*poll)(struct file_descriptor *f, int events);
 
     // Reference counting, called by the fd table rather than by the
     // syscall layer. `dup` is called once per new fd that comes to
@@ -56,6 +65,9 @@ int64_t file_read(struct file_descriptor *f, void *buf, uint64_t len);
 int64_t file_write(struct file_descriptor *f, const void *buf, uint64_t len);
 int64_t file_lseek(struct file_descriptor *f, int64_t offset, int whence);
 int64_t file_getdents(struct file_descriptor *f, void *buf, int bytes);
+int64_t file_bind_vnode_ops(struct file_descriptor *f);
+int64_t file_ioctl(struct file_descriptor *f, uint64_t request, void *arg);
+int     file_poll(struct file_descriptor *f, int events);
 void    file_dup(struct file_descriptor *f);
 void    file_close(struct file_descriptor *f);
 

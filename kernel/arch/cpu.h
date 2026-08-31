@@ -62,4 +62,14 @@ static inline bool rdrand64(uint64_t *out) {
     return (bool)ok;
 }
 
+// Disable interrupts
+static inline void cli(void) {
+    __asm__ volatile ("cli");
+}
+
+// Enable interrupts
+static inline void sti(void) {
+    __asm__ volatile ("sti");
+}
+
 #endif

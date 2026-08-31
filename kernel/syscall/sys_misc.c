@@ -17,6 +17,7 @@
 #include "ipc/pipe.h"
 #include "dev/timer.h"
 #include "dev/rtc.h"
+#include "dev/input.h"
 #include "mm/vma.h"
 #include "mm/paging.h"
 #include "mm/heap.h"
@@ -121,3 +122,17 @@ int64_t sys_nanosleep(struct syscall_args *a) {
     if (rc == -EINTR) { return -EINTR; }
     return 0;
 }
+
+#ifdef NEOOS_TEST_HOOKS
+int64_t sys_test_hook(struct syscall_args *a) {
+    switch ((int)a->a1) {
+    case TESTHOOK_INJECT_KEY:
+        input_inject_key((uint16_t)a->a2, (int)a->a3);
+        return 0;
+    case TESTHOOK_MIG_COUNT:
+        return (int64_t)smp_user_migration_count();
+    default:
+        return -EINVAL;
+    }
+}
+#endif

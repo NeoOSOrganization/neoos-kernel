@@ -117,7 +117,11 @@
 #define SYS_CLOCK_GETTIME   64
 #define SYS_NANOSLEEP       65
 
+// Test-only syscall for deterministic key injection in headless tests.
+// Compiled only under -DNEOOS_TEST_HOOKS; returns -ENOSYS in production.
+#define SYS_TEST_HOOK       66
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX             66
+#define SYS_MAX             67
 
 #endif
