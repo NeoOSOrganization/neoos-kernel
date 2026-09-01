@@ -279,7 +279,7 @@ Today NeoOS `mmap` is anonymous-only (`docs/abi-compatibility.md` §3).
 - **Every observable struct and constant stays Linux-shaped**:
   `struct utsname`, `mmap` flags, `AT_*`, `dlfcn` return values,
   `/proc/<pid>/stat` field order and units.
-- **Each sub-milestone ends gauntlet-green** (`pgauntlet.sh` →
+- **Each sub-milestone ends gauntlet-green** (`tools/gauntlet.sh` →
   `PGAUNTLET PASSED: N/N`) and `make test`-green, with a userland or
   kernel selftest proving the feature from the far side of the syscall
   boundary. No host unit tests — this is bare metal.

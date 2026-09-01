@@ -30,7 +30,7 @@ QEMU, the parallel gauntlet (CONC=3).
   `REQUIRED_MARKERS`.
 - **The gauntlet is the bar.** After each task,
   `tools/gauntlet.sh 15 3` (before Task 6:
-  `.superpowers/sdd/2026-08-31-phase14-input-and-solidity/pgauntlet.sh 15 3`)
+  `tools/gauntlet.sh 15 3`)
   must report `PGAUNTLET PASSED: 15/15`.
 - **Debug builds must not change shipping behaviour.** Every feature
   here sits behind a `#ifdef`; with the flag off, the generated code
@@ -149,7 +149,7 @@ Expected: `PASS: ...` and `[heap] initialized` with no debug suffix.
 - [ ] **Step 6: Gauntlet and commit**
 
 ```bash
-.superpowers/sdd/2026-08-31-phase14-input-and-solidity/pgauntlet.sh 15 3
+tools/gauntlet.sh 15 3
 git add Makefile kernel/mm/heap.c
 git commit -m "CS1: a DEBUG_HEAP build switch, reported at boot"
 ```
@@ -356,7 +356,7 @@ Expected: `PASS`.
 - [ ] **Step 7: Gauntlet and commit**
 
 ```bash
-.superpowers/sdd/2026-08-31-phase14-input-and-solidity/pgauntlet.sh 15 3
+tools/gauntlet.sh 15 3
 git add kernel/mm/heap.c
 git commit -m "CS1: poison freed heap slots, check them on reuse"
 ```
@@ -457,7 +457,7 @@ the temporary line and rebuild.**
 
 ```bash
 make clean-kernel && make test 2>&1 | tail -2   # production still green
-.superpowers/sdd/2026-08-31-phase14-input-and-solidity/pgauntlet.sh 15 3
+tools/gauntlet.sh 15 3
 git add kernel/mm/heap.c
 git commit -m "CS1: detect double frees via a free magic plus a free-list walk"
 ```
@@ -637,7 +637,7 @@ slots, and a smaller table would index out of bounds.
 
 ```bash
 make clean-kernel && make test 2>&1 | tail -2
-.superpowers/sdd/2026-08-31-phase14-input-and-solidity/pgauntlet.sh 15 3
+tools/gauntlet.sh 15 3
 git add kernel/mm/heap.c
 git commit -m "CS1: redzone every kmalloc slot past its requested size"
 ```
@@ -882,7 +882,7 @@ not reaching the compile.
 ```bash
 make clean-kernel && make test 2>&1 | tail -2
 make clean-kernel && make DEBUG_HEAP=1 test 2>&1 | tail -2
-.superpowers/sdd/2026-08-31-phase14-input-and-solidity/pgauntlet.sh 15 3
+tools/gauntlet.sh 15 3
 git add Makefile kernel/arch/cpu_local.h kernel/sync/lock.c kernel/sync/lock.h kernel/kernel.c
 git commit -m "CS1: per-rank lock hold-time histograms behind DEBUG_LOCKSTAT"
 ```
@@ -896,7 +896,7 @@ later plan can point at it. It also answers only pass/fail, when what
 CS2-CS5 need is *which marker is flaky and how often*.
 
 **Files:**
-- Move: `.superpowers/sdd/2026-08-31-phase14-input-and-solidity/pgauntlet.sh` → `tools/gauntlet.sh`
+- Move: `tools/gauntlet.sh` → `tools/gauntlet.sh`
 - Modify: the moved script (paths, flakiness table, debug-build passthrough)
 - Modify: `docs/superpowers/specs/2026-09-01-concurrency-and-scaling-design.md`,
   `docs/superpowers/specs/2026-08-31-post-smp-roadmap.md` (references)
@@ -905,7 +905,7 @@ CS2-CS5 need is *which marker is flaky and how often*.
 
 ```bash
 mkdir -p tools
-git mv .superpowers/sdd/2026-08-31-phase14-input-and-solidity/pgauntlet.sh tools/gauntlet.sh
+git mv tools/gauntlet.sh tools/gauntlet.sh
 ```
 
 - [ ] **Step 2: Repoint its internal paths**

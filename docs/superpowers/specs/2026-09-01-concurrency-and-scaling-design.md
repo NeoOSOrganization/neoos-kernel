@@ -58,7 +58,7 @@ Two forcing functions make this urgent rather than nice-to-have:
   host runtime to run tests in and none should be added.
 - **The parallel gauntlet is the bar**, not `make test`. Each task
   closes on `PGAUNTLET PASSED: 15/15`
-  (`.superpowers/sdd/2026-08-31-phase14-input-and-solidity/pgauntlet.sh`,
+  (`tools/gauntlet.sh`,
   CONC=3). Three baseline flakes are known and tracked; a new
   signature is a regression.
 - **Lock ranks are enforced.** Any new lock gets a `LOCK_RANK_*` slot

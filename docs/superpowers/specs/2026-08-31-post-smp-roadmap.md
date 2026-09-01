@@ -105,7 +105,7 @@ them costs no reviewed work.
 - **No host unit tests.** Every test is a kernel selftest or a userland
   binary, verified by `make test` (headless QEMU, 4 CPUs) and the
   15-run parallel gauntlet
-  (`.superpowers/sdd/2026-08-31-phase14-input-and-solidity/pgauntlet.sh`,
+  (`tools/gauntlet.sh`,
   CONC=3, `PGAUNTLET PASSED: 15/15`). A single green `make test` is not
   sign-off for anything timing-dependent. CS1 promotes this script to a
   stable location and adds per-marker flakiness reporting.
