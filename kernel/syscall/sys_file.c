@@ -116,6 +116,39 @@ int64_t sys_close(struct syscall_args *a) {
     return fd_close(current_proc(), (int)a->a1);
 }
 
+int64_t sys_dup(struct syscall_args *a) {
+    struct process *p = current_proc();
+    int oldfd = (int)a->a1;
+    if (!fd_get(p, oldfd)) { return -EBADF; }
+    int nf = fd_alloc(p);
+    if (nf < 0) { return nf; }
+    int64_t rc = fd_table_dup2(p->fd_table, oldfd, nf);
+    if (rc < 0) { fd_close(p, nf); }
+    return rc;
+}
+
+// dup2(old, new): if new == old and old is valid, return new unchanged.
+int64_t sys_dup2(struct syscall_args *a) {
+    struct process *p = current_proc();
+    int oldfd = (int)a->a1, newfd = (int)a->a2;
+    if (!fd_get(p, oldfd)) { return -EBADF; }
+    if (oldfd == newfd) { return newfd; }
+    return fd_table_dup2(p->fd_table, oldfd, newfd);
+}
+
+// dup3(old, new, flags): like dup2 but new == old is an error, and
+// O_CLOEXEC (0x80000) is the only accepted flag (recorded, not acted
+// on -- NeoOS does not close fds at exec yet).
+int64_t sys_dup3(struct syscall_args *a) {
+    struct process *p = current_proc();
+    int oldfd = (int)a->a1, newfd = (int)a->a2;
+    int flags = (int)a->a3;
+    if (flags & ~0x80000) { return -EINVAL; }
+    if (oldfd == newfd) { return -EINVAL; }
+    if (!fd_get(p, oldfd)) { return -EBADF; }
+    return fd_table_dup2(p->fd_table, oldfd, newfd);
+}
+
 int64_t sys_mkdir(struct syscall_args *a) {
     char path_buf[VFS_MAX_PATH];
     int prc = copy_user_path_at(a->a1, a->a2, path_buf);

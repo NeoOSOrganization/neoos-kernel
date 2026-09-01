@@ -165,9 +165,12 @@ static void ptm_dup(struct file_descriptor *f) {
 static void ptm_close(struct file_descriptor *f) {
     struct pty *pt = f->priv;
     if (!pt) { return; }
-    // Give back the active tty + framebuffer BEFORE pty_unref can free
-    // the struct -- active_input_tty must never point at freed memory.
-    if (pt->owns_active) {
+    // Release the active tty + framebuffer only when the LAST master fd
+    // is closing -- a fork() duplicates the fd, and the child closing
+    // its inherited copy must not yank the screen out from under the
+    // parent terminal. Done before pty_unref can free the struct so
+    // active_input_tty never dangles.
+    if (pt->owns_active && pt->master_refs <= 1) {
         tty_set_active(0);
         console_set_fb_owned(0);
         pt->owns_active = 0;

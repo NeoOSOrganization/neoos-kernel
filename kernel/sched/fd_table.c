@@ -193,6 +193,57 @@ int fd_table_put(struct fd_table *table, int fd, struct vnode *vn, int writable)
     return placed;
 }
 
+// dup2/dup3: make newfd refer to the same open object as oldfd. oldfd
+// must be open; newfd is closed first if it held something. Unlike
+// fd_table_alloc this WILL target fds 0/1/2 -- that is the point, it is
+// how a process rebinds its own standard streams. Returns newfd or a
+// negative errno.
+//
+// Narrow race: oldfd could be closed on another thread between the
+// snapshot and the install. NeoOS userland is effectively
+// single-threaded per fd table today; revisit if that changes.
+int fd_table_dup2(struct fd_table *table, int oldfd, int newfd) {
+    if (!table || oldfd < 0 || newfd < 0 ||
+        oldfd >= FD_TABLE_MAX || newfd >= FD_TABLE_MAX) {
+        return -EBADF;
+    }
+
+    struct fd_bucket *ob = &table->buckets[fd_bucket(oldfd)];
+    struct file_descriptor src;
+    uint64_t of = spin_lock_irqsave(&ob->lock);
+    struct file_descriptor *os = bucket_slots(ob);
+    if (!os || !os[fd_slot(oldfd)].in_use) {
+        spin_unlock_irqrestore(&ob->lock, of);
+        return -EBADF;
+    }
+    src = os[fd_slot(oldfd)];
+    spin_unlock_irqrestore(&ob->lock, of);
+
+    if (oldfd == newfd) { return newfd; }
+
+    struct fd_bucket *nb = &table->buckets[fd_bucket(newfd)];
+    struct file_descriptor closing;
+    int had = 0;
+
+    uint64_t nf = spin_lock_irqsave(&nb->lock);
+    struct file_descriptor *ns = bucket_slots(nb);
+    if (!ns) { spin_unlock_irqrestore(&nb->lock, nf); return -EMFILE; }
+    if (ns[fd_slot(newfd)].in_use) {
+        closing = ns[fd_slot(newfd)];
+        had = 1;
+        slot_reset(&ns[fd_slot(newfd)]);
+        nb->slot_count--;
+    }
+    ns[fd_slot(newfd)] = src;
+    ns[fd_slot(newfd)].in_use = 1;
+    nb->slot_count++;
+    spin_unlock_irqrestore(&nb->lock, nf);
+
+    file_dup(&src);                 // the new slot's reference on the object
+    if (had) { file_close(&closing); }
+    return newfd;
+}
+
 void fd_table_free(struct fd_table *table) {
     if (!table) return;
 

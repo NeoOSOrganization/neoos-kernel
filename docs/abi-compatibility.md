@@ -75,7 +75,7 @@ a CMOS RTC behind `CLOCK_REALTIME`, and Tier 0 of the coreutils surface
 
 ## 3. Syscalls
 
-70 syscalls, numbered 0–69 in NeoOS's own space
+73 syscalls, numbered 0–72 in NeoOS's own space
 (`kernel/syscall/syscall_nr.h`). Linux x86_64 numbers are unrelated;
 the musl shim (`third_party/shim/`) maps them. Dispatch is a table
 indexed by the number; an unimplemented number returns `-ENOSYS`, as on
@@ -114,6 +114,7 @@ builds; it is not part of the stable ABI.)
 | **66** | **test_hook** | *(test-only, not part of stable ABI)* | **NEW.** `-DNEOOS_TEST_HOOKS` only: injects key events, exposes the user-migration counter, and reads a pid's parent for deterministic headless testing. Returns `-ENOSYS` in production. |
 | **67–68** | **poll / select** | same names | **NEW (M1a).** A subset — see §9; fd-set is 16×u64, `nfds` ≤ 16. |
 | **69** | **reboot** | `reboot` | **NEW (M2).** `POWER_OFF`/`HALT`/`RESTART`; **PID-1-only** instead of `CAP_SYS_BOOT` (§8d). |
+| **70–72** | **dup / dup2 / dup3** | same names | **NEW (M1b-3).** Standard semantics; the only way to rebind fds 0/1/2, which `open()` never returns. `dup3` accepts only `O_CLOEXEC`. |
 
 **musl now runs.** The shim (`third_party/shim/`) translates Linux's
 numbers onto these, and `[musltest]` in `make test` is a real musl

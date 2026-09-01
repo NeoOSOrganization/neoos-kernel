@@ -264,6 +264,9 @@ static const struct syscall_desc syscall_table[SYS_MAX] = {
     [SYS_POLL]            = { sys_poll,            "poll" },
     [SYS_SELECT]          = { sys_select,          "select" },
     [SYS_REBOOT]          = { sys_reboot,          "reboot" },
+    [SYS_DUP]             = { sys_dup,             "dup" },
+    [SYS_DUP2]            = { sys_dup2,            "dup2" },
+    [SYS_DUP3]            = { sys_dup3,            "dup3" },
 };
 
 // Asserts what the table's shape is supposed to guarantee. Cheap, and

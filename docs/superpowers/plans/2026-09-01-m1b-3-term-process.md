@@ -66,9 +66,22 @@ the console and the framebuffer for the whole run).
 - **TERM does not grab evdev.** M1b-3 uses only the cooked path
   (printable keys → `active_input_tty` → pts line discipline → echo →
   master → render). Arrow/PageUp translation and scrollback are M1b-4.
-- **No `dup2`:** the forked child does `close(0); close(1); close(2);`
-  then `open("/dev/pts/N", O_RDWR)` three times — `open` returns the
-  lowest free fd, so it lands 0, 1, 2. `exec` (13) preserves fds.
+- **`dup2` was pulled forward from BB1.** The plan originally had the
+  child do `close(0/1/2)` + `open` ×3, but `fd_table_alloc` **never
+  reallocates fds 0/1/2** (`kernel/sched/fd_table.c`) — after `close(0)`
+  the next `open` returns fd 5. So `dup`/`dup2`/`dup3` (SYS_DUP 70,
+  DUP2 71, DUP3 72; `fd_table_dup2`; shim + `<unistd.h>` wrappers) were
+  implemented here instead. The child now does
+  `s = open(pts); dup2(s,0); dup2(s,1); dup2(s,2); close(s)`. BB1's dup
+  work is done; BB1 keeps only `F_DUPFD`.
+- **The parent holds the slave open across the fork** and closes it
+  only after — otherwise `slave_refs` momentarily hits 0 between the
+  child's `close` and its re-`open`, the pty reports hung-up, and
+  TERM's first `poll` returns `POLLHUP` and the render loop bails.
+- **`ptm_close` releases `NEOOS_TIOCSACTIVE` only on the *last* master
+  fd.** `fork()` duplicates the master fd; the child's `close(m)` must
+  not release the parent's claim (it did, which let `fbcon` repaint
+  over the grid mid-render).
 - **Framebuffer format:** 32-bpp, `fb.r/g/b` channel positions from
   `FBIOGET_VSCREENINFO` (`x.red.offset` etc. — extend the ioctl if it
   does not already report them; check `kernel/dev/fb.c`). A pixel is

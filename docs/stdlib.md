@@ -1158,6 +1158,29 @@ and got one would use fd -1 as if it were open. `F_GETFL` reports only
 `O_NONBLOCK` is per-DESCRIPTOR, which is where POSIX puts it: two
 descriptors on one pipe can disagree about it.
 
+## `dup`, `dup2`, `dup3`
+
+```c
+int dup(int oldfd);                     /* <unistd.h> */
+int dup2(int oldfd, int newfd);
+int dup3(int oldfd, int newfd, int flags);
+```
+
+Standard POSIX semantics: the new descriptor shares the open file
+object (and its offset) with `oldfd`. `dup` returns the lowest free fd
+**≥ 3**; `dup2`/`dup3` use the exact `newfd` given, closing whatever it
+held first. `dup2(fd, fd)` returns `fd` unchanged if `fd` is valid;
+`dup3` rejects `oldfd == newfd` with `-EINVAL` and accepts only
+`O_CLOEXEC` in `flags` (recorded, not acted on — NeoOS does not close
+fds at `exec` yet).
+
+**Why these matter on NeoOS:** `open()` never returns fd 0, 1, or 2 —
+the standard streams are bound once at process creation and the
+allocator skips them (`docs/abi-compatibility.md` §3). So the only way
+to rebind stdin/stdout/stderr — shell redirection, a terminal wiring a
+child onto a pty slave — is `close(fd)` *is not enough*; you need
+`dup2(newsrc, fd)`.
+
 ## Test Hooks (headless testing only)
 
 NeoOS test builds (compiled with `-DNEOOS_TEST_HOOKS`, automatically set
@@ -1273,3 +1296,29 @@ correct.
 
 The evdev "`read` never blocks" note above is now backed by working
 `poll`/`select` — a reader waits with those.
+
+### `NEOOS_TIOCSACTIVE` — the active terminal (M1b)
+
+```c
+ioctl(master_fd, NEOOS_TIOCSACTIVE, (void *)1);   /* claim */
+ioctl(master_fd, NEOOS_TIOCSACTIVE, (void *)0);   /* release */
+```
+
+A **NeoOS extension, no Linux equivalent** (the number `0x4E454F01` is
+deliberately outside Linux's `0x54xx` TIOC range). On a pty **master**,
+claiming does two things: cooked keyboard input is routed to this
+master's slave line discipline instead of `/dev/CONSOLE`, and the
+kernel stops painting the framebuffer for its own console output
+(serial output is unaffected). A userland terminal (`/BIN/TERM`) claims
+it on startup so keystrokes reach the shell it hosts and it owns the
+pixels.
+
+Released automatically when the **last** master fd is closed (a
+`fork()` duplicates the fd; the child closing its inherited copy does
+**not** release). A kernel panic forcibly reclaims the framebuffer and
+the console before its dump, so a fault always paints over the
+terminal's grid.
+
+**DIVERGENCE:** there is exactly one active terminal at a time and no
+virtual-console switching (`chvt`, `VT_ACTIVATE`). A second claim while
+another master holds it simply moves the claim.

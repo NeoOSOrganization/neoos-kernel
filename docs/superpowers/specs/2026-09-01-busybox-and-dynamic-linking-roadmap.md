@@ -126,10 +126,10 @@ Today NeoOS `mmap` is anonymous-only (`docs/abi-compatibility.md` §3).
   (`docs/porting-coreutils.md` §5.4). Fixed in the kernel and in
   `lib/include/fcntl.h`; every in-tree userland user audited in the
   same commit.
-- **`dup` / `dup2` / `dup3` + `F_DUPFD`** — fd-table dup over the
-  already-refcounted fd objects. This is what `>`, `<`, `2>&1` and
-  pipelines compile to. `dup2(x, x)` is a no-op returning `x`;
-  `dup3(x, x, …)` is `-EINVAL` (Linux semantics).
+- **`F_DUPFD`** — `dup`/`dup2`/`dup3` themselves were pulled forward
+  into M1b-3 (the terminal needed to wire a child onto a pty slave, and
+  `open()` never returns fds 0/1/2). BB1 keeps only the `fcntl`
+  `F_DUPFD` command on top of the existing `fd_table_dup2`.
 - **`getppid`** — returns `parent_pid` (already tracked; M2 reparents
   it to 1 on orphan).
 - **`getuid` / `geteuid` / `getgid` / `getegid`** — return 0.

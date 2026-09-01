@@ -56,6 +56,9 @@
 #define SYS_ARCH_PRCTL    44
 #define SYS_SPAWNV        51
 #define SYS_FCNTL         52
+#define SYS_DUP           70
+#define SYS_DUP2          71
+#define SYS_DUP3          72
 
 #define SYS_CHDIR         53
 #define SYS_GETCWD        54
@@ -420,6 +423,16 @@ int select(int nfds, fd_set *rd, fd_set *wr, fd_set *ex, struct timeval *tv) {
 
 int fcntl(int fd, int cmd, int arg) {
     return (int)syscall3(SYS_FCNTL, fd, cmd, arg);
+}
+
+int dup(int oldfd) {
+    return (int)syscall1(SYS_DUP, oldfd);
+}
+int dup2(int oldfd, int newfd) {
+    return (int)syscall2(SYS_DUP2, oldfd, newfd);
+}
+int dup3(int oldfd, int newfd, int flags) {
+    return (int)syscall3(SYS_DUP3, oldfd, newfd, flags);
 }
 
 // ------------------------------------------------------------------- TLS

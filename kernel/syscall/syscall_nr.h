@@ -129,7 +129,14 @@
 // Linux's magic-2 values.
 #define SYS_REBOOT          69
 
+// dup / dup2 / dup3. NeoOS never reallocates fds 0/1/2 through open(),
+// so these are the only way a process rebinds its own standard streams
+// (a shell doing redirection, a terminal wiring a child to a pty).
+#define SYS_DUP             70
+#define SYS_DUP2            71
+#define SYS_DUP3            72
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX             70
+#define SYS_MAX             73
 
 #endif

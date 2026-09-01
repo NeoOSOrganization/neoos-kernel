@@ -71,6 +71,9 @@
 #define NEO_IOCTL           63
 #define NEO_CLOCK_GETTIME   64
 #define NEO_NANOSLEEP       65
+#define NEO_DUP             70
+#define NEO_DUP2            71
+#define NEO_DUP3            72
 
 // ---- Linux x86-64 numbers, as musl issues them ----------------------
 #define LX_READ              0
@@ -126,6 +129,9 @@
 #define LX_PIPE2           293
 #define LX_RT_SIGPENDING   127
 #define LX_RT_SIGSUSPEND   130
+#define LX_DUP              32
+#define LX_DUP2             33
+#define LX_DUP3            292
 
 static long neo_strlen(const char *s) {
     long n = 0;
@@ -174,6 +180,9 @@ long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a
     case LX_TKILL:           return neo(NEO_TKILL, a1, a2, 0, 0, 0, 0);
     case LX_TGKILL:          return neo(NEO_TGKILL, a1, a2, a3, 0, 0, 0);
     case LX_FCNTL:           return neo(NEO_FCNTL, a1, a2, a3, 0, 0, 0);
+    case LX_DUP:             return neo(NEO_DUP, a1, 0, 0, 0, 0, 0);
+    case LX_DUP2:            return neo(NEO_DUP2, a1, a2, 0, 0, 0, 0);
+    case LX_DUP3:            return neo(NEO_DUP3, a1, a2, a3, 0, 0, 0);
     case LX_GETCWD:          return neo(NEO_GETCWD, a1, a2, 0, 0, 0, 0);
     case LX_GETDENTS64:      return neo(NEO_GETDENTS, a1, a2, a3, 0, 0, 0);
     case LX_SETPGID:         return neo(NEO_SETPGID, a1, a2, 0, 0, 0, 0);

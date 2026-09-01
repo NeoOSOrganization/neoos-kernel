@@ -150,5 +150,8 @@ int64_t sys_test_hook(struct syscall_args *a);
 int64_t sys_poll(struct syscall_args *a);
 int64_t sys_select(struct syscall_args *a);
 int64_t sys_reboot(struct syscall_args *a);
+int64_t sys_dup(struct syscall_args *a);
+int64_t sys_dup2(struct syscall_args *a);
+int64_t sys_dup3(struct syscall_args *a);
 
 #endif

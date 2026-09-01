@@ -78,6 +78,10 @@ void fd_table_free(struct fd_table *table);
 // Returns 1 on success, 0 on OOM.
 int fd_table_dup(struct fd_table *dst, struct fd_table *src);
 
+// dup2/dup3 primitive: point newfd at oldfd's open object, closing
+// whatever newfd held. WILL target fds 0/1/2. Returns newfd or -errno.
+int fd_table_dup2(struct fd_table *table, int oldfd, int newfd);
+
 // Total open fds. Diagnostic; walks every bucket.
 int fd_table_count(struct fd_table *table);
 

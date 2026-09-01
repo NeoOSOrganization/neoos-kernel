@@ -57,6 +57,14 @@ void exit_group(int code) __attribute__((noreturn));
 int pipe(int fds[2]);
 int pipe2(int fds[2], int flags);
 
+// dup/dup2/dup3. NeoOS's open() never returns fds 0/1/2, so these are
+// the only way to rebind the standard streams (shell redirection, a
+// terminal wiring a child to a pty slave). dup3 flags: only O_CLOEXEC
+// is accepted, and it is recorded, not acted on.
+int dup(int oldfd);
+int dup2(int oldfd, int newfd);
+int dup3(int oldfd, int newfd, int flags);
+
 // spawn with an argument vector. `argv` is NULL-terminated and becomes
 // the new process's argv; passing null is the same as spawn(). At most
 // 8 arguments of 128 bytes each -- see docs/stdlib.md.
