@@ -138,6 +138,54 @@ static void test_decsc(void) {
     CHECK(cell_ch(2, 3) == 'Q', "DECRC");
 }
 
+static int cursor_in_range(void) {
+    int x, y, vis;
+    vt_cursor(&V, &x, &y, &vis);
+    return x >= 0 && y >= 0;               // upper bound checked via cell_at below
+}
+
+static void test_alt_screen(void) {
+    vt_init(&V, 6, 3);
+    feed("primary\r\n");
+    feed("\x1b[?1049h");
+    CHECK(cell_ch(0, 0) == 0, "alt screen starts blank");
+    feed("ALT");
+    feed("\x1b[?1049l");
+    CHECK(cell_ch(0, 0) == 'p', "primary restored after alt");
+    CHECK(vt_view_offset(&V) == 0, "view restored");
+}
+
+static void test_ris(void) {
+    vt_init(&V, 6, 3);
+    feed("\x1b[31mhello\x1b[3;3H");
+    feed("\x1b""c");
+    int x, y, v;
+    vt_cursor(&V, &x, &y, &v);
+    CHECK(x == 0 && y == 0 && cell_ch(0, 0) == 0, "RIS clears + homes");
+    feed("z");
+    CHECK((vt_cell_at(&V, 0, 0)->attr) == (VT_DEFFG | VT_DEFBG), "RIS reset attrs");
+}
+
+static void test_osc_and_noop_modes(void) {
+    vt_init(&V, 8, 2);
+    feed("\x1b]0;a window title\x07""AB");
+    CHECK(cell_ch(0, 0) == 'A' && cell_ch(0, 1) == 'B', "OSC consumed, text follows");
+    feed("\x1b]0;another\x1b\\CD");
+    CHECK(cell_ch(0, 2) == 'C', "OSC ST terminator");
+    feed("\x1b[?2004h\x1b[?1000h""E");
+    CHECK(cell_ch(0, 4) == 'E', "unknown private modes are harmless");
+}
+
+static void test_resize(void) {
+    vt_init(&V, 10, 5);
+    feed("\x1b[3;3HX");
+    vt_resize(&V, 6, 3);
+    int x, y, vis;
+    vt_cursor(&V, &x, &y, &vis);
+    CHECK(cursor_in_range() && x < 6 && y < 3, "resize clamps cursor into range");
+    CHECK(vt_cell_at(&V, 4, 4) == NULL, "cells beyond the new grid are gone");
+}
+
 int main(void) {
     test_print_and_wrap();
     test_c0();
@@ -148,6 +196,10 @@ int main(void) {
     test_sgr();
     test_scroll_region();
     test_decsc();
+    test_alt_screen();
+    test_ris();
+    test_osc_and_noop_modes();
+    test_resize();
     if (failures == 0) {
         printf("[vttest] ALL PASSED\n");
         return 0;

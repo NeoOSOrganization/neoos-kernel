@@ -135,6 +135,31 @@ void vt_init(struct vt *v, int cols, int rows) {
     dirty_all(v);
 }
 
+static void enter_alt(struct vt *v) {
+    if (v->alt_active) return;
+    v->alt_cx = v->cx;
+    v->alt_cy = v->cy;
+    v->alt_pen = v->pen;
+    for (int r = 0; r < VT_MAX_ROWS; r++)
+        for (int c = 0; c < VT_MAX_COLS; c++)
+            v->alt[r][c] = BLANK;
+    v->alt_active = 1;
+    v->view = 0;
+    v->cx = v->cy = 0;
+    v->wrap_pending = 0;
+    dirty_all(v);
+}
+
+static void leave_alt(struct vt *v) {
+    if (!v->alt_active) return;
+    v->alt_active = 0;
+    v->cx = clampi(v->alt_cx, 0, v->cols - 1);
+    v->cy = clampi(v->alt_cy, 0, v->rows - 1);
+    v->pen = v->alt_pen;
+    v->wrap_pending = 0;
+    dirty_all(v);
+}
+
 // --- C0 -----------------------------------------------------------------
 
 static void exec_c0(struct vt *v, uint8_t c) {
@@ -288,13 +313,14 @@ static void dispatch_csi(struct vt *v, uint8_t final) {
     v->wrap_pending = 0;
 
     if (v->priv) {
-        // private modes: DECTCEM and a set of accept-noops.
+        // private modes: DECTCEM, alt screen, and a set of accept-noops.
         int set = (final == 'h');
         for (int i = 0; i < v->nparam; i++) {
             switch (v->params[i]) {
             case 25:  v->cursor_visible = set; break;
             case 1049: case 1047: case 47:
-                /* alt screen: Task 3 */ break;
+                if (set) enter_alt(v); else leave_alt(v);
+                break;
             default:  /* 2004, 1000, 1002, 1006, 1015, 7, ... : ignore */ break;
             }
         }
@@ -344,7 +370,7 @@ static void dispatch_esc(struct vt *v, uint8_t c) {
     case '8':
         if (v->sc_valid) { v->cx = clamp_col(v, v->sc_cx); v->cy = clamp_row(v, v->sc_cy); v->pen = v->sc_pen; }
         break;
-    case 'c': /* RIS: Task 3 */ break;
+    case 'c': vt_init(v, v->cols, v->rows); break; // RIS full reset
     case 'M': index_up(v); break;                 // reverse index
     case 'D': index_down(v); break;
     case 'E': v->cx = 0; index_down(v); break;
@@ -371,6 +397,7 @@ static void feed_byte(struct vt *v, uint8_t c) {
 
     case VT_ESC:
         if (c == '[') { csi_reset(v); v->pstate = VT_CSI; return; }
+        if (c == ']') { v->pstate = VT_OSC; return; }
         if (c == '(' || c == ')' || c == '*' || c == '+') { v->pstate = VT_ESC_CHARSET; return; }
         dispatch_esc(v, c);
         v->pstate = VT_GROUND;
@@ -378,6 +405,21 @@ static void feed_byte(struct vt *v, uint8_t c) {
 
     case VT_ESC_CHARSET:
         v->pstate = VT_GROUND;                    // consume the designator, ignore
+        return;
+
+    case VT_OSC:
+        // Consume the payload until BEL or ST (ESC \). Discarded --
+        // vt has no title/clipboard surface.
+        if (c == 0x07) { v->pstate = VT_GROUND; return; }
+        if (c == 0x1b) { v->pstate = VT_OSC_ESC; return; }
+        return;
+
+    case VT_OSC_ESC:
+        // saw ESC inside OSC: '\' ends the string (ST); anything else
+        // aborts the OSC and is reprocessed as a fresh ESC sequence.
+        if (c == '\\') { v->pstate = VT_GROUND; return; }
+        v->pstate = VT_ESC;
+        feed_byte(v, c);
         return;
 
     case VT_CSI:
@@ -453,12 +495,28 @@ void vt_scroll_view(struct vt *v, int delta_lines) {
 int vt_view_offset(const struct vt *v) { return v->view; }
 
 void vt_resize(struct vt *v, int cols, int rows) {
-    v->cols = clampi(cols, 1, VT_MAX_COLS);
-    v->rows = clampi(rows, 1, VT_MAX_ROWS);
+    int oc = v->cols, orr = v->rows;
+    int nc = clampi(cols, 1, VT_MAX_COLS);
+    int nr = clampi(rows, 1, VT_MAX_ROWS);
+
+    // Blank the cells newly exposed by a grow, in both grids, so a
+    // wider/taller screen does not surface stale ring or alt content.
+    if (nc > oc || nr > orr) {
+        for (int r = 0; r < nr; r++) {
+            struct vt_cell *sr = v->ring[(v->top + r) % VT_RING];
+            struct vt_cell *ar = v->alt[r];
+            int c0 = (r < orr) ? oc : 0;      // fully new rows blank from col 0
+            for (int c = c0; c < nc; c++) { sr[c] = BLANK; ar[c] = BLANK; }
+        }
+    }
+
+    v->cols = nc;
+    v->rows = nr;
     v->sr_top = 0;
     v->sr_bot = v->rows - 1;
     v->cx = clampi(v->cx, 0, v->cols - 1);
     v->cy = clampi(v->cy, 0, v->rows - 1);
     v->wrap_pending = 0;
+    if (v->view > v->history) v->view = v->history;
     dirty_all(v);
 }

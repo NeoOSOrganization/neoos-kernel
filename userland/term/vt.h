@@ -34,7 +34,7 @@ struct vt_cell {
 struct vt_span { int row; int col0; int col1; };   // half-open [col0, col1)
 
 // parser states
-enum { VT_GROUND = 0, VT_ESC, VT_ESC_CHARSET, VT_CSI, VT_OSC };
+enum { VT_GROUND = 0, VT_ESC, VT_ESC_CHARSET, VT_CSI, VT_OSC, VT_OSC_ESC };
 
 #define VT_MAXPARAM 16
 
