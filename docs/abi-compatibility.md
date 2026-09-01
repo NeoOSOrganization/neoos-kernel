@@ -6,6 +6,8 @@ decoder, evdev device, Linux ABI ioctl surface, test-hook syscall).
 musl, the `stat` family, the working directory, VFAT long names, TTY,
 RTC, Tier-0 syscalls).
 **Refreshed:** at the end of every milestone, per `CLAUDE.md`.
+Most recent: M1a (console plumbing — `/dev/fb0`, `poll`/`select`, PTY)
+and M2 (init as PID 1, orphan reparenting, `reboot(2)`), 2026-09-01.
 
 **Phase 13.5 / 13.6 (SMP hardening — no ABI impact).** The SMP race
 fixes and the object-lifetime / lock-detangle milestone changed no
@@ -73,7 +75,7 @@ a CMOS RTC behind `CLOCK_REALTIME`, and Tier 0 of the coreutils surface
 
 ## 3. Syscalls
 
-67 syscalls, numbered 0–66 in NeoOS's own space
+70 syscalls, numbered 0–69 in NeoOS's own space
 (`kernel/syscall/syscall_nr.h`). Linux x86_64 numbers are unrelated;
 the musl shim (`third_party/shim/`) maps them. Dispatch is a table
 indexed by the number; an unimplemented number returns `-ENOSYS`, as on
@@ -109,7 +111,9 @@ builds; it is not part of the stable ABI.)
 | **53–54** | **chdir / getcwd** | same names | **NEW.** Per-process cwd; `..` resolved textually (§5) |
 | **55–58** | **stat / lstat / fstat / newfstatat** | same names | **NEW.** Linux's 144-byte `struct stat`; most fields synthesized (§4) |
 | **59–65** | **set_tid_address / exit_group / writev / readv / ioctl / clock_gettime / nanosleep** | same names | **NEW.** Tier 0: what musl needs before `main`. `ioctl` on a terminal answers `TCGETS`/`TCSETS`/`TIOCGWINSZ` (§8b); `CLOCK_REALTIME` is anchored to the CMOS RTC read at boot (§8a) |
-| **66** | **test_hook** | *(test-only, not part of stable ABI)* | **NEW.** `-DNEOOS_TEST_HOOKS` only: injects key events and exposes the user-migration counter for deterministic headless testing. Returns `-ENOSYS` in production. |
+| **66** | **test_hook** | *(test-only, not part of stable ABI)* | **NEW.** `-DNEOOS_TEST_HOOKS` only: injects key events, exposes the user-migration counter, and reads a pid's parent for deterministic headless testing. Returns `-ENOSYS` in production. |
+| **67–68** | **poll / select** | same names | **NEW (M1a).** A subset — see §9; fd-set is 16×u64, `nfds` ≤ 16. |
+| **69** | **reboot** | `reboot` | **NEW (M2).** `POWER_OFF`/`HALT`/`RESTART`; **PID-1-only** instead of `CAP_SYS_BOOT` (§8d). |
 
 **musl now runs.** The shim (`third_party/shim/`) translates Linux's
 numbers onto these, and `[musltest]` in `make test` is a real musl
@@ -270,6 +274,24 @@ Linux (oldest-drop with a counter vs. a kernel-wide shared buffer), and
 reader must `poll`/`select` (both report `POLLIN` correctly) rather than
 rely on a blocking `read`. See `docs/stdlib.md` for the lock-rank reason.
 
+### 8d. init and shutdown (M2)
+
+The kernel starts `/SBIN/INIT` as PID 1 and nothing else. INIT reads
+`/ETC/INITTAB` (`spawn`/`wait`/`respawn` entries), launches the
+workload, and reaps children and reparented orphans in a `wait4(-1)`
+loop until `-ECHILD`, then calls `reboot(LINUX_REBOOT_CMD_POWER_OFF)`.
+
+- **Orphan reparenting matches Linux**: a dying process's live children
+  are handed to PID 1. No subreaper mechanism.
+- **`reboot(2)` is PID-1-only** — NeoOS has no uids or `CAP_SYS_BOOT`.
+  `POWER_OFF`/`HALT`/`RESTART` command words carry Linux's magic-2
+  values.
+- **Shutdown sends no `SIGTERM`/`SIGKILL`** to survivors; a ported
+  service manager would notice. A stopped orphan reparented to PID 1 is
+  not woken (no orphaned-process-group `SIGHUP`+`SIGCONT`), so PID 1's
+  `wait4` would block on it forever.
+- If PID 1 exits, the kernel panics.
+
 ## 9. What a real ported application hits, in order
 
 1. **`O_CREAT` value** — silent failure to create files. One constant,
@@ -291,6 +313,9 @@ rely on a blocking `read`. See `docs/stdlib.md` for the lock-rank reason.
    rather than merely running.
 8. **`exec` takes no argv** — `spawnv` (51) is a separate call with
    different semantics; a real `execve(argv, envp)` is still owed.
+9. **No shutdown signal** (M2): PID 1 powers off once nothing is left to
+   reap, without first `SIGTERM`ing anyone; no sessions, no `/proc`, no
+   orphaned-process-group handling.
 
 **Closed since Phase 10:** the `stat` family, `struct dirent`'s layout,
 the working directory, `writev`/`ioctl`/`clock_gettime`, TLS and the
@@ -303,6 +328,10 @@ subset (above), and a PTY subsystem (`/dev/ptmx`, `/dev/pts/N`,
 `TIOCGPTN`; `grantpt`/`unlockpt` no-ops; `TIOCSWINSZ` stored but no
 `SIGWINCH`; no `SIGHUP` on master close — session hang-up and job
 control are M2). Full detail and every divergence in `docs/stdlib.md`.
+
+**New in M2 (init):** `/SBIN/INIT` runs as PID 1 from `/ETC/INITTAB`,
+orphans reparent to it, and `reboot(2)` (PID-1-only) is the shutdown
+path (§8d). Job control and session hang-up are still owed.
 
 ## 10. Summary
 

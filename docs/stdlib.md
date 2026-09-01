@@ -215,12 +215,21 @@ listed above changed. Any code using `e->name`/`e->type` becomes
 - `int setpgid(int pid, int pgid)`, `int getpgid(int pid)`,
   `int setsid(void)`, `int getsid(int pid)` — process groups and
   sessions, inherited by `fork` and `spawn`.
+- **Orphan reparenting matches Linux.** When a process exits, every
+  still-alive child of it has its parent set to PID 1, and PID 1's
+  `wait4(-1)` loop reaps it. There is no subreaper mechanism
+  (`PR_SET_CHILD_SUBREAPER`); the reparent target is always 1.
 
 ### Divergences from POSIX
 
 - **`wait` remains NeoOS-native** (one pid, a bare exit code) and lives
   **beside** `wait4` rather than being replaced by it. Neither
   supersedes the other.
+- **A stopped orphan reparented to PID 1 is not woken.** Linux applies
+  the orphaned-process-group rule (`SIGHUP` + `SIGCONT` to stopped
+  members); NeoOS does not, so a process left in `SIGSTOP` when its
+  parent dies stays stopped until something signals it. PID 1's plain
+  `wait4(-1, …, 0)` will block on such a child indefinitely.
 - **No core dumps.** `WCOREDUMP`'s bit is defined but never set.
 - **No `SA_NOCLDWAIT`**, and setting `SIGCHLD` to `SIG_IGN` does not
   auto-reap children.
@@ -1090,6 +1099,48 @@ int spawnv(const char *path, char *const argv[]);   /* <unistd.h> */
 int fcntl(int fd, int cmd, int arg);                /* <fcntl.h>  */
 ```
 
+## `reboot` and PID 1
+
+```c
+#include <sys/reboot.h>
+int reboot(int cmd);
+```
+
+`cmd` is one of `LINUX_REBOOT_CMD_POWER_OFF`, `LINUX_REBOOT_CMD_HALT`,
+`LINUX_REBOOT_CMD_RESTART` — the command words carry Linux's magic-2
+values so a program compiled against `<sys/reboot.h>` elsewhere passes
+the same constants. `POWER_OFF` performs an ACPI soft-off (QEMU exits),
+`HALT` masks interrupts and parks the CPU, `RESTART` pulses the 8042
+reset line and falls back to a triple fault. None of the three return.
+
+**DIVERGENCE from Linux:** Linux gates `reboot(2)` on `CAP_SYS_BOOT`.
+NeoOS has no uids or capabilities, so it gates on **caller is PID 1** —
+any other caller gets `-1`. An unknown `cmd` returns `-1`
+(kernel `-EINVAL`). NeoOS also has no `LINUX_REBOOT_CMD_CAD_ON/OFF`,
+no `SW_SUSPEND`, and no `kexec`.
+
+### `/SBIN/INIT` and `/ETC/INITTAB`
+
+The kernel starts `/SBIN/INIT` as PID 1 and nothing else. INIT reads
+`/ETC/INITTAB` — one `<mode> <path>` entry per line, `#` comments and
+blank lines ignored — and:
+
+| mode | behaviour |
+|---|---|
+| `spawn` | launch, do not wait |
+| `wait` | launch and block until it exits before the next entry |
+| `respawn` | launch, and relaunch each time it exits |
+
+INIT then reaps children and reparented orphans in a `wait4(-1)` loop.
+When that returns `-ECHILD` — every launched process and every orphan
+has exited — INIT calls `reboot(LINUX_REBOOT_CMD_POWER_OFF)`.
+
+**DIVERGENCE:** shutdown does **not** first send `SIGTERM`/`SIGKILL` to
+surviving processes the way a real service manager does — INIT only
+powers off once nothing is left to reap. A ported daemon that expects a
+shutdown signal will not get one. If PID 1 itself exits, the kernel
+panics (there is nothing to reap the machine or power it off).
+
 `spawnv` is `spawn` with an argument vector: at most **8 arguments of
 128 bytes each**, copied into the kernel before the new address space
 is built. `spawn(path)` is the same thing with `argv = {path, NULL}`.
@@ -1118,6 +1169,7 @@ environments:
 
 int neoos_test_inject_key(unsigned keycode, int pressed);
 long neoos_test_migration_count(void);
+int  neoos_test_parent_pid(int pid);
 ```
 
 These are **not part of the stable ABI** and are **test-only**. They do
@@ -1131,6 +1183,10 @@ not exist in production builds, where both functions return `-ENOSYS`.
 - `neoos_test_migration_count()` — returns the total number of user-thread
   migrations across all CPUs since boot. Used to verify the kernel's work-stealing
   scheduler is exercised. Returns -ENOSYS in production builds.
+
+- `neoos_test_parent_pid(pid)` — returns the `parent_pid` of `pid`, or
+  `-ESRCH` if there is no such process. Used by `orphantest` to observe
+  orphan reparenting. Returns -ENOSYS in production builds.
 
 ## M1a: framebuffer, `poll`/`select`, and pseudo-terminals
 

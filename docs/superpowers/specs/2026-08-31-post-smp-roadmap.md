@@ -24,9 +24,11 @@ is independently shippable.
       │      /dev/fb0 + fbcon, poll/select, PTY, allocatable struct tty,
       │      devfs_register. plan 2026-09-01-m1a-console-plumbing.md.
       │      poll/select also unblocks TCP.
-      ├─ M2. init (PID 1)                   ← next: /ETC/INITTAB, reboot(2),
-      │      orphan reaping, tests run through init.
-      ├─ M1b. Framebuffer terminal          ← xterm-ish VT + scrollback +
+      ├─ M2. init (PID 1)                   ← DONE. /SBIN/INIT from
+      │      /ETC/INITTAB, reboot(2) (PID-1-only), orphan reparenting,
+      │      the workload runs through init. spec 2026-09-01-m2-init-design.md,
+      │      plan 2026-09-01-m2-init.md.
+      ├─ M1b. Framebuffer terminal          ← NEXT: xterm-ish VT + scrollback +
       │      NokiaPure-as-PSF; the kernel out of the printing business.
       │
       ├─ D. x2APIC                             ← isolated; unblocks >255 CPUs later
