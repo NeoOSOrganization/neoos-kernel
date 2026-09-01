@@ -378,6 +378,10 @@ void vt_stress_selftest(void) {
     while (!vtstress_done) { __asm__ volatile("pause"); }
     vt_switch(0);
 
+    // The writer's 2000 characters mirrored to serial (the VT was
+    // active, which is the point). Break the line so the result is
+    // greppable.
+    serial_write_string("\n");
     if (vt_race_hits) {
         serial_write_string("[vt] stress FAILED: painted a background VT, hits=");
         serial_write_hex64(vt_race_hits);

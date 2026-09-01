@@ -6,6 +6,7 @@
 #include "ipc/signal.h"
 #include "drivers/char/timer.h"
 #include "drivers/char/serial.h"
+#include "smp/smp.h"
 
 static struct waitq poll_broadcast;   // see the poll/select section below
 
@@ -333,4 +334,53 @@ static void selftest_thread(void) {
 
 void waitq_selftest_start(void) {
     thread_alloc_kernel(selftest_thread);
+}
+
+// CS2.4: the exit-vs-drain race, forced rather than waited for.
+//
+// A thread that frees itself is still running on its own kernel stack
+// when thread_exit_self publishes it to kzombies, so idle_entry's drain
+// on another CPU can reach it mid-exit. That was diagnosed once from a
+// free_list pointer of 0xfffffffc and fixed (thread_wait_off_cpu plus
+// refcounting), but nothing forced the window to reopen -- it happened
+// by luck, under one timer/SMP interleaving.
+//
+// Hundreds of short-lived threads spread across every online CPU make
+// the window likely instead of lucky. Under DEBUG_HEAP a second free of
+// the same slot panics immediately, naming it, instead of corrupting
+// the free list for some later owner.
+#define CHURN_ROUNDS 400
+
+static volatile int churn_live;
+
+static void churn_thread(void) {
+    __atomic_fetch_sub(&churn_live, 1, __ATOMIC_RELEASE);
+    thread_exit_self(0);
+}
+
+void waitq_churn_selftest(void) {
+    int online = smp_online_count();
+    if (online < 2) {
+        serial_write_string("[waitq] churn SKIPPED: single CPU\n");
+        return;
+    }
+    churn_live = 0;
+    for (int i = 0; i < CHURN_ROUNDS; i++) {
+        __atomic_fetch_add(&churn_live, 1, __ATOMIC_ACQUIRE);
+        if (!thread_alloc_kernel_on(churn_thread, i % online)) {
+            __atomic_fetch_sub(&churn_live, 1, __ATOMIC_RELEASE);
+            serial_write_string("[waitq] churn SKIPPED: thread_alloc failed\n");
+            return;
+        }
+    }
+    // Bounded: a double free panics before we get here under DEBUG_HEAP,
+    // and a lost thread must not hang the boot.
+    for (uint64_t spins = 0; churn_live > 0 && spins < 4000000000ULL; spins++) {
+        __asm__ volatile ("pause");
+    }
+    if (churn_live > 0) {
+        serial_write_string("[waitq] churn FAILED: threads never exited\n");
+        return;
+    }
+    serial_write_string("[waitq] churn passed\n");
 }

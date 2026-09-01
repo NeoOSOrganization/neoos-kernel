@@ -70,5 +70,6 @@ void waitq_poll_leave(void);
 void waitq_remove(struct thread *t);
 
 void waitq_selftest_start(void);
+void waitq_churn_selftest(void);   // exit-vs-drain race; needs APs online
 
 #endif

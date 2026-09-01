@@ -242,6 +242,14 @@ void kmain(void *multiboot_info) {
     tlb_shootdown_selftest();
     panic_stop_selftest();
 
+    // Concurrency stress that needs a second core, run HERE: after the
+    // APs are up, but before init spawns the userland workload. Both
+    // perturb state the workload observes -- vt_stress_selftest clears
+    // the screen and flips VTs, which raced TERM's render check when it
+    // ran after the spawn -- and the banner repaints afterwards anyway.
+    vt_stress_selftest();     // CS0: VT switch vs. console write
+    waitq_churn_selftest();   // CS2: thread exit vs. the kzombies drain
+
     // Everything the banner reports is now known: framebuffer/console up,
     // pmm seeded, CPU probed, every AP online.
     banner_show();
