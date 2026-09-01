@@ -5,7 +5,7 @@
 // `nm` / `addr2line`.
 
 #include "mm/paging.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 
 extern char __text_start[], __kernel_end[];
 

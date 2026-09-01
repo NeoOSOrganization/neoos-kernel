@@ -1,7 +1,7 @@
 #include "mm/heap.h"
 #include "mm/pmm.h"
 #include "mm/paging.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 #include "sync/lock.h"
 
 // One lock over the heap's free lists and page arrays. Takes pmm_lock

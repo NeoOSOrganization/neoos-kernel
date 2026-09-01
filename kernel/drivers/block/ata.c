@@ -1,6 +1,6 @@
-#include "dev/ata.h"
+#include "drivers/block/ata.h"
 #include "arch/io.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 
 #define ATA_DATA        0x1F0
 #define ATA_ERROR       0x1F1

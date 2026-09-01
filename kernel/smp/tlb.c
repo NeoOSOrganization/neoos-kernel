@@ -21,13 +21,13 @@
 
 #include "smp/tlb.h"
 #include "smp/smp.h"
-#include "dev/lapic.h"
+#include "drivers/irq/lapic.h"
 #include "sync/lock.h"
 #include "arch/cpu_local.h"
 #include "mm/pmm.h"
 #include "mm/heap.h"
 #include "sched/proc.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 
 volatile uint64_t ipi_tlb_count;
 

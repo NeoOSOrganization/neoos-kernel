@@ -1,5 +1,5 @@
-#include "dev/acpi.h"
-#include "dev/serial.h"
+#include "drivers/acpi/acpi.h"
+#include "drivers/char/serial.h"
 #include "mm/paging.h"
 
 struct acpi_rsdp {

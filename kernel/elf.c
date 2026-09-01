@@ -1,7 +1,7 @@
 #include "elf.h"
 #include "mm/pmm.h"
 #include "mm/paging.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 
 struct elf64_header {
     uint8_t  e_ident[16];

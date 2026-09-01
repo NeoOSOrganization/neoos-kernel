@@ -1,10 +1,10 @@
-#include "dev/keyboard.h"
-#include "dev/keymap_us.h"
-#include "dev/input.h"
+#include "drivers/input/keyboard.h"
+#include "drivers/input/keymap_us.h"
+#include "drivers/input/input.h"
 #include "arch/io.h"
-#include "dev/serial.h"
-#include "dev/vga.h"
-#include "dev/tty.h"
+#include "drivers/char/serial.h"
+#include "drivers/video/vga.h"
+#include "tty/tty.h"
 
 #define KEYBOARD_DATA_PORT 0x60
 

@@ -1,7 +1,7 @@
 #include "mm/paging.h"
 #include "mm/pmm.h"
 #include "smp/tlb.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 
 #define PAGE_HUGE (1ULL << 7) // 2MiB page at the PD level
 

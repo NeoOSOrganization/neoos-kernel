@@ -11,7 +11,7 @@
 #include "sched/fd_table.h"
 #include "fs/file.h"
 #include "sync/waitq.h"
-#include "dev/timer.h"
+#include "drivers/char/timer.h"
 #include "mm/paging.h"
 #include "errno.h"
 

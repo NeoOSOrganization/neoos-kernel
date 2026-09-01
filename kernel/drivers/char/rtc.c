@@ -1,7 +1,7 @@
-#include "dev/rtc.h"
-#include "dev/timer.h"
+#include "drivers/char/rtc.h"
+#include "drivers/char/timer.h"
 #include "arch/io.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 
 // The CMOS RTC, behind the index/data port pair at 0x70/0x71.
 //

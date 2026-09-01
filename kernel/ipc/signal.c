@@ -1,6 +1,6 @@
 #include "ipc/signal.h"
 #include "sched/proc.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 #include "errno.h"
 #include "mm/paging.h"
 #include "arch/isr.h"

@@ -1,6 +1,6 @@
-#include "dev/pit.h"
+#include "drivers/char/pit.h"
 #include "arch/io.h"
-#include "dev/lapic.h"
+#include "drivers/irq/lapic.h"
 
 #define PIT_CHANNEL0_DATA 0x40
 #define PIT_COMMAND       0x43

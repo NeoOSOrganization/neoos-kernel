@@ -1,7 +1,7 @@
 #include "sched/thread_table.h"
 #include "sched/proc.h"
 #include "mm/heap.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 
 void thread_table_init(struct thread_table *table) {
     if (!table) return;

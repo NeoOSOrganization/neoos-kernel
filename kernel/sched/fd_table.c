@@ -3,7 +3,7 @@
 #include "mm/heap.h"
 #include "fs/vfs.h"
 #include "fs/file.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 #include "errno.h"
 
 static inline unsigned fd_bucket(int fd) {

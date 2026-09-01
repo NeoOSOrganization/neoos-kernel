@@ -1,5 +1,5 @@
 #include "mm/pmm.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 #include "sync/lock.h"
 
 // One lock over the whole buddy allocator. pmm is a leaf: it calls

@@ -1,5 +1,5 @@
 #include "arch/cpu.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 
 #define CPUID_LEAF_1_EDX_SSE   (1u << 25)
 #define CPUID_LEAF_1_EDX_SSE2  (1u << 26)

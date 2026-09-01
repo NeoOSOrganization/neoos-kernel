@@ -1,5 +1,5 @@
-#include "dev/evdev.h"
-#include "dev/input.h"
+#include "drivers/input/evdev.h"
+#include "drivers/input/input.h"
 #include "fs/file.h"
 #include "sched/proc.h"
 #include "errno.h"

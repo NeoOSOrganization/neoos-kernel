@@ -1,5 +1,5 @@
-#include "dev/fb.h"
-#include "dev/serial.h"
+#include "drivers/video/fb.h"
+#include "drivers/char/serial.h"
 #include "mm/paging.h"
 #include "mm/vma.h"
 #include "fs/file.h"

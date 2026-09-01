@@ -1,6 +1,6 @@
 #include "sched/pid_alloc.h"
 #include "mm/heap.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 
 static void *pid_lookup_internal(struct pid_radix_node *node, int pid, int level) {
     if (!node) return 0;

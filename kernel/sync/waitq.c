@@ -4,8 +4,8 @@
 #include "arch/cpu_local.h"
 #include "errno.h"
 #include "ipc/signal.h"
-#include "dev/timer.h"
-#include "dev/serial.h"
+#include "drivers/char/timer.h"
+#include "drivers/char/serial.h"
 
 static struct waitq poll_broadcast;   // see the poll/select section below
 

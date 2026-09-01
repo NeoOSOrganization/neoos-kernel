@@ -8,7 +8,7 @@
 #include "mm/paging.h"
 #include "mm/heap.h"
 #include "arch/tss.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 #include "fs/vfs.h"
 #include "elf.h"
 #include "arch/cpu.h"

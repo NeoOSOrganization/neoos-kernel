@@ -17,7 +17,7 @@
 #include "sync/lock.h"
 #include "sync/waitq.h"
 #include "errno.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 #include "mm/heap.h"
 #include "mm/paging.h"
 #include "sched/proc.h"

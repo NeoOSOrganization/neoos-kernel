@@ -1,7 +1,7 @@
-#include "dev/console.h"
-#include "dev/fb.h"
-#include "dev/fbcon.h"
-#include "dev/vga.h"
+#include "tty/console.h"
+#include "drivers/video/fb.h"
+#include "drivers/video/fbcon.h"
+#include "drivers/video/vga.h"
 
 static int fb_owned;
 

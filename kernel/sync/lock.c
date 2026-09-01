@@ -1,7 +1,7 @@
 #include "sync/lock.h"
 #include "smp/smp.h"
 #include "arch/cpu_local.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 
 // Writes without taking the serial lock: this is reachable from inside
 // a lock acquisition, and the panicking context may already hold it.

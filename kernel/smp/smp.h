@@ -2,7 +2,7 @@
 #define NEOOS_SMP_H
 
 #include <stdint.h>
-#include "dev/acpi.h"
+#include "drivers/acpi/acpi.h"
 
 // CPU topology. Everything in the kernel indexes CPUs by a DENSE index
 // (0..smp_cpu_count()-1), never by lapic_id: APIC ids are sparse and

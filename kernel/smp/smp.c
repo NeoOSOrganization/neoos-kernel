@@ -1,9 +1,9 @@
 // kernel/smp.c -- CPU topology, application-processor bringup, IPIs.
 
 #include "smp/smp.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 #include "arch/cpu_local.h"
-#include "dev/lapic.h"
+#include "drivers/irq/lapic.h"
 #include "arch/gdt.h"
 #include "arch/idt.h"
 #include "arch/cpu.h"
@@ -13,7 +13,7 @@
 #include "sched/proc.h"
 #include "sched/sched.h"
 #include "syscall/syscall.h"
-#include "dev/timer.h"
+#include "drivers/char/timer.h"
 
 // Dense CPU index -> lapic id. cpus[] in cpu_local.h is indexed the same
 // way. NEVER index anything by lapic_id directly: APIC ids are sparse

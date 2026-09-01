@@ -2,12 +2,12 @@
 #include "fs/file.h"
 #include "sched/proc.h"
 #include "errno.h"
-#include "dev/serial.h"
-#include "dev/vga.h"
-#include "dev/tty.h"
-#include "dev/evdev.h"
-#include "dev/fb.h"
-#include "dev/pty.h"
+#include "drivers/char/serial.h"
+#include "drivers/video/vga.h"
+#include "tty/tty.h"
+#include "drivers/input/evdev.h"
+#include "drivers/video/fb.h"
+#include "tty/pty.h"
 #include <stddef.h>
 
 // Forward declarations of file_ops implementations

@@ -11,14 +11,14 @@
 #include "mm/paging.h"
 #include "mm/heap.h"
 #include "arch/tss.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 #include "fs/vfs.h"
 #include "elf.h"
 #include "arch/cpu.h"
 #include "arch/cpu_local.h"
 #include "sync/waitq.h"
 #include "errno.h"
-#include "dev/timer.h"
+#include "drivers/char/timer.h"
 #include "lib/rand.h"
 
 extern void context_switch(uint64_t *old_rsp, uint64_t *new_rsp);

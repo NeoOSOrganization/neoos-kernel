@@ -21,10 +21,10 @@
 #include "ipc/futex.h"
 #include "sync/lock.h"
 #include "sync/waitq.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 #include "errno.h"
 #include "ipc/signal.h"
-#include "dev/timer.h"
+#include "drivers/char/timer.h"
 #include "mm/paging.h"
 #include "sched/proc.h"
 

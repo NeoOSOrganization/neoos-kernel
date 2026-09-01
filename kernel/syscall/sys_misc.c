@@ -5,7 +5,7 @@
 // user-copy helpers stayed behind in syscall.c.
 
 #include "syscall/syscall_internal.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 #include "sched/proc.h"
 #include "sched/fd_table.h"
 #include "fs/vfs.h"
@@ -15,9 +15,9 @@
 #include "ipc/signal.h"
 #include "ipc/futex.h"
 #include "ipc/pipe.h"
-#include "dev/timer.h"
-#include "dev/rtc.h"
-#include "dev/input.h"
+#include "drivers/char/timer.h"
+#include "drivers/char/rtc.h"
+#include "drivers/input/input.h"
 #include "mm/vma.h"
 #include "mm/paging.h"
 #include "mm/heap.h"

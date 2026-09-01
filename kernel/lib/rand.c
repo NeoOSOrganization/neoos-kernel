@@ -4,8 +4,8 @@
 
 #include "lib/rand.h"
 #include "arch/cpu.h"
-#include "dev/rtc.h"
-#include "dev/serial.h"
+#include "drivers/char/rtc.h"
+#include "drivers/char/serial.h"
 #include "sync/lock.h"
 #include <stdint.h>
 #include <stdbool.h>

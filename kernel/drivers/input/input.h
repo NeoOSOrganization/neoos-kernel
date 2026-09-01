@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include "sync/waitq.h"
-#include "dev/keyboard.h"
+#include "drivers/input/keyboard.h"
 
 // Linux x86-64 input_event layout, exactly 24 bytes
 struct input_event {

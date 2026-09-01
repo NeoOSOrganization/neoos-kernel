@@ -1,4 +1,4 @@
-#include "dev/pic.h"
+#include "drivers/irq/pic.h"
 #include "arch/io.h"
 
 #define PIC1_CMD  0x20

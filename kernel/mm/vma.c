@@ -4,7 +4,7 @@
 #include "mm/heap.h"
 #include "sched/proc.h"
 #include "errno.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 
 // kernel/mm reaching into kernel/sched for struct process matches what
 // kernel/fs/vfs.c already does; the alternative is threading four

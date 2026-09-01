@@ -21,7 +21,7 @@
 #include "sync/lock.h"
 #include "sync/waitq.h"
 #include "errno.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 #include "ipc/signal.h"
 #include "sched/proc.h"
 #include "sched/fd_table.h"

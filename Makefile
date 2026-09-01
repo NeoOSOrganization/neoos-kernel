@@ -19,7 +19,9 @@ ISO_DIR := iso
 # than a recursive wildcard so that adding a directory is a deliberate
 # act: a stray .c file in a new folder should fail to link, not get
 # picked up silently.
-KERNEL_DIRS := kernel kernel/arch kernel/dev kernel/ipc kernel/smp \
+KERNEL_DIRS := kernel kernel/arch kernel/drivers/video kernel/drivers/input \
+	kernel/drivers/block kernel/drivers/char kernel/drivers/irq kernel/drivers/acpi \
+	kernel/tty kernel/ipc kernel/smp \
 	kernel/syscall kernel/mm kernel/fs kernel/sched kernel/sync kernel/net kernel/lib
 C_SOURCES := $(foreach d,$(KERNEL_DIRS),$(wildcard $(d)/*.c))
 # Every kernel header, as a coarse prerequisite for every object. Without
@@ -493,7 +495,7 @@ REQUIRED_MARKERS := \
 # Rebuilding the images makes each test run start from a known state.
 
 clean-kernel:
-	rm -f $(BUILD_DIR)/*.o $(BUILD_DIR)/**/*.o
+	find $(BUILD_DIR) -name '*.o' -delete
 
 # ---- terminal font -------------------------------------------------
 #

@@ -1,6 +1,6 @@
-#include "dev/fbcon.h"
-#include "dev/fb.h"
-#include "dev/serial.h"
+#include "drivers/video/fbcon.h"
+#include "drivers/video/fb.h"
+#include "drivers/char/serial.h"
 #include "sync/lock.h"
 
 extern const uint8_t font8x16[256][16];

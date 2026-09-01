@@ -1,4 +1,4 @@
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 #include "arch/io.h"
 #include "sync/lock.h"
 

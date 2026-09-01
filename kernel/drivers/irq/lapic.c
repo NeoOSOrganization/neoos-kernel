@@ -1,4 +1,4 @@
-#include "dev/lapic.h"
+#include "drivers/irq/lapic.h"
 #include "mm/paging.h"
 
 #define LAPIC_REG_ID         0x020

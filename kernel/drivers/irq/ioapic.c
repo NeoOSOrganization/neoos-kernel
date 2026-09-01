@@ -1,4 +1,4 @@
-#include "dev/ioapic.h"
+#include "drivers/irq/ioapic.h"
 #include "mm/paging.h"
 
 #define IOAPIC_REGSEL 0

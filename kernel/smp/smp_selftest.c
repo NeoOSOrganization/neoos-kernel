@@ -4,7 +4,7 @@
 #include "smp/smp.h"
 #include "arch/cpu_local.h"
 #include "sync/lock.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 #include "sched/proc.h"
 #include "sched/sched.h"
 #include "arch/tss.h"

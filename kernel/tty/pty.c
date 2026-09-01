@@ -1,12 +1,12 @@
-#include "dev/pty.h"
-#include "dev/tty.h"
-#include "dev/console.h"
+#include "tty/pty.h"
+#include "tty/tty.h"
+#include "tty/console.h"
 #include "fs/file.h"
 #include "fs/devfs.h"
 #include "sync/lock.h"
 #include "sync/waitq.h"
 #include "sched/proc.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 #include "errno.h"
 
 #define PTY_MAX 16

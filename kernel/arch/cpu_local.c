@@ -1,7 +1,7 @@
 #include "arch/cpu_local.h"
 #include "arch/msr.h"
-#include "dev/serial.h"
-#include "dev/lapic.h"
+#include "drivers/char/serial.h"
+#include "drivers/irq/lapic.h"
 
 
 struct cpu cpus[MAX_CPUS];

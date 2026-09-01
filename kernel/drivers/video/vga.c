@@ -1,4 +1,4 @@
-#include "dev/vga.h"
+#include "drivers/video/vga.h"
 #include "mm/paging.h"
 
 static volatile unsigned short *VGA_BUFFER;

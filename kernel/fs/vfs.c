@@ -5,7 +5,7 @@
 #include "fs/fatfs.h"
 #include "fs/devfs.h"
 #include "errno.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 #include "sched/proc.h"
 #include "sched/fd_table.h"
 

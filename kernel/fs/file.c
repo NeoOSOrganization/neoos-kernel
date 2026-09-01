@@ -13,7 +13,7 @@
 #include "sched/proc.h"
 #include "fs/vfs.h"
 #include "errno.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 
 #define SEEK_SET 0
 #define SEEK_CUR 1

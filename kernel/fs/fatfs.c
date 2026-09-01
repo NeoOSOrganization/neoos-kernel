@@ -1,7 +1,7 @@
 #include "fs/fatfs.h"
 #include "fs/blkcache.h"
-#include "dev/ata.h"
-#include "dev/serial.h"
+#include "drivers/block/ata.h"
+#include "drivers/char/serial.h"
 #include "mm/heap.h"
 
 // The legacy single-volume API. No longer declared in fatfs.h -- the
@@ -23,8 +23,8 @@ int fat16_delete_entry(const char *path);
 int fat16_find(const char *path, uint32_t *out_cluster, uint32_t *out_size,
                uint32_t *out_dir_lba, uint16_t *out_dir_offset);
 #include "errno.h"
-#include "dev/rtc.h"
-#include "dev/timer.h"
+#include "drivers/char/rtc.h"
+#include "drivers/char/timer.h"
 
 #define FAT_ATTR_DIRECTORY 0x10
 #define FAT_ATTR_VOLUME_ID 0x08

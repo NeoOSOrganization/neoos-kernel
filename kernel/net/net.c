@@ -10,7 +10,7 @@
 // about.
 
 #include "net/net.h"
-#include "dev/serial.h"
+#include "drivers/char/serial.h"
 #include "errno.h"
 #include "mm/heap.h"
 
