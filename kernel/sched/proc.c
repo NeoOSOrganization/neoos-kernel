@@ -977,6 +977,15 @@ void process_exit(int code) {
         serial_write_hex64((uint64_t)p->pid);
         serial_write_string(" code=");
         serial_write_hex64((uint64_t)(int64_t)code);
+        // A fatal signal reaches here as signal_terminate() -> exit(0),
+        // so without this a KILLED process is indistinguishable in the
+        // log from one that returned 0. That cost a long debugging
+        // session: a test dying on SIGSEGV looked exactly like a test
+        // that had passed and exited cleanly.
+        if (p->exit_signal) {
+            serial_write_string(" signal=");
+            serial_write_hex64((uint64_t)p->exit_signal);
+        }
         serial_write_string("\n");
 
         // Every sibling dies too. The LAST thread to actually leave --

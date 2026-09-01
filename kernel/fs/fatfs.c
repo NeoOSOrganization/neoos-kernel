@@ -9,7 +9,7 @@
 // selftests below still drive the driver's internals through it, so
 // the prototypes live here instead.
 uint32_t fat16_read_file(uint32_t first_cluster, uint32_t size, void *buffer);
-void fat16_read_at(uint32_t first_cluster, uint32_t position, void *buf, uint32_t len);
+uint32_t fat16_read_at(uint32_t first_cluster, uint32_t position, void *buf, uint32_t len);
 int fat16_write_file(uint32_t first_cluster, uint32_t current_size, uint32_t position,
                       const void *buf, uint32_t len,
                       uint32_t *out_first_cluster, uint32_t *out_new_size);
@@ -442,7 +442,19 @@ uint32_t fat16_read_file(uint32_t first_cluster, uint32_t size, void *buffer) {
     return bytes_read;
 }
 
-void fat16_read_at_v(struct fat_volume *v, uint32_t first_cluster, uint32_t position, void *buf, uint32_t len) {
+// Returns the number of bytes actually read, which may be less than len.
+//
+// It used to return void and ignore blkcache_read's result. `sector` is
+// an uninitialised stack buffer, so a failed sector read copied whatever
+// was on the stack into the caller's data as though it were the file's
+// -- silent corruption, with no error anywhere. It surfaced as a
+// 512-byte hole in a loaded executable: the text at that address read
+// back as 00 00, which decodes as `add %al,(%rax)`, so the process died
+// with SIGSEGV writing through whatever rax last held. The emulated ATA
+// controller failing under host load is a KNOWN condition the gauntlet
+// already tracked -- what nobody had noticed was that its consequence
+// was corrupt file data rather than just a logged warning.
+uint32_t fat16_read_at_v(struct fat_volume *v, uint32_t first_cluster, uint32_t position, void *buf, uint32_t len) {
     uint8_t *out = (uint8_t *)buf;
     uint32_t cluster_size_bytes = (uint32_t)v->sectors_per_cluster * v->bytes_per_sector;
     uint32_t read_so_far = 0;
@@ -462,13 +474,23 @@ void fat16_read_at_v(struct fat_volume *v, uint32_t first_cluster, uint32_t posi
         }
 
         uint8_t sector[SECTOR_SIZE];
-        blkcache_read(v->drive, lba, sector);
+        if (!blkcache_read(v->drive, lba, sector)) {
+            // Stop here and report short. Copying on would hand the
+            // caller uninitialised stack bytes as file contents.
+            serial_write_string("[fat] read FAILED lba=");
+            serial_write_hex64((uint64_t)lba);
+            serial_write_string(" short at offset=");
+            serial_write_hex64((uint64_t)read_so_far);
+            serial_write_string("\n");
+            return read_so_far;
+        }
         for (uint32_t i = 0; i < to_read; i++) {
             out[read_so_far + i] = sector[offset_in_sector + i];
         }
 
         read_so_far += to_read;
     }
+    return read_so_far;
 }
 
 int fat16_write_file_v(struct fat_volume *v, uint32_t first_cluster, uint32_t current_size, uint32_t position,
@@ -1777,8 +1799,8 @@ void fat16_write_selftest(void) {
 // Legacy single-volume wrappers. Each is the only thing still binding
 // &legacy_volume for these four operations; they disappear with the
 // rest of the legacy API once syscall.c moves to the VFS.
-void fat16_read_at(uint32_t first_cluster, uint32_t position, void *buf, uint32_t len) {
-    fat16_read_at_v(&legacy_volume, first_cluster, position, buf, len);
+uint32_t fat16_read_at(uint32_t first_cluster, uint32_t position, void *buf, uint32_t len) {
+    return fat16_read_at_v(&legacy_volume, first_cluster, position, buf, len);
 }
 
 int fat16_write_file(uint32_t first_cluster, uint32_t current_size, uint32_t position,
@@ -1992,8 +2014,11 @@ static int64_t fatfs_read(struct vnode *vn, uint32_t pos, void *buf, uint32_t le
     struct fatfs_inode *n = (struct fatfs_inode *)vn->fs_private;
     if (pos >= vn->size) { return 0; }
     if (pos + len > vn->size) { len = vn->size - pos; }
-    fat16_read_at_v(v, n->first_cluster, pos, buf, len);
-    return (int64_t)len;
+    uint32_t got = fat16_read_at_v(v, n->first_cluster, pos, buf, len);
+    // Report what was actually read. Claiming `len` after a failed
+    // sector is what let corrupt data reach an ELF image undetected.
+    if (got == 0 && len > 0) { return -EIO; }
+    return (int64_t)got;
 }
 
 static int64_t fatfs_write(struct vnode *vn, uint32_t pos, const void *buf, uint32_t len) {
