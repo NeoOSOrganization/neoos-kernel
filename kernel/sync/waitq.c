@@ -17,6 +17,13 @@ static struct waitq poll_broadcast;   // see the poll/select section below
 // has said for a while -- into a ratio a redesign has to move.
 static volatile uint64_t poll_events;    // broadcasts issued
 static volatile uint64_t poll_wakeups;   // sleepers actually woken
+// Of those wakeups, the ones that found NOTHING ready and went straight
+// back to sleep. This is the defect itself, and the only one of the
+// three numbers that a per-object redesign has to move: a broadcast
+// design wakes every sleeper regardless of interest, so nearly all of
+// these are pure waste. Counted in poll_core, which is the only place
+// that knows whether a wake produced anything.
+static volatile uint64_t poll_wasted;
 
 // How many threads are blocked on the broadcast right now. pollstorm
 // waits on this instead of guessing a settle delay: "the child said it
@@ -33,6 +40,12 @@ uint64_t waitq_poll_depth(void) {
 void waitq_poll_stats(uint64_t *events, uint64_t *wakeups) {
     if (events)  { *events  = poll_events; }
     if (wakeups) { *wakeups = poll_wakeups; }
+}
+
+uint64_t waitq_poll_wasted(void) { return poll_wasted; }
+
+void waitq_poll_count_wasted(void) {
+    __atomic_add_fetch(&poll_wasted, 1, __ATOMIC_RELAXED);
 }
 
 void waitq_init(struct waitq *q) {

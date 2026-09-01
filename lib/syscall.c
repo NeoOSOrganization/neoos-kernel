@@ -82,6 +82,7 @@
 #define TESTHOOK_PMM_FREE     4
 #define TESTHOOK_POLL_STATS   5
 #define TESTHOOK_POLL_DEPTH   6
+#define TESTHOOK_POLL_WASTED  7
 
 static inline int64_t syscall0(int64_t num) {
     int64_t ret;
@@ -568,4 +569,8 @@ long neoos_test_poll_stats(void) {
 
 long neoos_test_poll_depth(void) {
     return (long)syscall1(SYS_TEST_HOOK, TESTHOOK_POLL_DEPTH);
+}
+
+long neoos_test_poll_wasted(void) {
+    return (long)syscall1(SYS_TEST_HOOK, TESTHOOK_POLL_WASTED);
 }

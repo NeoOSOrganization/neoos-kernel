@@ -28,4 +28,8 @@ long neoos_test_poll_stats(void);
 // production.
 long neoos_test_poll_depth(void);
 
+// Poll wakeups that found nothing ready -- the wasted ones. Returns
+// -ENOSYS in production.
+long neoos_test_poll_wasted(void);
+
 #endif

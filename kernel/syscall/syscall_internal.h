@@ -65,6 +65,7 @@ typedef int64_t (*syscall_handler)(struct syscall_args *);
 #define TESTHOOK_PMM_FREE     4   // returns pmm_free_frame_count()
 #define TESTHOOK_POLL_STATS   5   // returns (poll_events << 32) | poll_wakeups
 #define TESTHOOK_POLL_DEPTH   6   // threads blocked on the poll broadcast now
+#define TESTHOOK_POLL_WASTED  7   // wakeups that found nothing ready
 
 // ---- shared helpers, defined in syscall.c ---------------------------
 

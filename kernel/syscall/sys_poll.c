@@ -30,6 +30,7 @@ static int64_t poll_core(struct pollfd *pfd, unsigned n, int64_t deadline) {
 
     waitq_poll_enter();
     int64_t ready = 0;
+    int woken_by_broadcast = 0;
     for (;;) {
         ready = 0;
         for (unsigned i = 0; i < n; i++) {
@@ -40,12 +41,21 @@ static int64_t poll_core(struct pollfd *pfd, unsigned n, int64_t deadline) {
             pfd[i].revents = got & (pfd[i].events | POLLERR | POLLHUP | POLLNVAL);
             if (pfd[i].revents) { ready++; }
         }
+        if (woken_by_broadcast) {
+            if (!ready) { waitq_poll_count_wasted(); }
+            woken_by_broadcast = 0;
+        }
         if (ready) { break; }
         if (deadline == 0) { break; }                 // timeout 0 = non-blocking scan
         int rc = waitq_poll_wait((uint64_t)deadline);
         if (rc == -EINTR) { waitq_poll_leave(); return -EINTR; }
         if (rc == -ETIMEDOUT) { break; }
-        // otherwise woken by a broadcast -- loop and re-scan
+        // Woken by a broadcast. Re-scan at the top; if that scan finds
+        // nothing, this wake was pure waste -- the readiness change was
+        // somebody else's, and the global broadcast delivered it here
+        // anyway. Count it, because that count is the whole case for
+        // CS5.2's per-object poll table.
+        woken_by_broadcast = 1;
     }
     waitq_poll_leave();
     return ready;

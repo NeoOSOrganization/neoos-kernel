@@ -58,6 +58,8 @@ void kernel_shutdown(void) {
         serial_write_hex64(pev);
         serial_write_string(" wakeups=");
         serial_write_hex64(pwk);
+        serial_write_string(" wasted=");
+        serial_write_hex64(waitq_poll_wasted());
         serial_write_string("\n");
     }
     lock_stats_dump();   // no-op unless DEBUG_LOCKSTAT
