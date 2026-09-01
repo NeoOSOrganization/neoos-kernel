@@ -29,7 +29,7 @@ C_HEADERS := $(foreach d,$(KERNEL_DIRS),$(wildcard $(d)/*.h))
 C_OBJECTS := $(patsubst kernel/%.c,$(BUILD_DIR)/%.o,$(C_SOURCES))
 ASM_OBJECTS := $(BUILD_DIR)/boot.o $(BUILD_DIR)/gdt_flush.o $(BUILD_DIR)/isr_stubs.o $(BUILD_DIR)/context_switch.o $(BUILD_DIR)/syscall_entry.o $(BUILD_DIR)/fork_trampoline.o $(BUILD_DIR)/sigframe.o $(BUILD_DIR)/ap_trampoline.o
 
-.PHONY: all build iso run test fresh-disks clean disk-image
+.PHONY: all build iso run test fresh-disks clean disk-image font-regen font-check
 
 all: build
 
@@ -459,6 +459,34 @@ REQUIRED_MARKERS := \
 
 clean-kernel:
 	rm -f $(BUILD_DIR)/*.o $(BUILD_DIR)/**/*.o
+
+# ---- terminal font -------------------------------------------------
+#
+# Spleen 12x24 (third_party/spleen, BSD-2-Clause) -> a packed C glyph
+# table for the M1b userland terminal. The generated font_term.c/.h are
+# CHECKED IN (like kernel/dev/font8x16.c), so a normal build never runs
+# python. `font-regen` rewrites them; `font-check` proves the committed
+# copy still matches the BDF and that the table compiles and indexes.
+FONT_BDF := third_party/spleen/spleen-12x24.bdf
+FONT_HDR := userland/term/font_term.h
+FONT_SRC := userland/term/font_term.c
+
+font-regen:
+	python3 tools/bdf2c.py $(FONT_BDF) --array term_glyphs \
+	    --header $(FONT_HDR) --source $(FONT_SRC)
+
+font-check:
+	@tmp=$$(mktemp -d); rc=0; \
+	python3 tools/bdf2c.py $(FONT_BDF) --array term_glyphs \
+	    --header $$tmp/font_term.h --source $$tmp/font_term.c; \
+	diff -u $(FONT_HDR) $$tmp/font_term.h || rc=1; \
+	diff -u $(FONT_SRC) $$tmp/font_term.c || rc=1; \
+	if [ $$rc -eq 0 ]; then \
+	    echo "font-check: generated table matches the committed one"; \
+	    cc -std=c11 -Wall -Wextra -o $$tmp/font_check tools/font_check.c && \
+	    $$tmp/font_check || rc=1; \
+	fi; \
+	rm -rf $$tmp; exit $$rc
 
 fresh-disks:
 	rm -f $(DISK_IMG) $(DISK2_IMG)
