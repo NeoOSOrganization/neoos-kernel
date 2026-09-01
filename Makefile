@@ -485,6 +485,7 @@ REQUIRED_MARKERS := \
 	"[fb] framebuffer" \
 	"[fbdev] selftest passed" \
 	"[fbcon] selftest passed" \
+	"[con] selftest passed" \
 	"[rtc] selftest passed" \
 	"[keyboard] decode selftest passed" \
 	"[input] selftest passed"

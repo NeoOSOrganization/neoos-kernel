@@ -3,7 +3,6 @@
 #include "drivers/input/input.h"
 #include "arch/io.h"
 #include "drivers/char/serial.h"
-#include "drivers/video/vga.h"
 #include "tty/tty.h"
 
 #define KEYBOARD_DATA_PORT 0x60

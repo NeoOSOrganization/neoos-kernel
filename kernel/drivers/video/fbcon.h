@@ -14,5 +14,7 @@ void fbcon_putc(char c);
 void fbcon_write(const char *s, uint64_t n);
 void fbcon_clear(void);
 void fbcon_selftest(void);
+uint32_t fbcon_cols(void);
+uint32_t fbcon_rows(void);
 
 #endif

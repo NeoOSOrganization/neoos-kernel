@@ -1,15 +1,23 @@
 #include "drivers/video/fbcon.h"
 #include "drivers/video/fb.h"
+#include "drivers/video/fb_device.h"
 #include "drivers/video/vesafb_internal.h"
 #include "drivers/char/serial.h"
+#include "tty/con_driver.h"
 #include "sync/lock.h"
 
 extern const uint8_t font8x16[256][16];
 
 #define GLYPH_W 8
 #define GLYPH_H 16
-#define FG 0x00c8c8c8u   // light grey
+#define FG 0x00c8c8c8u   // light grey (default)
 #define BG 0x00000000u   // black
+
+// CON_* (0..15) -> 0x00RRGGBB, standard VGA palette.
+static const uint32_t con_rgb[16] = {
+    0x000000, 0x0000aa, 0x00aa00, 0x00aaaa, 0xaa0000, 0xaa00aa, 0xaa5500, 0xaaaaaa,
+    0x555555, 0x5555ff, 0x55ff55, 0x55ffff, 0xff5555, 0xff55ff, 0xffff55, 0xffffff,
+};
 
 static uint32_t cols, rows, cx, cy;
 static struct spinlock fbcon_lock;
@@ -18,15 +26,19 @@ static inline volatile uint32_t *pixel(uint32_t px, uint32_t py) {
     return (volatile uint32_t *)(fb.virt + (uint64_t)py * fb.pitch + (uint64_t)px * 4);
 }
 
-static void put_glyph(uint32_t gx, uint32_t gy, unsigned char ch) {
+static void put_glyph_fg(uint32_t gx, uint32_t gy, unsigned char ch, uint32_t fg) {
     const uint8_t *g = font8x16[ch];
     for (uint32_t y = 0; y < GLYPH_H; y++) {
         uint8_t bits = g[y];
         for (uint32_t x = 0; x < GLYPH_W; x++) {
             *pixel(gx * GLYPH_W + x, gy * GLYPH_H + y) =
-                (bits >> (7 - x)) & 1 ? FG : BG;
+                (bits >> (7 - x)) & 1 ? fg : BG;
         }
     }
+}
+
+static void put_glyph(uint32_t gx, uint32_t gy, unsigned char ch) {
+    put_glyph_fg(gx, gy, ch, FG);
 }
 
 // Shift the visible area up one text row. 64-bit stores -- a byte loop
@@ -49,16 +61,18 @@ static void clear_locked(void) {
     cx = cy = 0;
 }
 
-static void putc_locked(char c) {
+static void putc_locked_fg(char c, uint32_t fg) {
     if (c == '\n')      { cx = 0; cy++; }
     else if (c == '\r') { cx = 0; }
     else if (c == '\b') { if (cx) { cx--; put_glyph(cx, cy, ' '); } }
     else if (c == '\t') { cx = (cx + 8u) & ~7u; }
-    else                { put_glyph(cx, cy, (unsigned char)c); cx++; }
+    else                { put_glyph_fg(cx, cy, (unsigned char)c, fg); cx++; }
 
     if (cx >= cols) { cx = 0; cy++; }
     if (cy >= rows) { scroll_one(); cy = rows - 1; }
 }
+
+static void putc_locked(char c) { putc_locked_fg(c, FG); }
 
 void fbcon_clear(void) {
     if (!fb.present) { return; }
@@ -93,6 +107,33 @@ void fbcon_write(const char *s, uint64_t n) {
     for (uint64_t i = 0; i < n; i++) { putc_locked(s[i]); }
     spin_unlock_raw(&fbcon_lock, f);
 }
+
+// ---- con_driver ----------------------------------------------------
+
+uint32_t fbcon_cols(void) { return cols; }
+uint32_t fbcon_rows(void) { return rows; }
+
+static int fbcon_probe(void) { return fb_device_active() != 0; }
+
+static void fbcon_init_cd(int *c, int *r) {
+    fbcon_init();
+    *c = (int)cols;
+    *r = (int)rows;
+}
+
+static void fbcon_putc_attr(char c, uint8_t fg) {
+    if (!fb.present) { return; }
+    uint32_t rgb = con_rgb[fg & 15];
+    uint64_t f = spin_lock_raw(&fbcon_lock);
+    putc_locked_fg(c, rgb);
+    spin_unlock_raw(&fbcon_lock, f);
+}
+
+struct con_driver fbcon_drv = {
+    .name = "fbcon", .priority = 100,
+    .probe = fbcon_probe, .init = fbcon_init_cd,
+    .putc_attr = fbcon_putc_attr, .clear = fbcon_clear,
+};
 
 void fbcon_selftest(void) {
     if (!fb.present) {

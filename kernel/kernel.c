@@ -1,10 +1,10 @@
 #include "kernel.h"
-#include "drivers/video/vga.h"
 #include "drivers/video/fb.h"
 #include "drivers/video/fb_device.h"
 #include "drivers/video/fbcon.h"
 #include "tty/pty.h"
 #include "tty/console.h"
+#include "tty/con_driver.h"
 #include "drivers/char/serial.h"
 #include "arch/tss.h"
 #include "arch/gdt.h"
@@ -104,8 +104,10 @@ void kmain(void *multiboot_info) {
     // from any address space).
     fb_map();
     fb_device_selftest();
-    fbcon_init();
+    con_driver_register_builtin();
+    con_driver_select();
     fbcon_selftest();
+    con_driver_selftest();
     console_clear();
     console_write("NeoOS booted\n", 13);
 

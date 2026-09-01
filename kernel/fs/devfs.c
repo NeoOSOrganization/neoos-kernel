@@ -3,7 +3,6 @@
 #include "sched/proc.h"
 #include "errno.h"
 #include "drivers/char/serial.h"
-#include "drivers/video/vga.h"
 #include "tty/tty.h"
 #include "drivers/input/evdev.h"
 #include "drivers/video/fb.h"
