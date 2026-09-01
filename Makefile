@@ -373,6 +373,12 @@ $(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_B
 	  '# framebuffer, renders TERMCHILD, self-checks, and exits before the' \
 	  '# key-injecting suites (ttytest, evtest, polltest) start.' \
 	  'wait /BIN/TERM.ELF' \
+	  '# VTSWITCHTEST is a wait entry for the same reason: the active VT' \
+	  '# is global state, and /dev/CONSOLE follows it. A concurrent' \
+	  '# ttytest that set ICANON off through /dev/CONSOLE and read it' \
+	  '# back after a switch got two DIFFERENT terminals and reported' \
+	  '# "[ttytest] FAILED: ICANON should be off".' \
+	  'wait /BIN/VTSWITCHTEST.ELF' \
 	  'spawn /BIN/PARENT.ELF' \
 	  'spawn /BIN/LOOPER.ELF' \
 	  'spawn /BIN/LOOPER.ELF' \
@@ -380,7 +386,6 @@ $(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_B
 	  'spawn /BIN/VFSTEST.ELF' \
 	  'spawn /BIN/VTTEST.ELF' \
 	  'spawn /BIN/ACTIVETTYTEST.ELF' \
-	  'spawn /BIN/VTSWITCHTEST.ELF' \
 	  'spawn /BIN/CWDTEST.ELF' \
 	  'spawn /BIN/STATTEST.ELF' \
 	  'spawn /BIN/DIRTEST.ELF' \

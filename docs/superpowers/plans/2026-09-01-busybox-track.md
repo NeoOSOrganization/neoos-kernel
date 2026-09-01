@@ -261,6 +261,13 @@ the serial log is scraped for the prompts and command output —
   noted. Settle this in BB1, against what actually builds.
 - **Where the shell lives** — `/dev/tty1` or the PTY-hosted `TERM`.
   Decide at BB6, once BB4 has made a controlling terminal mean
-  something.
+  something. **It must not be `/dev/CONSOLE`**: that follows the active
+  VT, so a shell holding it would start talking to a different terminal
+  the moment anything switched VTs (recorded in `docs/stdlib.md`; it
+  already made `ttytest` flaky when `vtswitchtest` ran beside it).
+  Whether `/dev/CONSOLE` should instead be *bound* to VT 1, as Linux
+  binds `/dev/console`, is a live question for BB6 — it would be the
+  Linux-shaped answer, and it would make `/dev/CONSOLE` usable as a
+  program's terminal again.
 - **DL1–DL3** are deferred, not dropped. Nothing in this track needs
   them; the `fork` fix in BB0 is where file-backed vmas will hook in.

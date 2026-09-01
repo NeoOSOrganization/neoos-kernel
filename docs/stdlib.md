@@ -1400,3 +1400,13 @@ take the screen without the kernel drawing over it.
   `K_MEDIUMRAW` and the `KDGKBENT` keymap ioctls do not exist; a program
   wanting scancodes reads `/dev/input/event0`.
 - **No `/dev/vcs*` / `/dev/vcsa*`** screen-content devices.
+- **`/dev/CONSOLE` follows the active VT; Linux's `/dev/console` does
+  not.** On Linux `/dev/console` is *bound* at boot to one device and
+  only `/dev/tty0` tracks the foreground VT. Here both track it, which
+  means a process holding a `/dev/CONSOLE` fd across a VT switch is
+  afterwards talking to a **different terminal** — its `termios` and its
+  output both move. (Seen for real: a test that set `ICANON` off through
+  `/dev/CONSOLE` and read it back after another process called
+  `VT_ACTIVATE` got two different terminals and the setting appeared not
+  to stick.) A program that wants a stable terminal must open a specific
+  `/dev/ttyN`, not `/dev/CONSOLE`.
