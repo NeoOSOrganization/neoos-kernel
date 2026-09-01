@@ -1,208 +1,185 @@
-# Post-SMP roadmap — driver and hardening milestones
+# NeoOS roadmap
 
-**Date:** 2026-08-31
-**Status:** planning index. Each milestone below has (or gets) its own
+**Created:** 2026-08-31 (as the post-SMP driver roadmap)
+**Rewritten:** 2026-09-01 — the driver and audio track was dropped in
+favour of concurrency hardening. Filename kept so existing references
+resolve.
+**Status:** planning index. Each live milestone has (or gets) its own
 design spec + implementation plan under `docs/superpowers/`.
 
-This document sequences the work requested after the SMP
-object-lifetime milestone: x2APIC, a floppy (FDC) driver, an audio
-stack (SB16 / AC97 / Intel HDA), and ASLR + NX/W^X. It is written to be
-executed autonomously in order; each milestone ends gauntlet-green and
-is independently shippable.
-
-## Ordering and rationale
+## Where the project is
 
 ```
-  in flight ── SMP lifetime + lock detangle   (Tasks 1-8, this session)
-      │
-      ├─ A. net socket-lifetime fix            (residual from that milestone)
-      │
-      ├─ B. NX / W^X enforcement               ← DONE (commits 9cabab4..d872e7c)
-      ├─ C. ASLR                               ← builds on B and on AT_RANDOM
-      │
-      ├─ M1a. Console plumbing              ← DONE (commits 627a113..8045377)
-      │      /dev/fb0 + fbcon, poll/select, PTY, allocatable struct tty,
-      │      devfs_register. plan 2026-09-01-m1a-console-plumbing.md.
-      │      poll/select also unblocks TCP.
-      ├─ M2. init (PID 1)                   ← DONE. /SBIN/INIT from
-      │      /ETC/INITTAB, reboot(2) (PID-1-only), orphan reparenting,
-      │      the workload runs through init. spec 2026-09-01-m2-init-design.md,
-      │      plan 2026-09-01-m2-init.md.
-      ├─ M1b. Framebuffer terminal          ← IN PROGRESS: xterm-ish VT +
-      │      Spleen font; the kernel out of the printing business.
-      │      spec 2026-09-01-m1b-framebuffer-terminal-design.md.
-      │      M1b-1 font, M1b-2 VT engine, M1b-3 TERM process = DONE.
-      │      M1b-4 (scrollback + evdev keys) folded into M1c-4.
-      ├─ M1c. Driver model + kernel VTs     ← NEXT: kernel/drivers/ reorg,
-      │      fb_device + con_driver abstractions, /dev/tty1..6 with
-      │      Alt+Fn, TERM becomes a VT_PROCESS client. Linux VT/KD ioctls.
-      │      spec 2026-09-01-m1c-driver-model-and-vts-design.md (M1c-1..4).
-      │
-      ├─ DL.  Dynamic linking               ← after M1b. file-backed mmap,
-      │      PT_INTERP + full auxv, dynamic TLS + dlopen. Highest leverage
-      │      on "run real Linux apps unpatched".
-      ├─ BB.  BusyBox (static)              ← after DL. execve+argv/envp,
-      │      job control, minimal /proc, Tier-2 fs syscalls, then an
-      │      interactive ash in the M1b terminal.
-      │      Both tracks: spec 2026-09-01-busybox-and-dynamic-linking-roadmap.md.
-      │
-      ├─ D. x2APIC                             ← isolated; unblocks >255 CPUs later
-      ├─ E. FDC (floppy) driver                ← isolated; smallest new driver
-      │
-      └─ F. Audio stack
-             F1. sound core + /dev/dsp (OSS-style PCM)
-             F2. SB16    (ISA DMA — simplest real codec)
-             F3. AC97    (PCI bus-master DMA)
-             F4. Intel HDA (PCI, codec/widget graph)
+DONE
+  A.     net socket-lifetime fix        commit a66e5f7
+  B.     NX / W^X enforcement           commits 9cabab4..d872e7c
+  SMP.   lifetime + lock detangle       refcounting in, kernel/sync/rcu.c deleted
+  Ph14.  input + solidity               evdev, keyboard decoder, CSPRNG AT_RANDOM
+  M1a.   console plumbing               /dev/fb0 + fbcon, poll/select, PTY, devfs_register
+  M2.    init (PID 1)                   /SBIN/INIT from /ETC/INITTAB, reboot(2), reparenting
+  M1b-1..3. framebuffer terminal        Spleen font, VT engine, TERM process
+  M1c-1..3. driver model + kernel VTs   kernel/drivers reorg, fb_device + con_driver,
+                                        /dev/tty1..6 with Alt+Fn, VT/KD ioctls
+  BB0.   fork inherits the vma list     commits 080ce08, 8401c63
+
+LIVE
+  CS.    Concurrency hardening & scaling      ← NEXT
+         CS0 audit · CS1 instrumentation · CS2 regressions ·
+         CS3 stress + chaos · CS4 fixed limits · CS5 lock architecture
+         spec 2026-09-01-concurrency-and-scaling-design.md
+
+  C.     ASLR
+         mmap base, stack, brk, PIE load base from the Phase 14 CSPRNG,
+         with a norandmaps off-switch.
+         spec 2026-08-31-aslr-design.md · plan plans/2026-08-31-aslr.md
+
+  BB.    BusyBox (static) — BB1..BB6            ← last before deferred work
+         BB1 execve + shell-critical ABI · BB2 job control · BB3 minimal
+         /proc · BB4 Tier-2 fs syscalls · BB5 build integration ·
+         BB6 interactive ash on the framebuffer terminal.
+         plan plans/2026-09-01-busybox-track.md (supersedes the roadmap's
+         ordering) · spec 2026-09-01-busybox-and-dynamic-linking-roadmap.md
+
+DEFERRED
+  DL.    Dynamic linking — DL1 file-backed mmap, DL2 PT_INTERP + full
+         auxv, DL3 dynamic TLS + dlopen. Deferred, not cancelled: taken
+         up after BusyBox. BusyBox is built static and never depended on
+         it. Decomposition in
+         2026-09-01-busybox-and-dynamic-linking-roadmap.md.
+
+DROPPED — see "What was dropped" below
+  D.     x2APIC
+  E.     FDC (floppy) driver
+  F.     Audio stack (F1 sound core, F2 SB16, F3 AC97, F4 Intel HDA)
+  M1c-4. VT_PROCESS handshake + scrollback / evdev keys
 ```
 
-**Why this order:**
+## Why this order
 
-- **Security first (B, C).** NX/W^X is a page-table audit plus a few
-  loader changes — small, and it removes a whole class of exploit
-  primitive. ASLR then layers on top and reuses the `AT_RANDOM` entropy
-  path that Phase 12 already built. Doing ASLR without W^X first is
-  putting a lock on a door with no wall.
-- **x2APIC (D) is orthogonal.** It touches only `kernel/dev/lapic.c`,
-  `kernel/dev/ioapic.c` and the SMP bring-up. It has no dependency on
-  anything else and nothing depends on it in the short term (the
-  benefit — >255 logical CPUs, faster IPIs via MSR — is latent). Slot
-  it wherever convenient.
-- **FDC (E) is the cheap driver win.** A legacy, fully-documented
-  device; a self-contained block driver behind the existing VFS/blkdev
-  seam. Good warm-up for the audio work and useful for boot-floppy
-  images.
-- **Audio (F) last and largest.** It needs a new device class (there is
-  no PCM/mixer abstraction today), a userland ABI decision (OSS
-  `/dev/dsp` vs a cut-down ALSA), and three drivers of increasing
-  complexity. SB16 first because ISA DMA is the least machinery; HDA
-  last because the codec graph is.
+**Concurrency first, and specifically before BusyBox.** The kernel is
+SMP with work-stealing, but nothing in the tree can make a rare
+interleaving happen on purpose — every SMP bug found so far was found
+by luck. Two things force the issue now: the refcounted-lifetime
+pattern landed but was never applied to `pid_alloc`, the last unsafe
+"find in a table, drop the lock, use the pointer" site; and BusyBox
+lands directly on the fixed caps that are still in place
+(`SPAWN_MAX_ARGS 8`, `POLL_MAX_FDS 16`, the non-POSIX fd 0/1/2
+allocator). BB0 already had to fix `fork` losing the vma list — a bug
+the existing tests missed because they only touched pages the parent
+had touched first. That is the class of bug CS exists to stop finding
+by accident.
+
+**ASLR after CS, before BusyBox.** It is bounded hardening of code that
+already exists: NX/W^X has landed, and Phase 14 already built the
+CSPRNG its entropy comes from. Doing ASLR without W^X first would be a
+lock on a door with no wall; that ordering constraint is satisfied.
+
+**BusyBox last.** It is the milestone that pays off the CLAUDE.md goal
+— run real Linux applications unpatched — and it wants the syscall
+surface to be stable and the caps to be gone before it starts.
+
+**Dynamic linking after BusyBox.** Highest long-term leverage on
+running unpatched binaries, but BusyBox is built static, so it is a
+successor rather than a prerequisite.
+
+## What was dropped, and why
+
+Removed from the roadmap on 2026-09-01. Their specs and plans were
+deleted in the same commit; `git log` recovers them if any is revived.
+
+| # | Milestone | Files removed | Why dropped |
+|---|---|---|---|
+| D | x2APIC | `specs/2026-08-31-x2apic-design.md`, `plans/2026-08-31-x2apic.md` | Entirely latent benefit. `MAX_CPUS` is already 128 and QEMU runs 4; >255 logical CPUs and MSR-based IPIs buy nothing the project can currently observe. |
+| E | FDC (floppy) | `specs/2026-08-31-fdc-driver-design.md`, `plans/2026-08-31-fdc-driver.md` | A cheap driver win with no consumer. ATA already covers the block seam FAT mounts through. |
+| F | Audio stack | `specs/2026-08-31-audio-stack-design.md`, `plans/2026-08-31-audio-p1-core-and-sb16.md` | The largest remaining item — a new device class, a userland ABI decision (OSS vs ALSA) and three drivers — for a hobby kernel with no application that plays sound. Displaced by concurrency work that BusyBox actually needs. |
+| M1c-4 | VT_PROCESS handshake, scrollback, evdev keys on the VT | (no separate files; described in `specs/2026-09-01-m1c-driver-model-and-vts-design.md`) | M1c-3 ships `VT_AUTO` switching, which is what an interactive shell on `/dev/tty1..6` needs. The `VT_SETMODE`/`VT_RELDISP`/`SIGUSR1` handshake only matters to a display server that wants to veto a switch — NeoOS has none. `VT_RELDISP` stays accepted-but-inert, as M1c-3 documented. |
+
+These were **specced but never user-reviewed** — the note in the
+original roadmap flagged that every design decision in them (OSS vs
+ALSA, x2APIC-always vs opt-in, the `struct blockdev` seam) was the
+executor's call, awaiting a review pass that never happened. Dropping
+them costs no reviewed work.
 
 ## Cross-cutting constraints (all milestones)
 
 - **No host unit tests.** Every test is a kernel selftest or a userland
   binary, verified by `make test` (headless QEMU, 4 CPUs) and the
   15-run parallel gauntlet
-  (`.superpowers/sdd/2026-08-31-phase14-input-and-solidity/pgauntlet.sh`).
+  (`.superpowers/sdd/2026-08-31-phase14-input-and-solidity/pgauntlet.sh`,
+  CONC=3, `PGAUNTLET PASSED: 15/15`). A single green `make test` is not
+  sign-off for anything timing-dependent. CS1 promotes this script to a
+  stable location and adds per-marker flakiness reporting.
 - **Lock ranks are enforced.** Any new lock gets a `LOCK_RANK_*` slot
   in `kernel/sync/lock.h` with a written rationale; acquiring out of
-  order panics the boot.
-- **The ABI is not ours.** Anything a user program can observe --
-  `/dev/dsp` ioctls, `mmap` of a DMA buffer, evdev-style event structs,
-  auxv entries, signal-frame layout -- matches Linux x86-64 values and
-  struct layouts. Syscall *numbers* stay NeoOS's own; the musl shim
-  translates. Every deliberate divergence is recorded in
+  order panics the boot. 27 ranks defined today.
+- **The ABI is not ours.** Anything a user program can observe — struct
+  layouts, flag values, error codes, auxv entries, signal-frame layout
+  — matches Linux x86-64. Syscall *numbers* stay NeoOS's own; the musl
+  shim translates. Every deliberate divergence is recorded in
   `docs/stdlib.md`.
 - **Every user-facing feature needs a musl path or a `lib/` wrapper**
   plus a `docs/stdlib.md` entry (CLAUDE.md).
-- **QEMU is the reference machine.** `-cpu Nehalem -smp 4`. Device
-  models: `qemu -device` for AC97 (`AC97`), HDA (`intel-hda` +
-  `hda-duplex`), floppy (`-fda` / `-device floppy`), and SB16
-  (`-device sb16`, ISA). x2APIC is a CPU feature flag
-  (`-cpu ...,+x2apic` or `-machine ...,x2apic=on`).
-- **Milestone close:** refresh `docs/abi-compatibility.md` and
-  `docs/optimization-summary.md` (or the milestone's own summary),
-  update `docs/stdlib.md`.
+- **QEMU is the reference machine.** `-cpu Nehalem -smp 4`.
+- **Milestone close:** refresh `docs/abi-compatibility.md`, update
+  `docs/stdlib.md`, and write the milestone's own summary.
 
 ## Milestone briefs
 
-### A. Net socket-lifetime fix
-Spec/plan: folded into `2026-08-31-smp-lifetime-and-lock-detangle` as a
-follow-on commit. A blocked reader in `socket.c:recv_one` holds no
-reference on its socket, so `sock_close` -> `sock_free` on another
-thread can free `s->lock` / `s->readers` out from under
-`waitq_sleep`'s re-acquire (seen once as `[lock] PANIC: schedule() with
-a spinlock held ... holding=socktable`). Fix: `sock_get`/`sock_put`
-reference count; `recv_one` holds a ref across the wait. ~20 lines.
+### CS. Concurrency hardening & scaling
+Spec: `docs/superpowers/specs/2026-09-01-concurrency-and-scaling-design.md`
 
-### B. NX / W^X enforcement
-Design: `docs/superpowers/specs/2026-08-31-nx-wxorx-design.md`
-- Audit every `paging_map_into` / mmap / ELF-load call site for pages
-  mapped both writable and executable. Kernel `.text` read-only + `.data`
-  NX; user stacks/heap/mmap NX by default; enforce `PROT_EXEC` xor
-  `PROT_WRITE` on `mmap`/`mprotect` unless `MAP_` says otherwise
-  (matching Linux, which allows W+X but is increasingly locked down --
-  NeoOS can be strict and record the divergence).
-- EFER.NXE is already set (paging works with `PAGE_NO_EXECUTE`); this
-  is mostly making the flag's *use* consistent and adding the
-  `mprotect` check.
+Six sub-milestones, each getting its own implementation plan when
+reached:
+
+- **CS0 audit** — does the new kernel-VT code (`kvt.c`, `console.c`,
+  `con_driver.c`, which contain no locking at all) race console output
+  on VT switch? And the five-file `spin_lock_raw` audit: `pty`,
+  `devfs`, `fbcon`, `rand` all take properly-registered locks with the
+  raw variant, which the rank checker cannot see; `rand_lock` also
+  shares `LOCK_RANK_SERIAL` with the unrelated serial lock.
+- **CS1 instrumentation** — poisoned/redzone heap mode, per-rank lock
+  hold-time histograms, the gauntlet promoted and given per-marker
+  flakiness reporting. Built first because the hardest bugs below need
+  poisoning to be *localizable*, not merely detectable.
+- **CS2 regressions** — the lockless `pid_lookup`, `select()` silently
+  dropping past 16 ready fds, the waitq double-free, TLB-shootdown
+  timeout and frame accounting, rank-checker coverage.
+- **CS3 stress + chaos** — `forkstorm`, `mmapracer`, `faultflood`,
+  `pollstorm`, `ptychurn`, `sigstorm`, `rankinvert`, plus
+  `NEOOS_DEBUG_HZ`, `pmm_alloc` failure injection and fuzzed concurrent
+  teardown.
+- **CS4 fixed limits** — PTY pool, `spawn` argv, POSIX fd allocation,
+  dynamic `poll`/`select`, `MAX_THREADS_PER_PROC`, PID wraparound.
+- **CS5 lock architecture** — peel the global `vfs_lock`, replace the
+  `poll_broadcast` thundering herd with a real poll table, CI checks
+  for duplicate ranks and new raw locks, apply the refcount pattern to
+  `pid_alloc`, then seqlocks for read-mostly table scans.
 
 ### C. ASLR
-Design: `docs/superpowers/specs/2026-08-31-aslr-design.md`
-- Randomize: the mmap base hint, the main thread stack top, the ELF
-  load base for `ET_DYN` (PIE) binaries, and the brk start. Entropy
-  from the same source `AT_RANDOM` uses (Phase 12). A boot flag / sysctl
-  to disable for debugging (Linux `kernel.randomize_va_space`).
-- Per-arch entropy bits chosen to match Linux x86-64 defaults (28 bits
-  mmap, 32 bits for PIE with `CONFIG_ARCH_MMAP_RND_BITS`-equivalent).
+Spec: `docs/superpowers/specs/2026-08-31-aslr-design.md`
+Plan: `docs/superpowers/plans/2026-08-31-aslr.md`
 
-### D. x2APIC
-Design: `docs/superpowers/specs/2026-08-31-x2apic-design.md`
-- Detect `CPUID.01:ECX.x2APIC`; if present and firmware allows, set
-  `IA32_APIC_BASE.EXTD` and switch LAPIC access from MMIO to the
-  `IA32_X2APIC_*` MSR range. Fall back to xAPIC otherwise.
-- ICR becomes a single 64-bit MSR write (no "wait for delivery" poll).
-- APIC IDs widen to 32-bit; `struct cpu` and the id->cpu map adjust.
-- IOAPIC RTE programming is unchanged; only the destination field
-  widens for logical/physical modes.
+Randomize the mmap base hint, main-thread stack top, brk start and the
+`ET_DYN` (PIE) load base, with a `norandmaps` off-switch (Linux's
+`kernel.randomize_va_space`). Entropy bits chosen to match Linux
+x86-64 defaults. Depends on NX/W^X, which has landed. The plan's Task 1
+predates Phase 14's CSPRNG work — check what `AT_RANDOM` already draws
+from before rebuilding a pool.
 
-### E. FDC (floppy) driver
-Design: `docs/superpowers/specs/2026-08-31-fdc-driver-design.md`
-- 82077AA-compatible controller at ports 0x3F0-0x3F7, IRQ 6, ISA DMA
-  channel 2. Motor control + spin-up delay, seek/recalibrate, read/write
-  via the DMA buffer (bounce buffer below 16 MB, like the existing ATA
-  path's constraints).
-- Exposes a block device through the existing `struct blockdev` seam so
-  FAT can mount a floppy image (`mount /dev/fd0 ...`).
-- QEMU `-fda image.img`. A selftest that reads a known sector and, on a
-  writable image, round-trips one.
+### BB. BusyBox (static)
+Plan: `docs/superpowers/plans/2026-09-01-busybox-track.md` — the live
+ordering, superseding the BusyBox half of
+`specs/2026-09-01-busybox-and-dynamic-linking-roadmap.md`.
 
-### F. Audio stack
-Design: `docs/superpowers/specs/2026-08-31-audio-stack-design.md`
-covers F1-F4 as one architecture; F2-F4 get their own plans.
-- **F1 sound core:** a `struct snd_pcm` device class + `/dev/dsp`
-  (OSS ioctl subset: `SNDCTL_DSP_SPEED`, `_SETFMT`, `_CHANNELS`,
-  `_GETOSPACE`, `SNDCTL_DSP_SYNC`) and `/dev/mixer` (`SOUND_MIXER_*`).
-  OSS chosen over ALSA: far smaller ABI surface, `write()`-driven, and
-  what a from-scratch kernel can implement completely rather than
-  partially. Divergence from Linux (which is ALSA-native, OSS via
-  emulation) recorded in `docs/stdlib.md`.
-- Ring-buffer of PCM periods, `poll`-able, `write()` blocks when full.
-- **F2 SB16:** ISA DMA (8/16-bit channels), fixed 44.1 kHz path first.
-- **F3 AC97:** PCI device, bus-master descriptor list (BDL) of
-  buffer-descriptor entries, 48 kHz fixed-rate codec.
-- **F4 Intel HDA:** PCI, CORB/RIRB command rings, a stream descriptor
-  with its own BDL, codec enumeration to find a line-out DAC + pin.
-  The widget graph walk is the bulk of the work.
+BB0 (fork inheriting the vma list) is done. BB1–BB4 are independent of
+each other; BB5 needs BB1–BB4; BB6 needs BB5 and the M1b terminal,
+which has shipped. Goal: an interactive `ash` on the framebuffer
+terminal with `cd`/`ls`/`cat`/pipes/redirection/job control.
 
-## Status (2026-08-31, autonomous session)
+### DL. Dynamic linking (deferred)
+Spec: `docs/superpowers/specs/2026-09-01-busybox-and-dynamic-linking-roadmap.md`
 
-Specs AND implementation plans are written for every milestone:
-
-| # | Design spec | Implementation plan |
-|---|---|---|
-| A net socket | (folded — commit `a66e5f7`, DONE) | — |
-| B NX/W^X | `2026-08-31-nx-wxorx-design.md` | `plans/2026-08-31-nx-wxorx.md` — **DONE** (commits `9cabab4`..`d872e7c`) |
-| C ASLR | `2026-08-31-aslr-design.md` | `plans/2026-08-31-aslr.md` |
-| D x2APIC | `2026-08-31-x2apic-design.md` | `plans/2026-08-31-x2apic.md` |
-| E FDC | `2026-08-31-fdc-driver-design.md` | `plans/2026-08-31-fdc-driver.md` |
-| F audio | `2026-08-31-audio-stack-design.md` | `plans/2026-08-31-audio-p1-core-and-sb16.md` (P1); P2 PCI / P3 AC97 / P4 HDA plans pending P1+PCI |
-
-## Notes for the executor
-
-- Every spec makes calls the user would normally decide (OSS vs ALSA,
-  W+X strictness, ASLR entropy bits, x2APIC-always vs opt-in, the
-  `struct blockdev` seam); each is stated with rationale and an "alt:".
-  **These were not confirmed by the user** — a review pass on the
-  specs is the right first step when they return.
-- B/C are bounded hardening of existing code; their plans are
-  gauntlet-gated per task and safe to execute after a spec review.
-- D/E/F are new subsystems with ABI or hardware surface — review the
-  spec, then execute the plan.
-- The Phase 14 plan (`plans/2026-08-31-phase14-input-and-solidity.md`)
-  resumes at Task 2 and carries the two audio prerequisites
-  (`file_ops` ioctl/poll, devfs dynamic registration). Do Phase 14
-  before audio P1.
-- Each plan's Task 1 (or Global Constraints) restates that a single
-  `make test` is NOT sufficient sign-off — the parallel gauntlet
-  (`pgauntlet.sh`, CONC=3, `PGAUNTLET PASSED: 15/15`) is the bar.
+DL1 file-backed `mmap` (`MAP_PRIVATE` demand-paged through the M1a
+`vma_fault` path, `MAP_FIXED` for ld.so segment placement), DL2
+`PT_INTERP` + full auxv, DL3 dynamic TLS + `dlopen`. Taken up after
+BusyBox.

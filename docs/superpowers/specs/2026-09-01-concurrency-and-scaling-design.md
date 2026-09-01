@@ -1,0 +1,399 @@
+# Concurrency hardening & scaling — design
+
+**Date:** 2026-09-01
+**Status:** design spec. Decomposed into CS0–CS5; each sub-milestone
+gets its own implementation plan under `docs/superpowers/plans/` when
+it is reached.
+
+**Supersedes** the driver/audio half of
+`docs/superpowers/specs/2026-08-31-post-smp-roadmap.md`. This is the
+work that runs before BusyBox; x2APIC, FDC and the audio stack were
+dropped to make room for it (see that file's "Dropped" section).
+
+**Origin:** an external read of `main` at 281 commits, revised once
+against the same tree. Every specific claim below was re-verified
+against the working tree on 2026-09-01 before this spec was written;
+the verification results are recorded inline as **[verified]**.
+
+---
+
+## 1. Why this milestone, and why now
+
+NeoOS already has unusually good bones for concurrency work: a
+rank-checked spinlock discipline that panics on inversion instead of
+deadlocking silently, an in-kernel selftest per subsystem, and `make
+test`'s `REQUIRED_MARKERS` gate that fails the build if a suite quietly
+stops reporting. **Everything here extends that infrastructure — none
+of it replaces it.**
+
+What it does not have is any way to make a rare interleaving happen on
+purpose. Every SMP bug found so far was found by luck: the waitq
+double-free surfaced once, from a `free_list` pointer of `0xfffffffc`,
+under one specific timer/SMP interleaving that nothing reproduces. A
+single green `make test` is not evidence about anything
+timing-dependent.
+
+Two forcing functions make this urgent rather than nice-to-have:
+
+- **BusyBox is next.** `ash` forks per external command and musl's
+  mallocng gets its heap from `mmap`. BB0 already had to fix `fork`
+  losing the vma list — a bug the existing tests missed because they
+  only touched pages the parent touched first. The remaining fixed
+  caps (`SPAWN_MAX_ARGS 8`, `POLL_MAX_FDS 16`, the fd 0/1/2 allocator
+  special case) are exactly the surfaces a shell lands on.
+- **The lifetime work landed but was never generalized.** The
+  SMP-lifetime-and-lock-detangle milestone installed
+  `proc_get`/`proc_put`/`thread_get`/`thread_put` and deleted the inert
+  `kernel/sync/rcu.c` **[verified: `kernel/sync/` now holds only
+  `lock.{c,h}`, `spinlock_types.h`, `waitq.{c,h}`]**. One place in the
+  tree still does the unsafe "find in a table, drop the lock, use the
+  pointer" pattern the plan's own spec calls out: `pid_alloc`'s radix
+  tree.
+
+## 2. Constraints (all sub-milestones)
+
+- **No host unit tests.** Every test is a kernel selftest
+  (`serial_write_string`) or a userland binary ending in a
+  `[name] ALL PASSED` marker wired into `REQUIRED_MARKERS`. There is no
+  host runtime to run tests in and none should be added.
+- **The parallel gauntlet is the bar**, not `make test`. Each task
+  closes on `PGAUNTLET PASSED: 15/15`
+  (`.superpowers/sdd/2026-08-31-phase14-input-and-solidity/pgauntlet.sh`,
+  CONC=3). Three baseline flakes are known and tracked; a new
+  signature is a regression.
+- **Lock ranks are enforced.** Any new lock gets a `LOCK_RANK_*` slot
+  in `kernel/sync/lock.h` with a written rationale. 27 ranks are
+  defined today **[verified]**.
+- **The ABI is not ours.** Anything a user program can observe — the
+  `poll`/`select` fd caps' error behaviour, `execve` argv limits,
+  POSIX lowest-available-fd allocation — matches Linux x86-64
+  semantics. Every deliberate divergence goes in `docs/stdlib.md`.
+- **Every user-facing change needs a musl path or a `lib/` wrapper**
+  plus a `docs/stdlib.md` entry (CLAUDE.md).
+- **QEMU is the reference machine:** `-cpu Nehalem -smp 4`.
+
+## 3. Sub-milestone decomposition
+
+```
+CS0  Audit & confirm          ← reads only; resolves one open question
+ └─ CS1  Instrumentation      ← build-once; everything after depends on it
+     └─ CS2  Named regressions
+         └─ CS3  Stress matrix + chaos
+             ├─ CS4  Fixed limits
+             └─ CS5  Locking architecture
+```
+
+CS4 and CS5 are independent of each other. Within CS5, the poll-table
+redesign is gated on CS4's `poll`/`select` fix (both rewrite the same
+loop, and the new registration path should not be designed around the
+old 16-fd array shape).
+
+**Deviation from the source document's sequencing, deliberate:** it put
+the named regressions first and instrumentation third. This spec swaps
+them, because that same document observes that the two hardest items
+(the lockless `pid_lookup` and the VT-switch question) "depend on
+poisoning to be debuggable rather than just detectable." Without the
+poisoned heap, those tests produce corruption you can see but cannot
+localize.
+
+---
+
+## CS0 — Audit and confirm
+
+Two reads, no new subsystems. Both resolve questions that change what
+later sub-milestones have to do.
+
+### CS0.1 — Do the kernel VTs have any locking at all?
+
+`kernel/tty/{console,con_driver,kvt}.c` landed in M1c-2/M1c-3 and
+**contain zero `spin_init` / `LOCK_RANK_*` / `spin_lock` references**
+**[verified: grep returns nothing across all three files]**. That is
+not "uses raw locks like pty" — it is no locking visible at the source
+level, in code reached from a keyboard IRQ (the Alt+Fn VT-switch
+intercept) and from every console writer.
+
+The question this must answer: **does a VT switch ever race a
+concurrent console-output writer on another CPU?** If `con_driver`'s
+vtable dispatches into `fbcon.c`, the race may already be partly
+covered by `fbcon_lock` — but that is a call-path read, not an
+assumption to make. If `kvt.c`'s own state (the active-VT index, the
+`params[8]` escape-parser state **[verified: `kvt.h:44`]**) is mutated
+from both the input path and a redraw path with no lock, this is a
+finding as serious as anything already known about, and it gets a
+rank-checked lock plus a regression test in CS2.
+
+**Test if confirmed real:** an Alt+Fn VT-switch-injection loop on one
+core racing a console writer targeting the previously-active VT on
+another, asserting no torn writes and no crash under CS1's poisoned
+heap.
+
+### CS0.2 — `spin_lock_raw` bypasses the rank checker in five files
+
+The rank checker cannot see a lock taken with `spin_lock_raw`, whether
+or not that lock has a registered rank. A registered-but-always-raw
+lock is exactly as invisible as an unregistered one.
+
+**[verified]** — every raw call site in the tree today:
+
+| File | Lock | `spin_init`'d? | Every site raw? |
+|---|---|---|---|
+| `kernel/tty/pty.c` | `pool_lock` | yes, `LOCK_RANK_PTY` (`pty.c:260`) | yes |
+| `kernel/fs/devfs.c` | `dyn_lock` | yes, `LOCK_RANK_DEVFS` | yes |
+| `kernel/drivers/video/fbcon.c` | `fbcon_lock` | yes, `LOCK_RANK_FBCON` | yes |
+| `kernel/drivers/char/serial.c` | `serial_lock` | yes, `LOCK_RANK_SERIAL` | yes — **documented**: pre-`cpu_local_init()` output |
+| `kernel/lib/rand.c` | `rand_lock` | yes, but under **`LOCK_RANK_SERIAL`** (`rand.c:41`) | yes |
+
+Note this corrects a claim worth not repeating: `pty.c`'s `pool_lock`
+**is** properly `spin_init`'d. The bug is at the call sites, so the fix
+is a `spin_lock_raw`→`spin_lock` swap, not a missing `spin_init`.
+
+`rand_lock` sharing `LOCK_RANK_SERIAL` with the unrelated serial lock
+is a separate finding. It is not the deliberate, commented
+`LOCK_RANK_TTY == LOCK_RANK_DRIVER` pair `lock.h` already carries — it
+reads as a copy of the nearest example rank, and it would hide a real
+serial/rand inversion precisely because the checker has been told they
+are the same rank on purpose.
+
+**Action:** for each of `pty.c`, `devfs.c`, `fbcon.c`, `rand.c`,
+confirm no call site runs before `cpu_local_init()`, then swap raw →
+checked at every site. Give `rand_lock` its own rank, or justify the
+sharing with a comment in the `TTY`/`DRIVER` style. Serial keeps its
+documented exception.
+
+---
+
+## CS1 — Instrumentation to build once, use everywhere
+
+None of this exists in the tree today.
+
+- **Poisoned-free / redzone heap mode.** A compile-time toggle for
+  `kernel/mm/heap.c` that fills freed blocks with a poison byte and
+  checks a redzone on free — turning "freed the same block twice" and
+  "wrote past a `kmalloc`'d radix node" from silent corruption into an
+  immediate panic naming the culprit. Directly targets CS2.1 and
+  CS2.4.
+- **Lock hold-time / contention histogram.** `spin_lock_irqsave`
+  already funnels through one place, so a debug build can timestamp
+  acquire/release and bucket hold times per rank, dumped at shutdown or
+  on a serial command. This turns "the global `vfs_lock` is a
+  throughput killer" from an architectural guess into a number CS5 can
+  move.
+- **Promote the gauntlet.** `pgauntlet.sh` exists, but only inside
+  `.superpowers/sdd/2026-08-31-phase14-input-and-solidity/` — a
+  milestone working directory, not somewhere future plans can point at.
+  Move it to a stable checked-in location and add a pass/fail
+  aggregation mode: run N times, grep for `PANIC`/`FAILED`/each
+  `REQUIRED_MARKER`, and report a **flakiness percentage per marker**,
+  so a test passing 14/15 shows up as a tracked flake rather than a
+  green checkmark someone got lucky on. Three baseline flakes are
+  already known; this makes the count official.
+
+---
+
+## CS2 — Named regressions
+
+Bugs visible from a straight read — each is either stated in the
+code's own comments or contradicted by them. Numbering follows the
+source document's A1.1–A1.7 so cross-references keep working.
+
+**CS2.1 — `pid_lookup` is genuinely lockless on an SMP kernel.**
+`kernel/sched/pid_alloc.c`'s `pid_lookup_internal` walks the radix tree
+with zero locking, and the comment says why: *"RCU read lock would go
+here in full implementation. For now, single-CPU so no lock needed for
+read."* NeoOS is not single-CPU. `pid_insert_internal` publishes new
+radix nodes with plain stores — no allocate-barrier-publish sequencing
+— so a `pid_lookup` on another core can dereference a node
+mid-construction. This is the same class the lifetime milestone already
+fixed for `proc_table`/`thread_table`; it just was not applied here.
+*Fix:* copy the existing refcounted-lookup pattern (CS5.5). *Test:*
+fork/exec continuously from N threads across all online CPUs while
+another thread does `wait4`/`kill` PID lookups, under CS1's poisoning
+so a torn read crashes instead of corrupting.
+
+**CS2.2 — `sys_poll.c`'s two caps disagree.** `POLL_MAX_FDS` is 16 but
+`select()`'s `FD_SETSIZE` is 1024 and `nfds` up to 1024 is accepted
+**[verified: `sys_poll.c:18,23,96,109`]**. The collection loop is
+`for (fd = 0; fd < nfds && n < POLL_MAX_FDS; fd++)` — so `select()` on
+more than 16 *interesting* fds silently drops the rest, with no error
+and no truncation flag. A correctness bug today, independent of
+scaling. *Test:* `select()` with 20 non-contiguous ready fds across
+`[0, 100)`; assert every one is reported.
+
+**CS2.3 — rank-checker coverage.** Once CS0.2's raw→checked swaps land,
+an adversarial selftest in `waitq_lock_selftest`'s style acquires a
+PTY-rank lock while holding a higher-numbered one and asserts the panic
+fires; repeated for the DEVFS and FBCON ranks.
+
+**CS2.4 — the waitq double-free is diagnosed but not regression-tested.**
+The comment at the bottom of `selftest_thread` in `waitq.c` describes a
+real bug found from a `free_list` pointer of `0xfffffffc`: a thread
+freeing itself while still executing on its own about-to-be-freed
+kernel stack, with a timer interrupt on another CPU running the same
+free path via `idle_entry`'s kzombies drain. The fix is in place;
+nothing forces the race to recur. *Test:* spawn and exit hundreds of
+short-lived kernel threads back-to-back across all CPUs with the tick
+rate raised (CS3's `NEOOS_DEBUG_HZ`), asserting via CS1's poisoning
+that no slot is ever double-freed.
+
+**CS2.5 — `fd_table_dup2`'s race is time-bombed, not fixed.** Its
+comment says outright: *"NeoOS userland is effectively single-threaded
+per fd table today; revisit if that changes."* `clone()` does not exist
+yet **[verified: no `sys_clone` in `kernel/syscall/`]**, so this stays a
+**blocking pre-condition recorded against the `clone()` milestone**, not
+a follow-up to it. *Test, once `clone()` exists:* two threads sharing an
+fd table racing `dup2`/`close`, checking via `fstat` that a target fd is
+never briefly attached to neither object nor to two.
+
+**CS2.6 — `tlb_shootdown`'s `shootdown_busy` is an unchecked global
+spin, by design.** The comment explains why it cannot be a rank-checked
+spinlock (the ack-wait needs interrupts on and no lock held) — but that
+also makes it invisible to the lock tooling and a single global
+bottleneck for every address-space mutation on the machine. *Test:*
+N threads (N ≥ CPU count) looping `mmap → touch → mprotect → munmap` on
+disjoint regions; assert (a) `"[tlb] shootdown timed out; continuing"`
+never fires under normal load — that line appearing outside a
+deliberately wedged CPU means correctness has quietly degraded to
+"continuing anyway" — and (b) `pmm_free_frame_count()` returns to its
+starting value, proving no deferred frame leaked or was double-freed.
+**Re-diff `vma.c` first**: commit `7313b77` ("mm: reclaim deferred
+frames, keep mprotect's pages, single-thread exec") touched exactly
+these paths and may already cover part of assertion (b).
+
+**CS2.7 — VT-switch locking**, if CS0.1 confirms it is real.
+
+---
+
+## CS3 — Stress matrix and chaos harness
+
+Reusable userland binaries under `userland/`, each with its own
+`[xxxtest] ALL PASSED` marker in `REQUIRED_MARKERS`:
+
+| Binary | Targets | Method |
+|---|---|---|
+| `forkstorm` | `pid_alloc`, `proc_table`, `fd_table`, `thread_table` | N processes forking+execing tightly across all CPUs for a fixed window; verify PID reuse never collides a live PID (`wait4` every child) and `fd_table_count` returns to 0 after each exit |
+| `mmapracer` | `vma.c`, `tlb.c`, paging | Threads sharing one address space (kernel threads until `clone()`) hammering `mmap`/`mprotect`/`munmap`/faults on overlapping and adjacent ranges; no `SIGSEGV` on addresses that should be valid, no corruption of a canary written after each fault |
+| `faultflood` | demand paging, `pmm_alloc` under pressure | Touch far more distinct pages than physical memory allows, across CPUs at once, forcing `vma_fault_locked`'s allocation-failure paths under real contention rather than single-threaded OOM |
+| `pollstorm` | `waitq.c` poll broadcast, `sys_poll.c` | M threads polling disjoint fd sets while a driver thread pushes unrelated readiness at rate R; record wakeups vs. events to **quantify** the O(M) thundering herd, giving CS5.2 a baseline |
+| `ptychurn` | PTY pool, the now-checked `pty.c` locks | Open/close ptys crossing `PTY_MAX` repeatedly from multiple CPUs, racing master/slave open+close against read/write to pressure `pty_unref`'s `gone` check |
+| `sigstorm` | signal delivery atop the landed lifetime work | `kill`/`tkill` storms overlapping process/thread exit from other CPUs — a regression suite for already-landed refcounting, not a test blocked on future work |
+| `rankinvert` | the rank checker itself | Deliberately-wrong-order acquisitions across every defined rank pair (27 today), as a kernel selftest that expects `lock_panic` and treats *not* panicking as the failure |
+
+Chaos knobs, all debug-build only:
+
+- **`NEOOS_DEBUG_HZ`** — raise the LAPIC timer frequency so preemption
+  windows that are rare at the normal tick become common. Run the full
+  suite at both rates; CS2.4 and CS2.6 are exactly the shape of bug
+  that only appears when the window widens.
+- **`pmm_alloc` failure injection** — deterministic Nth-allocation
+  failure, plus seeded-random failure so a hit is reproducible from the
+  seed printed to serial. Every `if (!frame)` / `-ENOMEM` path in
+  `vma.c`, `tlb.c` and `fd_table.c` should be hit at least once per
+  run.
+- **Concurrent teardown injection** — `SIGKILL` from another CPU at a
+  randomized point relative to the target's own syscall progress
+  (a `PAUSE` loop of random small count at a designated fuzz point in a
+  debug build). This is what actually exercises the refcounting; a
+  scripted single-shot kill does not.
+
+---
+
+## CS4 — Fixed-size limits
+
+For each: identify the real workload that sets the size, make the
+smallest change that removes the ceiling, and add a test that exceeds
+the *old* limit.
+
+| Limit | File | Current | Direction | Test |
+|---|---|---|---|---|
+| PTY pool | `kernel/tty/pty.c` | `PTY_MAX 16`, flat array | Growable structure under the now-checked `pool_lock` (CS0.2) | `ptychurn` crosses the old ceiling; the 17th open no longer returns `-ENFILE` |
+| `spawn` argv | `kernel/sched/proc.h`, `sys_proc.c` | `SPAWN_MAX_ARGS 8`, `SPAWN_ARG_MAX 128`, fixed `argv[8][128]` | Copy argv/envp the way Linux does: walk the user pointer array for `argc` and total bytes, allocate for the real total, copy once — capped by a generous overall byte budget (`ARG_MAX`-style), not a fixed slot count | `execve` with a realistic compiler-style invocation (dozens of args, long paths); assert it runs rather than truncating |
+| fd 0/1/2 reservation | `kernel/sched/fd_table.c` | `fd_table_alloc` special-cases `bucket_idx == 0` with `first = FD_STDIO_COUNT`, so a closed fd 0/1/2 is never reissued — non-POSIX | Remove the special case entirely. `fd_table_put` already sets 0/1/2 at process creation; once closed, the normal first-free scan should find them like any other slot, and the dup2 workaround becomes unnecessary | Close fd 1, `open()`, assert the new fd *is* 1 |
+| `poll`/`select` caps | `kernel/syscall/sys_poll.c` | See CS2.2 | Fix the correctness bug first, then replace the fixed `pfd[POLL_MAX_FDS]` stack array with one sized to the caller's actual `nfds`, capped by `FD_TABLE_MAX` so an untrusted argument cannot drive an unbounded kernel allocation | `poll()`/`select()` with 100+ fds all ready; assert all reported |
+| `MAX_THREADS_PER_PROC 16` | `sched/thread_table.h`, `proc.h`, `proc.c` | Fixed cap, and fixed `victims[]` snapshot arrays; the header's own comment says "Phase 2 will increase" | Convert `thread_table` to the bucketed-dynamic pattern `fd_table` already uses; make the kill/exit `victims[]` snapshots dynamically sized or linked. Not optional once `clone()` lands — musl's pthreads needs it | More threads than the old cap via a kernel-thread stand-in today; real pthreads once `clone()` lands |
+| PID wraparound | `sched/pid_alloc.*` | `pid_alloc` returns 0 once `next_pid >= MAX_PIDS` and never reuses below that; the comment admits *"PID space exhausted; would need wraparound + collision handling"* | Linux-style cyclic allocation: wrap to a low-water mark and scan for the first PID absent from the radix tree, rather than relying only on the free list (which covers only PIDs freed in order). **CS2.1 is a prerequisite** — wraparound makes lookup-during-reuse far more frequent | Exhaust the space with an artificially small `MAX_PIDS`; confirm allocation continues via wraparound and no wrapped PID is issued while still live |
+| `kvt.c` `params[8]`, `TTY_BUF`, evdev ring | `tty/kvt.h`, `tty/tty.h`, `drivers/input/evdev.c` | Fixed, sized for interactive single-user use | Lowest priority. An escape sequence with >8 params or a TTY line over 1KB is a pathological input, not a compiler invocation — size generously (Linux `N_TTY` ring conventions) rather than making these dynamic; dynamic growth here buys complexity for a rare case | Over-length canonical line and an over-param escape sequence; assert graceful **documented** truncation, not a buffer overrun |
+
+`MAX_CPUS` is **already 128** **[verified: `kernel/arch/cpu_local.h:10`]**
+— the constant needs no change. What remains is validation only:
+confirm the arrays sized by it in `smp.c`/`tlb.c` behave above 4 real
+cores under QEMU `-smp`, since raising the ceiling does not by itself
+prove nothing still assumes ≤4 internally. Folded into CS3's scale
+runs; not a code change.
+
+---
+
+## CS5 — Locking architecture
+
+Sequenced changes, several depending on CS4.
+
+**CS5.1 — the global `vfs_lock`.** Do not rewrite in one pass. The rank
+list already reserves `LOCK_RANK_MOUNTTABLE` (4), `LOCK_RANK_VNODEHASH`
+(5) and `LOCK_RANK_VNODE` (6) — the granularity wanted already has slots.
+Audit what `vfs_lock` protects that a vnode's own lock or the mount
+table's does not, path by path (`lookup`, `mount`/`umount`,
+`getdents64`), and peel each off individually, keeping `vfs_lock` as a
+shrinking fallback until nothing calls it. Measure with a
+`forkstorm`-shaped concurrent `open`/`stat`/`getdents64` test across
+same and different mount points, before and after each peel.
+
+**CS5.2 — `poll_broadcast`'s thundering herd.** The biggest
+architectural win available, and already diagnosed in `sys_poll.c`'s own
+header comment. Once `pollstorm` has a baseline wakeups-per-event
+number, replace the single global broadcast waitq with a real poll
+table: each pollable object (`file_ops.poll` already exists as the
+readiness check) grows its own small waitq that `poll_core` registers on
+only for the fds it was asked about — Linux's `poll_wait()`/`epoll`
+split rather than waking everyone on every event. **After CS4's fd-cap
+fix**, since both rewrite the same loop.
+
+**CS5.3 — the hand-maintained rank enum stays.** At 27 ranks this is
+fine and arguably a feature: the per-rank comments in `lock.h` are some
+of the best documentation in the codebase, and real lockdep would lose
+them. Two cheaper wins instead of a rewrite:
+a CI-time script (host-side, parsing `lock.h` — not a kernel selftest)
+that fails when two `LOCK_RANK_*` values are equal without a paired
+comment justifying it, catching the "renumbering forgot one" mistake at
+commit time instead of at boot-panic time; and revisiting a dynamic
+registration scheme only if the count actually approaches the 100+
+scale that would motivate it. Build the script first — CS0.2's
+`rand_lock`/`LOCK_RANK_SERIAL` collision is its first real finding, and
+is exactly what it would have caught on day one.
+
+**CS5.4 — `spin_lock_raw` escape hatches.** CS0.2 does the cleanup;
+CS5.4 adds the CI grep that fails review on any new `spin_lock_raw`
+outside the documented exceptions, the same way `REQUIRED_MARKERS`
+fails a build that silently drops a suite.
+
+**CS5.5 — refcounting and seqlocks.** RCU is gone and refcounting is
+live: `proc_get`/`proc_put`, `thread_get`/`thread_put` and the
+streaming ref'd `proc_table` iterator are in `kernel/sched/proc.c`
+today **[verified]**. So this is not "build a mechanism" — it is
+"apply the existing one to the last place that needs it," namely
+`pid_alloc`'s radix tree (CS2.1). Do not design a second RCU-like
+mechanism alongside it.
+Seqlocks are then worth introducing for the physmap and `proc_table`
+iteration paths that serialize on refs-plus-copy today: with the
+refcounting groundwork already committed, a seqlock-protected iterator
+(optimistic read, retry on generation mismatch) is a much smaller diff
+than it would have been, and gives read-mostly table scans — a
+`ps`-equivalent, `/proc`-style enumeration — with no lock at all in the
+common case.
+
+---
+
+## 4. What this milestone does not do
+
+- **No `clone()`.** CS2.5 and CS4's thread-cap row are written as
+  pre-conditions recorded against that milestone, not work done here.
+- **No new device drivers.** x2APIC, FDC and audio were dropped from
+  the roadmap in favour of this work.
+- **No lockdep.** CS5.3 explicitly declines to build it.
+- **No NUMA.** Out of scope, as it was for the SMP milestone.
+
+## 5. Milestone close
+
+Refresh `docs/abi-compatibility.md` (the `poll`/`select`, `execve`
+argv and fd-allocation semantics all move toward Linux here), update
+`docs/stdlib.md` with any new divergence, and record the measured
+before/after numbers CS5.1 and CS5.2 produce — both are throughput
+claims and should be backed by the histograms CS1 builds.

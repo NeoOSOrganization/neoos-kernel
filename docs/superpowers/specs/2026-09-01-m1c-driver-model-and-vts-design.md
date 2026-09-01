@@ -1,8 +1,19 @@
 # M1c — driver model, display abstraction, kernel virtual terminals — design
 
+> **Status (2026-09-01): M1c-1, M1c-2 and M1c-3 shipped. M1c-4 was
+> dropped from the roadmap.**
+> The `VT_SETMODE` / `VT_RELDISP` / `SIGUSR1` handshake, scrollback and
+> evdev keys on the VT described below are no longer planned. M1c-3
+> ships `VT_AUTO` switching, which is what an interactive shell on
+> `/dev/tty1..6` needs; the handshake only matters to a display server
+> that wants to veto a switch, and NeoOS has none. `VT_RELDISP` stays
+> accepted-but-inert, as M1c-3 documented. Everything else in this spec
+> describes shipped code. See
+> `docs/superpowers/specs/2026-08-31-post-smp-roadmap.md`.
+
 **Milestone:** M1c, after M1b (framebuffer terminal). Precedes the
-dynamic-linking and BusyBox tracks
-(`docs/superpowers/specs/2026-09-01-busybox-and-dynamic-linking-roadmap.md`).
+concurrency-hardening and BusyBox tracks
+(`docs/superpowers/specs/2026-08-31-post-smp-roadmap.md`).
 
 **Goal:** get the kernel out of the business of *assuming* a display.
 Today `console.c` hard-codes `fb.present ? fbcon : vga`, and the

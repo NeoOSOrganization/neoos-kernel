@@ -5,8 +5,11 @@
 which reorders it, drops what has landed, and adds a `fork` blocker this
 file did not know about. The decomposition below still stands; its
 ordering does not. The dynamic-linking half (DL1–DL3) is unchanged but
-**deferred** — the user chose to take BusyBox first, which is coherent
-because BusyBox is built static and never depended on DL. Each sub-milestone below gets its own full design spec
+**deferred until after BusyBox** — BusyBox is built static and never
+depended on DL, so DL is a successor rather than a prerequisite. The live
+ordering is in `docs/superpowers/specs/2026-08-31-post-smp-roadmap.md`:
+the concurrency-hardening track (CS), then ASLR, then BusyBox, then DL.
+Each sub-milestone below gets its own full design spec
 (`docs/superpowers/specs/`) and implementation plan
 (`docs/superpowers/plans/`) when it is reached — this file records the
 decomposition, the ordering, and the decisions that are already
@@ -30,11 +33,12 @@ of it, not a dependency BusyBox waits on.
 
 ```
 M2 (done)
-  └─ M1b.  Framebuffer terminal            ← NEXT, already in the pipeline
-           xterm-ish VT + scrollback + NokiaPure-as-PSF; kernel out of
-           the printing business.
+  └─ M1b.  Framebuffer terminal            ← DONE (M1b-1..3), as is M1c-1..3.
 
-  ── Dynamic linking ── DEFERRED, see the BusyBox track plan ──────
+  ── CS. Concurrency hardening + ASLR ── run first ───────────
+     spec 2026-09-01-concurrency-and-scaling-design.md
+
+  ── Dynamic linking ── DEFERRED until after BusyBox ───────────
   ├─ DL1.  File-backed mmap                 ← prerequisite for everything DL
   ├─ DL2.  PT_INTERP + full auxv
   └─ DL3.  Dynamic TLS + dlopen
@@ -49,7 +53,8 @@ M2 (done)
 ```
 
 BB1–BB4 are independent of each other and can be reordered or
-parallelised; BB5 needs BB1–BB4 landed; BB6 needs BB5 and M1b.
+parallelised; BB5 needs BB1–BB4 landed; BB6 needs BB5 and M1b, which has
+shipped.
 
 ---
 
