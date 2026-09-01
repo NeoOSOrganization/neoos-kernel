@@ -110,9 +110,6 @@ struct fat_volume {
     // One-entry cursor for cluster_at_offset. Sequential I/O walks the
     // same chain forwards, so remembering where the last walk ended
     // turns an O(chain) re-walk per sector into a single step.
-    uint32_t walk_first;            // chain start, or 0 when invalid
-    uint32_t walk_index;            // cluster index within that chain
-    uint32_t walk_cluster;          // the cluster at walk_index
 };
 
 // The one volume the legacy fat16_* API operates on. It disappears
@@ -131,7 +128,6 @@ static int fat_read_bpb(struct fat_volume *v) {
     // Every mount path lands here, so the allocation hint and the
     // chain cursor get their starting values in one place.
     v->next_free_hint = 2;
-    v->walk_first = 0;
 
     uint8_t sector[SECTOR_SIZE];
     if (!blkcache_read(v->drive, 0, sector)) {
@@ -242,7 +238,6 @@ static void fat16_set_next_cluster(struct fat_volume *v, uint32_t cluster, uint3
     // truncated or freed, and the cursor caches a position inside one.
     // Rebuilding it costs one walk; trusting a stale one corrupts a
     // file.
-    v->walk_first = 0;
 }
 
 // FAT32 splits a directory entry's cluster number across two fields:
@@ -343,6 +338,15 @@ static void fat16_free_chain(struct fat_volume *v, uint32_t first_cluster) {
     }
 }
 
+// A forward-walk cursor, caller-local. It used to live in struct
+// fat_volume, shared by every file on the volume and updated with no
+// synchronisation: its three fields were read and written separately,
+// so one caller could validate `first` against its own chain and then
+// pick up `index`/`cluster` another caller had just overwritten. Each
+// read or write walks one chain forward, which is exactly what the
+// cursor is for, so a local gives the same speedup sharing nothing.
+struct fat_walk { uint32_t first, index, cluster; };
+
 // Returns the cluster containing byte offset `byte_offset` within the
 // chain starting at `first_cluster`. Caller must ensure the chain is
 // long enough.
@@ -353,29 +357,28 @@ static void fat16_free_chain(struct fat_volume *v, uint32_t first_cluster) {
 // makes the forward case a single step; anything else (a new chain, a
 // backwards seek) falls back to the full walk. fat16_set_next_cluster
 // invalidates the cursor whenever a chain changes shape.
-static uint32_t cluster_at_offset(struct fat_volume *v, uint32_t first_cluster, uint32_t byte_offset) {
+static uint32_t cluster_at_offset(struct fat_volume *v, uint32_t first_cluster,
+                                  uint32_t byte_offset, struct fat_walk *w) {
     uint32_t cluster_size_bytes = (uint32_t)v->sectors_per_cluster * v->bytes_per_sector;
     uint32_t cluster_index = byte_offset / cluster_size_bytes;
 
     uint32_t cluster = first_cluster;
     uint32_t i = 0;
-    if (v->walk_first == first_cluster && first_cluster >= 2 &&
-        v->walk_index <= cluster_index) {
-        cluster = v->walk_cluster;
-        i = v->walk_index;
+    if (w->first == first_cluster && first_cluster >= 2 && w->index <= cluster_index) {
+        cluster = w->cluster;
+        i = w->index;
     }
 
     for (; i < cluster_index; i++) {
         cluster = fat16_next_cluster(v, cluster);
         if (cluster < 2 || fat_is_eoc(v, cluster)) {
-            v->walk_first = 0;
-            return cluster;
+                    return cluster;
         }
     }
 
-    v->walk_first   = first_cluster;
-    v->walk_index   = cluster_index;
-    v->walk_cluster = cluster;
+    w->first   = first_cluster;
+    w->index   = cluster_index;
+    w->cluster = cluster;
     return cluster;
 }
 
@@ -389,6 +392,7 @@ static void write_range(struct fat_volume *v, uint32_t chain_start, uint32_t wri
     const uint8_t *in = (const uint8_t *)src;
     uint32_t cluster_size_bytes = (uint32_t)v->sectors_per_cluster * v->bytes_per_sector;
     uint32_t written = 0;
+    struct fat_walk walk = { 0, 0, 0 };
 
     while (written < len) {
         uint32_t abs_offset = write_position + written;
@@ -396,7 +400,7 @@ static void write_range(struct fat_volume *v, uint32_t chain_start, uint32_t wri
         uint32_t sector_index = offset_in_cluster / v->bytes_per_sector;
         uint32_t offset_in_sector = offset_in_cluster % v->bytes_per_sector;
 
-        uint32_t cluster = cluster_at_offset(v, chain_start, abs_offset);
+        uint32_t cluster = cluster_at_offset(v, chain_start, abs_offset, &walk);
         uint32_t lba = cluster_to_lba(v, cluster) + sector_index;
 
         uint32_t to_write = v->bytes_per_sector - offset_in_sector;
@@ -458,6 +462,7 @@ uint32_t fat16_read_at_v(struct fat_volume *v, uint32_t first_cluster, uint32_t 
     uint8_t *out = (uint8_t *)buf;
     uint32_t cluster_size_bytes = (uint32_t)v->sectors_per_cluster * v->bytes_per_sector;
     uint32_t read_so_far = 0;
+    struct fat_walk walk = { 0, 0, 0 };
 
     while (read_so_far < len) {
         uint32_t abs_offset = position + read_so_far;
@@ -465,7 +470,7 @@ uint32_t fat16_read_at_v(struct fat_volume *v, uint32_t first_cluster, uint32_t 
         uint32_t sector_index = offset_in_cluster / v->bytes_per_sector;
         uint32_t offset_in_sector = offset_in_cluster % v->bytes_per_sector;
 
-        uint32_t cluster = cluster_at_offset(v, first_cluster, abs_offset);
+        uint32_t cluster = cluster_at_offset(v, first_cluster, abs_offset, &walk);
         uint32_t lba = cluster_to_lba(v, cluster) + sector_index;
 
         uint32_t to_read = v->bytes_per_sector - offset_in_sector;
@@ -544,12 +549,29 @@ int fat16_write_file_v(struct fat_volume *v, uint32_t first_cluster, uint32_t cu
     return (int)len;
 }
 
+void fat16_update_entry_size_v(struct fat_volume *v, uint32_t dir_lba, uint16_t dir_offset,
+                               uint32_t first_cluster, uint32_t size);
+
 void fat16_truncate_v(struct fat_volume *v, uint32_t first_cluster, uint32_t dir_lba, uint16_t dir_offset, uint32_t *out_first_cluster) {
     if (first_cluster != 0) {
         fat16_free_chain(v, first_cluster);
     }
     *out_first_cluster = 0;
-    fat16_update_entry_size(dir_lba, dir_offset, 0, 0);
+    // _v, not the legacy wrapper. This function takes a volume, frees the
+    // chain on that volume -- and then used to stamp the directory entry
+    // through fat16_update_entry_size(), which hardcodes &legacy_volume,
+    // i.e. drive 0. Truncating a file on any OTHER mount therefore wrote
+    // its directory entry to drive 0 at the other volume's LBA.
+    //
+    // What that did: the update writes exactly six contiguous bytes --
+    // the 2-byte first-cluster field at dirent offset 26 and the 4-byte
+    // size at 28 -- and a truncate writes both as zero. So six zero bytes
+    // landed at an arbitrary sector of disk.img. On this test volume that
+    // sector belongs to STATTEST.ELF, six bytes into a function prologue,
+    // and the process died with SIGSEGV executing the zeros. vfstest
+    // truncates a file on /mnt (the FAT32 volume, drive 1); stattest
+    // never touches the filesystem. Nothing in any log connected them.
+    fat16_update_entry_size_v(v, dir_lba, dir_offset, 0, 0);
 }
 
 static void to_fat_name(const char *name, uint8_t *out11) {

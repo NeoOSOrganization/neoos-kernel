@@ -336,61 +336,79 @@ lookups.
 
 ## CS3 — Stress matrix and chaos harness
 
-### OPEN BUG found during CS3: one extra file on the disk breaks `lstat`
+### SOLVED: one extra file on the disk corrupted an executable
 
-**Status: reproducible, root cause unknown, nothing fixed yet.**
+**Root cause: `fat16_truncate_v` updated the directory entry through the
+legacy, drive-0-only wrapper.**
 
-Adding a single **unused** binary to the FAT image — `FORKSTORM.ELF`,
-20,816 bytes, `mcopy`'d to `::BIN/` and **not** referenced from
-`/ETC/INITTAB`, so it never executes — makes `stattest` fail in most
-boots.
-
-**Repro:** add any comparable file to the `$(DISK_IMG)` mcopy list, then
-`tools/gauntlet.sh 8 2`.
-
-| disk image | `[stattest] ALL PASSED` |
-|---|---|
-| unchanged | 8/8 |
-| one extra unused file | 2/8 (75% miss) |
-
-**Signature.** Always the same place, and deterministic within a boot:
-
-```
-[stattest] relative stat passed
-[process] task exited, pid=0x10 code=0x0
+```c
+void fat16_truncate_v(struct fat_volume *v, ...) {
+    if (first_cluster != 0) { fat16_free_chain(v, first_cluster); }  // uses v
+    *out_first_cluster = 0;
+    fat16_update_entry_size(dir_lba, dir_offset, 0, 0);   // hardcodes &legacy_volume
+}
 ```
 
-`stattest` completes five checks, then dies inside `check_lstat`, whose
-first call is `lstat("/HELLO.TXT")`. It exits with status **0** and
-prints neither its next `passed` line nor a `FAILED` line — so
-`main()` never reached its `printf("[stattest] ALL PASSED")` at all,
-and nothing reported why.
+It takes a volume, frees the chain on that volume, then stamps the
+directory entry on **drive 0** regardless. Truncating a file on any
+other mount wrote that mount's directory LBA onto disk.img.
 
-**What was ruled out**, each by direct experiment rather than argument:
+That update writes exactly six contiguous bytes -- the 2-byte
+first-cluster field at dirent offset 26 and the 4-byte size at 28 -- and
+a truncate writes both as zero. Six zero bytes therefore landed at a
+fixed sector of drive 0. On this test volume that sector belongs to
+`STATTEST.ELF`, six bytes into a function prologue. The zeros decode as
+`add %al,(%rax)`, so the process died with SIGSEGV writing through
+whatever `%rax` last held.
 
-- *Not KVM.* Reproduces under plain TCG `-cpu Nehalem`.
-- *Not host load.* Reproduces at `CONC=1`; pristine HEAD passes 8/8 with
-  zero retries on the same machine minutes apart.
-- *Not `-DNEOOS_TEST_HOOKS`.* A hookless build boots and passes.
-- *Not the test running.* `FORKSTORM.ELF` is absent from `INITTAB`.
-- *Not `forkstorm`'s own file opens or its process churn.* Removing each
-  in turn changed nothing.
-- *Not a missing file.* `HELLO.TXT` is present in the image (24 bytes).
-- *Not serial interleaving or the VT serial mirror.* Both were
-  investigated and separately improved; neither changed this.
+`vfstest` truncates a file on `/mnt` (the FAT32 volume, drive 1).
+`stattest` never touches the filesystem. Nothing in any log connected
+them.
 
-**Why it matters beyond the test.** The failing operation is an ordinary
-`lstat` on a file in the FAT root, and the only variable is unrelated
-data elsewhere on the volume. That points at the FAT/VFS layer being
-sensitive to on-disk layout — a cluster or directory-entry boundary
-crossing — rather than at anything in the concurrency work. A filesystem
-that mis-serves a stat depending on what *other* files exist will break a
-shell far more often than a stress test does.
+**Why one extra file was the trigger:** the damaged LBA is fixed, so
+which file it hits depends on where the allocator placed things. Adding
+`FORKSTORM.ELF` moved `STATTEST.ELF` onto that sector. The corruption
+happened on every boot before and after -- only its victim changed.
 
-**Where it sits.** `userland/forkstorm.c` is committed but deliberately
-**not wired into the Makefile**, so the tree stays green and the trigger
-stays available: re-adding its five Makefile sites reproduces the bug on
-demand. Wiring it in is blocked on this being understood.
+**Why it looked intermittent:** the file on disk was corrupt in *every*
+run. Whether `stattest` crashed depended only on whether it was loaded
+before or after `vfstest` ran.
+
+**Verified:** 8/8 runs with the on-disk executable byte-identical to the
+build (corrupt in 8/8 before), and `tools/gauntlet.sh 15 3` returning
+**15/15 with zero retries and no flaky markers** -- the first completely
+clean gauntlet in this track. The long-standing "missing marker with no
+hard signature" flakes are very likely this bug.
+
+**What made it expensive to find, both now fixed:**
+
+1. `signal_terminate()` records the signal then calls `process_exit(0)`,
+   so the log printed `code=0x0` -- byte for byte what a clean exit
+   prints. A process dying on SIGSEGV was indistinguishable from one
+   returning 0. The exit line now names the signal.
+2. Four fixes were attempted and all four failed, because the evidence
+   was read as a concurrency problem: a FAT read-error path, two
+   block-cache races, and a shared FAT walk cursor. Each is a genuine
+   defect and each is fixed, but none was this. The measurement that
+   broke it open was mundane and should have come first: extract the
+   file from the disk image after a boot and compare it against the
+   build. It was corrupt *on disk*, which ruled out every in-memory
+   theory at a stroke.
+
+**Hardening kept from the failed hypotheses.** All four are real
+unsynchronised or unchecked windows; none of them was this bug:
+
+- `fat16_read_at_v` ignored `blkcache_read`'s result and copied
+  uninitialised stack bytes into file data on a failed read, while
+  `fatfs_read` reported a complete read.
+- `blkcache_read` could install bytes fetched before a concurrent write
+  completed, leaving the cache stale against the disk until eviction.
+- `blkcache_write` installed rather than invalidated, so two writers to
+  one sector could leave the cache holding the loser's bytes.
+- `cluster_at_offset`'s forward-walk cursor lived in `struct fat_volume`
+  and was read/written unsynchronised, so one caller could validate
+  `first` against its own chain and then adopt another caller's
+  `index`/`cluster`. It is caller-local now.
 
 
 Reusable userland binaries under `userland/`, each with its own
