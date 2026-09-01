@@ -376,8 +376,8 @@ $(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_B
 	  '# VTSWITCHTEST is a wait entry for the same reason: the active VT' \
 	  '# is global state, and /dev/CONSOLE follows it. A concurrent' \
 	  '# ttytest that set ICANON off through /dev/CONSOLE and read it' \
-	  '# back after a switch got two DIFFERENT terminals and reported' \
-	  '# "[ttytest] FAILED: ICANON should be off".' \
+	  '# back after a switch got two DIFFERENT terminals, and reported' \
+	  '# that the setting had not stuck.' \
 	  'wait /BIN/VTSWITCHTEST.ELF' \
 	  'spawn /BIN/PARENT.ELF' \
 	  'spawn /BIN/LOOPER.ELF' \

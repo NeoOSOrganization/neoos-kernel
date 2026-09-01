@@ -38,16 +38,29 @@ static int mode_of(const char *w, int len) {
     return -1;
 }
 
+// Bytes actually read from /ETC/INITTAB, reported alongside the entry
+// count so a boot that parsed less than the whole file says so.
+static int inittab_bytes;
+
 static void parse_inittab(void) {
     int fd = open("/ETC/INITTAB", O_RDONLY);
     if (fd < 0) { printf("[init] no /ETC/INITTAB (%d)\n", fd); return; }
 
+    // A SHORT read here used to be indistinguishable from end-of-file,
+    // and init would go on to launch a prefix of the system in silence
+    // -- the machine boots, most things work, and the only symptom is
+    // that some services were never started. A read error is reported,
+    // and so is a full buffer, because both mean the entry list below is
+    // not the file on disk.
     static char buf[8192];
-    int n = 0, r;
+    int n = 0, r = 0;
     while (n < (int)sizeof buf && (r = read(fd, buf + n, sizeof buf - n)) > 0) {
         n += r;
     }
+    if (r < 0) { printf("[init] FAILED: read error %d on /ETC/INITTAB after %d bytes\n", r, n); }
+    if (n == (int)sizeof buf) { printf("[init] FAILED: /ETC/INITTAB is larger than %d bytes\n", n); }
     close(fd);
+    inittab_bytes = n;
 
     int i = 0;
     while (i < n && nents < MAX_ENTRIES) {
@@ -108,7 +121,8 @@ int main(void) {
             launched++;
         }
     }
-    printf("[init] %d entries launched, reaping\n", launched);
+    printf("[init] %d entries launched, %d parsed from %d bytes of INITTAB, reaping\n",
+           launched, nents, inittab_bytes);
 
     for (;;) {
         int st;
