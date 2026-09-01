@@ -48,6 +48,18 @@
 #include "lib/rand.h"
 
 void kernel_shutdown(void) {
+    {   // CS3: the poll-broadcast baseline for CS5.2. Whole-boot totals
+        // over the same suite are directly comparable before and after a
+        // per-object poll redesign -- unlike any windowed ratio, which
+        // ambient traffic here makes meaningless (see pollstorm.c).
+        uint64_t pev = 0, pwk = 0;
+        waitq_poll_stats(&pev, &pwk);
+        serial_write_string("[poll] broadcasts=");
+        serial_write_hex64(pev);
+        serial_write_string(" wakeups=");
+        serial_write_hex64(pwk);
+        serial_write_string("\n");
+    }
     lock_stats_dump();   // no-op unless DEBUG_LOCKSTAT
     serial_write_string("\n[kernel] shutdown requested, powering off\n");
     cli();

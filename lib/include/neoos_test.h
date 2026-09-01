@@ -24,4 +24,8 @@ long neoos_test_pmm_free(void);
 // thundering-herd baseline. Returns -ENOSYS in production.
 long neoos_test_poll_stats(void);
 
+// Threads blocked on the poll broadcast right now. Returns -ENOSYS in
+// production.
+long neoos_test_poll_depth(void);
+
 #endif

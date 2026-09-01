@@ -64,6 +64,7 @@ typedef int64_t (*syscall_handler)(struct syscall_args *);
 #define TESTHOOK_PARENT_PID   3   // a2 = pid; returns that process's parent_pid or -ESRCH
 #define TESTHOOK_PMM_FREE     4   // returns pmm_free_frame_count()
 #define TESTHOOK_POLL_STATS   5   // returns (poll_events << 32) | poll_wakeups
+#define TESTHOOK_POLL_DEPTH   6   // threads blocked on the poll broadcast now
 
 // ---- shared helpers, defined in syscall.c ---------------------------
 

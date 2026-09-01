@@ -454,7 +454,10 @@ $(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_B
 	  '# pty beside it gets -ENFILE. ptytest did exactly that.' \
 	  'wait /BIN/PTYCHURN.ELF' \
 	  'spawn /BIN/SIGSTORM.ELF' \
-	  'spawn /BIN/POLLSTORM.ELF' \
+	  '# POLLSTORM is a wait entry: it measures poll-broadcast traffic in' \
+	  '# two windows and compares them, so the background load has to be' \
+	  '# the same in both. Run beside the rest of the suite it swung 4.5x.' \
+	  'wait /BIN/POLLSTORM.ELF' \
 	  'spawn /BIN/PTYTEST.ELF' \
 	  'spawn /BIN/SMPTEST.ELF' \
 	  'spawn /BIN/EVTEST.ELF' \

@@ -62,7 +62,8 @@ void waitq_wake_all(struct waitq *q);
 extern volatile int waitq_poll_active;
 void waitq_poll_notify(void);
 // CS3: broadcast count and total sleepers woken, for the poll thundering-herd baseline.
-void waitq_poll_stats(uint64_t *events, uint64_t *wakeups);                 // wake every poll_core
+void waitq_poll_stats(uint64_t *events, uint64_t *wakeups);
+uint64_t waitq_poll_depth(void);   // threads blocked on the broadcast now                 // wake every poll_core
 int  waitq_poll_wait(uint64_t deadline);      // sleep until notified / deadline / signal
 void waitq_poll_enter(void);
 void waitq_poll_leave(void);

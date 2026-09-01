@@ -18,6 +18,18 @@ static struct waitq poll_broadcast;   // see the poll/select section below
 static volatile uint64_t poll_events;    // broadcasts issued
 static volatile uint64_t poll_wakeups;   // sleepers actually woken
 
+// How many threads are blocked on the broadcast right now. pollstorm
+// waits on this instead of guessing a settle delay: "the child said it
+// was about to poll" is not "the child is asleep", and the difference
+// was the whole reason the first measurements read zero.
+uint64_t waitq_poll_depth(void) {
+    uint64_t n = 0;
+    uint64_t f = spin_lock_irqsave(&poll_broadcast.lock);
+    for (struct thread *t = poll_broadcast.head; t; t = t->next) { n++; }
+    spin_unlock_irqrestore(&poll_broadcast.lock, f);
+    return n;
+}
+
 void waitq_poll_stats(uint64_t *events, uint64_t *wakeups) {
     if (events)  { *events  = poll_events; }
     if (wakeups) { *wakeups = poll_wakeups; }
@@ -250,6 +262,13 @@ void waitq_wake_all(struct waitq *q) {
     struct thread *woken = 0;
     struct thread *t;
     while ((t = waitq_dequeue(q)) != 0) {
+        // CS3: count poll sleepers where they are ACTUALLY woken, under
+        // the queue lock. The first version walked poll_broadcast.head
+        // inside waitq_poll_notify() instead, which samples a queue that
+        // is moving underneath it and reported zero.
+        if (q == &poll_broadcast) {
+            __atomic_add_fetch(&poll_wakeups, 1, __ATOMIC_RELAXED);
+        }
         t->next = woken;
         woken = t;
     }
@@ -272,14 +291,7 @@ volatile int waitq_poll_active;
 
 void waitq_poll_notify(void) {
     __atomic_add_fetch(&poll_events, 1, __ATOMIC_RELAXED);
-    // Count the sleepers this one broadcast is about to wake. Reading
-    // the queue length without its lock is fine for a statistic: the
-    // number is advisory, and taking the lock here would nest inside
-    // waitq_wake_all's own acquire.
-    for (struct thread *t = poll_broadcast.head; t; t = t->next) {
-        __atomic_add_fetch(&poll_wakeups, 1, __ATOMIC_RELAXED);
-    }
-    waitq_wake_all(&poll_broadcast);
+    waitq_wake_all(&poll_broadcast);   // counts the sleepers it dequeues
 }
 
 void waitq_poll_enter(void) { __atomic_add_fetch(&waitq_poll_active, 1, __ATOMIC_ACQ_REL); }

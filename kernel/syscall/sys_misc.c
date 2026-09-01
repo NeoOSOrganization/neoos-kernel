@@ -139,6 +139,8 @@ int64_t sys_test_hook(struct syscall_args *a) {
         return (int64_t)smp_user_migration_count();
     case TESTHOOK_PMM_FREE:
         return (int64_t)pmm_free_frame_count();
+    case TESTHOOK_POLL_DEPTH:
+        return (int64_t)waitq_poll_depth();
     case TESTHOOK_POLL_STATS: {
         uint64_t ev = 0, wk = 0;
         waitq_poll_stats(&ev, &wk);
