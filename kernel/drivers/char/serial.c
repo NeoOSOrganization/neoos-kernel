@@ -48,12 +48,6 @@ void serial_write_string(const char *str) {
     spin_unlock_raw(&serial_lock, f);
 }
 
-void serial_write_string_n(const char *str, uint64_t len) {
-    uint64_t f = spin_lock_raw(&serial_lock);
-    for (uint64_t i = 0; i < len; i++) { put_cooked(str[i]); }
-    spin_unlock_raw(&serial_lock, f);
-}
-
 void serial_write_raw_n(const char *str, uint64_t len) {
     uint64_t f = spin_lock_raw(&serial_lock);
     for (uint64_t i = 0; i < len; i++) { serial_putc(str[i]); }

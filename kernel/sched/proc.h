@@ -329,10 +329,6 @@ struct process *proc_find(int pid);
 void proc_get(struct process *p);
 void proc_put(struct process *p);
 
-// Live-thread count (p->live_threads). proc_put_live on the last live
-// thread frees the address space + fds and makes the process a zombie;
-// the struct outlives that.
-void proc_get_live(struct process *p);
 void proc_put_live(struct process *p);
 
 #endif

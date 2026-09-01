@@ -44,15 +44,8 @@ static inline unsigned thread_hash(int tid) {
     return (unsigned)tid % THREAD_HASH_BUCKETS;
 }
 
-// Allocate new TID
-// Returns new TID >= 1, or 0 on failure (max threads reached)
-int thread_table_alloc_tid(struct thread_table *table);
-
 // Insert thread into table
 void thread_table_insert(struct thread_table *table, int tid, struct thread *t);
-
-// Lookup thread by TID (RCU-protected, no lock needed)
-struct thread *thread_table_lookup(struct thread_table *table, int tid);
 
 // Remove thread from table (takes bucket lock, uses RCU for cleanup)
 void thread_table_remove(struct thread_table *table, struct thread *t);

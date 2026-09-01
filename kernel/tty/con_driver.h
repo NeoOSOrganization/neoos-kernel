@@ -58,6 +58,4 @@ void               con_driver_selftest(void); // "[con] ..."
 // Free helpers on top of the active driver.
 void con_putc(char c);                              // grey
 void con_write(const char *s, uint64_t n);          // grey
-void con_write_attr(const char *s, uint64_t n, uint8_t fg);
-
 #endif

@@ -870,10 +870,6 @@ void proc_put(struct process *p) {
     kfree(p);
 }
 
-void proc_get_live(struct process *p) {
-    __atomic_add_fetch(&p->live_threads, 1, __ATOMIC_ACQ_REL);
-}
-
 // Orphan reparenting. When a process becomes a zombie, any child of it
 // still alive is handed to PID 1, matching Linux -- init's wait4(-1)
 // loop is then what reaps it. proc_table_for_each_ref holds no lock

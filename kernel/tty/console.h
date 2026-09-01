@@ -8,15 +8,10 @@
 // Serial is a separate, always-on mirror -- callers that want both
 // (tty output, panic) write serial themselves and then call these.
 
-void console_putc(char c);
 void console_write(const char *s, uint64_t n);
-void console_clear(void);
-
 // While set, a userland terminal owns the framebuffer: console_putc /
 // console_clear stop touching pixels (serial output is written by the
 // callers themselves and is unaffected). Set/cleared by NEOOS_TIOCSACTIVE
 // on a pty master; forcibly cleared by the exception path.
 void console_set_fb_owned(int on);
-int  console_fb_owned(void);
-
 #endif

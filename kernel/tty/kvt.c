@@ -210,8 +210,6 @@ void kvt_scroll_view(struct kvt *v, int delta_lines) {
     v->view = clampi(v->view - delta_lines, 0, v->history);
 }
 
-int kvt_view(const struct kvt *v) { return v->view; }
-
 // --- selftest ------------------------------------------------
 
 void kvt_selftest(void) {

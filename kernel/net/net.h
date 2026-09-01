@@ -56,8 +56,6 @@ void net_selftest(void);
 // The interface an address belongs to, or 0. With one loopback device
 // this answers only for 127.0.0.0/8 and INADDR_ANY.
 struct netdev *net_route(uint32_t dst_ip_n);
-struct netdev *net_loopback(void);
-
 // Builds an IPv4 header around `payload` and hands the result to the
 // device. Returns 0, or a negative errno.
 int net_ipv4_output(uint32_t src_n, uint32_t dst_n, uint8_t protocol,

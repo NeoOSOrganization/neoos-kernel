@@ -38,12 +38,6 @@ int64_t vma_mmap(struct process *p, uint64_t addr, uint64_t len,
 int     vma_munmap(struct process *p, uint64_t addr, uint64_t len);
 int     vma_mprotect(struct process *p, uint64_t addr, uint64_t len, uint32_t prot);
 
-// Records a mapping without going through the placement policy. Used by
-// the ELF loader and thread-stack allocator, which choose their own
-// addresses and populate the pages themselves.
-int     vma_reserve(struct process *p, uint64_t start, uint64_t len,
-                    uint32_t prot, uint32_t flags);
-
 // Maps [phys, phys+len) into `p` at a kernel-chosen address, eagerly
 // (every page mapped now), backed by device-owned physical frames.
 // prot must not include PROT_EXEC (W^X). Returns the user address, or a

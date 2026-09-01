@@ -52,18 +52,6 @@ void con_driver_geometry(int *cols, int *rows) {
     if (rows) { *rows = con_rows; }
 }
 
-void con_putc(char c) {
-    if (active) { active->putc_attr(c, CON_GREY); }
-}
-void con_write(const char *s, uint64_t n) {
-    if (!active) { return; }
-    for (uint64_t i = 0; i < n; i++) { active->putc_attr(s[i], CON_GREY); }
-}
-void con_write_attr(const char *s, uint64_t n, uint8_t fg) {
-    if (!active) { return; }
-    for (uint64_t i = 0; i < n; i++) { active->putc_attr(s[i], fg); }
-}
-
 void con_driver_selftest(void) {
     if (!active) {
         serial_write_string("[con] selftest FAILED: no driver selected\n");

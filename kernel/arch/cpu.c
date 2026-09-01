@@ -192,9 +192,6 @@ void cpu_state_restore(void *buf) {
 
 uint32_t cpu_state_size(void) { return xstate_size; }
 uint64_t cpu_state_xcr0(void) { return xstate_mask; }
-int cpu_has_avx(void)  { return have_avx; }
-int cpu_has_avx2(void) { return have_avx2; }
-
 // CPUID 0x80000002..0x80000004: the 48-byte processor brand string.
 // out must be >= 49 bytes. Empty string if the CPU does not support it.
 void cpu_brand_string(char out[49]) {

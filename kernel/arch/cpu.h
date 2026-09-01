@@ -28,10 +28,6 @@ uint32_t cpu_state_size(void);
 // and rt_sigreturn masks a user-supplied xstate header against it.
 uint64_t cpu_state_xcr0(void);
 
-// 1 if AVX / AVX2 was detected and enabled.
-int cpu_has_avx(void);
-int cpu_has_avx2(void);
-
 // The 48-byte CPUID processor brand string, NUL-terminated (out >= 49).
 void cpu_brand_string(char out[49]);
 // Space-separated feature names ("sse2 sse4.2 avx2 ..."); returns length.

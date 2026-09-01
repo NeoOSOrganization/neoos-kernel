@@ -18,22 +18,6 @@ void thread_table_init(struct thread_table *table) {
     spin_init(&table->count_lock, LOCK_RANK_SIGQUEUE, "thread_count");
 }
 
-int thread_table_alloc_tid(struct thread_table *table) {
-    if (!table) return 0;
-
-    uint64_t f = spin_lock_irqsave(&table->count_lock);
-
-    if (table->next_tid >= MAX_THREADS_PER_PROC) {
-        spin_unlock_irqrestore(&table->count_lock, f);
-        return 0;  // Out of TID space
-    }
-
-    int tid = table->next_tid++;
-    spin_unlock_irqrestore(&table->count_lock, f);
-
-    return tid;
-}
-
 void thread_table_insert(struct thread_table *table, int tid, struct thread *t) {
     if (!table || !t || tid <= 0) {
         return;
@@ -54,25 +38,6 @@ void thread_table_insert(struct thread_table *table, int tid, struct thread *t) 
     spin_unlock_irqrestore(&table->count_lock, f2);
 
     spin_unlock_irqrestore(&b->lock, f);
-}
-
-// Lookup by tid under the bucket lock. NOTE: does NOT take a reference
-// -- today the only caller path that matters (thread_join) walks the
-// legacy p->threads list under p->lock instead, and this table is a
-// secondary index. If a caller ever needs the result past p->lock it
-// must thread_get() it here first.
-struct thread *thread_table_lookup(struct thread_table *table, int tid) {
-    if (!table || tid <= 0) {
-        return 0;
-    }
-
-    struct thread_bucket *b = &table->buckets[thread_hash(tid)];
-    uint64_t f = spin_lock_irqsave(&b->lock);
-    for (struct thread *t = b->head; t; t = t->tid_next_hash) {
-        if (t->tid == tid) { spin_unlock_irqrestore(&b->lock, f); return t; }
-    }
-    spin_unlock_irqrestore(&b->lock, f);
-    return 0;
 }
 
 void thread_table_remove(struct thread_table *table, struct thread *t) {

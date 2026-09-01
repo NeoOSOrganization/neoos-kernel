@@ -163,12 +163,6 @@ static int64_t vma_map_phys_locked(struct process *p, uint64_t phys, uint64_t le
     return (int64_t)addr;
 }
 
-static int vma_reserve_locked(struct process *p, uint64_t start, uint64_t len,
-                uint32_t prot, uint32_t flags) {
-    return vma_insert(p, page_down(start), page_up(start + len), prot, flags)
-           ? 0 : -ENOMEM;
-}
-
 // Splits `v` at `at`, leaving `v` as [v->start, at) and inserting a new
 // vma [at, old_end) after it with the same prot and flags. Returns 0 on
 // allocation failure, in which case nothing has changed.
@@ -335,14 +329,6 @@ int64_t vma_mmap(struct process *p, uint64_t addr, uint64_t len,
     // MAP_FIXED over a live mapping unmaps it first; a plain mmap maps
     // nothing and has nothing to settle.
     if (flags & MAP_FIXED) { vma_tlb_settle(p); }
-    return rc;
-}
-
-int vma_reserve(struct process *p, uint64_t start, uint64_t len,
-                uint32_t prot, uint32_t flags) {
-    uint64_t f = spin_lock_irqsave(&p->mm_lock);
-    int rc = vma_reserve_locked(p, start, len, prot, flags);
-    spin_unlock_irqrestore(&p->mm_lock, f);
     return rc;
 }
 

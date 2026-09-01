@@ -91,8 +91,6 @@ static void putc_locked_fg(char c, uint32_t fg) {
     if (cy >= rows) { scroll_one(); cy = rows - 1; }
 }
 
-static void putc_locked(char c) { putc_locked_fg(c, FG); }
-
 void fbcon_clear(void) {
     if (!fb.present) { return; }
     uint64_t f = fbcon_acquire();
@@ -113,24 +111,7 @@ void fbcon_init(void) {
     serial_write_string(" cells\n");
 }
 
-void fbcon_putc(char c) {
-    if (!fb.present) { return; }
-    uint64_t f = fbcon_acquire();
-    putc_locked(c);
-    fbcon_release(f);
-}
-
-void fbcon_write(const char *s, uint64_t n) {
-    if (!fb.present) { return; }
-    uint64_t f = fbcon_acquire();
-    for (uint64_t i = 0; i < n; i++) { putc_locked(s[i]); }
-    fbcon_release(f);
-}
-
 // ---- con_driver ----------------------------------------------------
-
-uint32_t fbcon_cols(void) { return cols; }
-uint32_t fbcon_rows(void) { return rows; }
 
 static int fbcon_probe(void) { return fb_device_active() != 0; }
 

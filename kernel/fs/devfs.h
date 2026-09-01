@@ -18,10 +18,6 @@ struct devfs_dev {
     int (*open)(struct file_descriptor *f);
 };
 
-// 1 if this devfs vnode is the terminal. ioctl needs to distinguish a
-// tty from /dev/NULL, and the device table is private to devfs.c.
-int devfs_vnode_is_tty(struct vnode *vn);
-
 // Runtime device registration. `path` is relative to /dev and may
 // contain one slash ("pts/3"); the parent directory must already be a
 // static entry. On open, f->ops is set to `ops`, f->priv to `priv`,

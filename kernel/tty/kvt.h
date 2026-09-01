@@ -55,8 +55,6 @@ const struct vc_cell *kvt_cell(const struct kvt *v, int row, int col);
 void kvt_cursor(const struct kvt *v, int *x, int *y, int *visible);
 
 void kvt_scroll_view(struct kvt *v, int delta_lines);
-int  kvt_view(const struct kvt *v);
-
 void kvt_selftest(void);   // "[kvt] ..."
 
 #endif

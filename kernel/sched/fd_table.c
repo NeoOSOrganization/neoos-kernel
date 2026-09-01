@@ -315,15 +315,3 @@ int fd_table_dup(struct fd_table *dst, struct fd_table *src) {
     return 1;
 }
 
-int fd_table_count(struct fd_table *table) {
-    if (!table) return 0;
-
-    int total = 0;
-    for (int i = 0; i < FD_TABLE_BUCKETS; i++) {
-        struct fd_bucket *b = &table->buckets[i];
-        uint64_t flags = spin_lock_irqsave(&b->lock);
-        total += b->slot_count;
-        spin_unlock_irqrestore(&b->lock, flags);
-    }
-    return total;
-}

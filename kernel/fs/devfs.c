@@ -504,20 +504,6 @@ const struct vfs_ops devfs_ops = {
     .readdir    = devfs_readdir,
 };
 
-// CONSOLE and TTY are the same underlying terminal, and so is every
-// /dev/ttyN virtual terminal; NULL and ZERO are not terminals and must
-// report -ENOTTY, or isatty() would claim a redirect to /dev/null was a
-// tty.
-int devfs_vnode_is_tty(struct vnode *vn) {
-    if (!vn || vn->type != VNODE_DEVICE) { return 0; }
-    if (vn->inode_id == 0) { return 0; }  // Root is not a device
-    if (vn->inode_id >= DEVFS_DYN_BASE) { return 1; }  // a pts slave is a tty
-    uint64_t dev_idx = vn->inode_id - 1;
-    if (dev_idx >= DEVFS_COUNT) { return 0; }
-    return devices[dev_idx].fops == &tty_file_ops ||
-           devices[dev_idx].fops == &vt_file_ops;
-}
-
 void devfs_selftest(void) {
     static const struct file_ops dummy = { .name = "devfs-dummy" };
     if (devfs_register("pts/7", &dummy, (void *)0x1234, 0) != 0) {

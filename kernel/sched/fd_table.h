@@ -82,7 +82,4 @@ int fd_table_dup(struct fd_table *dst, struct fd_table *src);
 // whatever newfd held. WILL target fds 0/1/2. Returns newfd or -errno.
 int fd_table_dup2(struct fd_table *table, int oldfd, int newfd);
 
-// Total open fds. Diagnostic; walks every bucket.
-int fd_table_count(struct fd_table *table);
-
 #endif

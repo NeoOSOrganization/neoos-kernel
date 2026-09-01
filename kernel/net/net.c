@@ -99,8 +99,6 @@ static int loopback_transmit(struct netdev *dev, const uint8_t *pkt, uint32_t le
     return 0;
 }
 
-struct netdev *net_loopback(void) { return &loopback; }
-
 struct netdev *net_route(uint32_t dst_ip_n) {
     // One interface, so "routing" is a membership test. 127.0.0.0/8 is
     // loopback's, and so is INADDR_ANY -- a datagram sent to 0.0.0.0
