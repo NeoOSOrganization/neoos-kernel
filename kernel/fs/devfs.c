@@ -85,6 +85,36 @@ static const struct file_ops zero_file_ops = {
     .close    = null_fop_close,
 };
 
+// /dev/kmsg -- write goes straight to the serial port and nowhere else.
+// This is where system/test programs send their diagnostic chatter so
+// the framebuffer console stays clean for the banner, the VTs, and a
+// userland terminal. read returns EOF.
+static int64_t kmsg_fop_write(struct file_descriptor *f, const void *buf, uint64_t len) {
+    (void)f;
+    serial_write_raw_n((const char *)buf, (uint32_t)len);
+    return (int64_t)len;
+}
+static int64_t kmsg_fop_read(struct file_descriptor *f, void *buf, uint64_t len) {
+    (void)f; (void)buf; (void)len;
+    return 0;
+}
+static const struct file_ops kmsg_file_ops = {
+    .name     = "kmsg",
+    .read     = kmsg_fop_read,
+    .write    = kmsg_fop_write,
+    .lseek    = null_fop_lseek,
+    .getdents = null_fop_getdents,
+    .ioctl    = null_fop_ioctl,
+    .poll     = null_fop_poll,
+    .dup      = null_fop_dup,
+    .close    = null_fop_close,
+};
+static int kmsg_open(struct file_descriptor *f) {
+    f->priv = NULL;
+    f->ops = &kmsg_file_ops;
+    return 0;
+}
+
 // Device open functions
 static int null_open(struct file_descriptor *f) {
     f->priv = NULL;
@@ -119,7 +149,9 @@ static const struct devfs_dev devices[] = {
     // devfs_readdir for the input dir (5) and event0 (6) do not shift.
     { "fb0",     VNODE_DEVICE, &fb_file_ops,  fb_open },
     { "ptmx",    VNODE_DEVICE, NULL,          ptmx_open },
+    { "kmsg",    VNODE_DEVICE, &kmsg_file_ops, kmsg_open },
     // Static parent for the dynamic /dev/pts/N entries (Task 6/7).
+    // Must stay last: DEVFS_PTS_INODE == DEVFS_COUNT.
     { "pts",     VNODE_DIR,    NULL,          NULL },
 };
 #define DEVFS_COUNT (sizeof(devices) / sizeof(devices[0]))

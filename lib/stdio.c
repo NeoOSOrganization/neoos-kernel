@@ -1,9 +1,24 @@
 #include "stdio.h"
 #include "unistd.h"
+#include "fcntl.h"
 #include <stdint.h>
 #include <stdarg.h>
 
 #define PRINTF_BUFFER_SIZE 512
+
+// libneoos's printf targets /dev/kmsg (serial only), NOT stdout. Its
+// only users are NeoOS's own system/test programs (init, the terminal,
+// the *test suites) whose output is diagnostic chatter -- it must not
+// land on the framebuffer console. Opened once, lazily; falls back to
+// fd 1 if /dev/kmsg is somehow unavailable.
+static int kmsg_fd = -2;   // -2 = not tried, -1 = unavailable, >=0 = open
+
+static void printf_out(const char *buf, uint64_t n) {
+    if (kmsg_fd == -2) {
+        kmsg_fd = open("/dev/kmsg", O_WRONLY);
+    }
+    write(kmsg_fd >= 0 ? kmsg_fd : STDOUT_FILENO, buf, n);
+}
 
 static void append_char(char *buf, uint64_t *pos, char c) {
     if (*pos < PRINTF_BUFFER_SIZE - 1) {
@@ -102,6 +117,6 @@ int printf(const char *fmt, ...) {
 
     va_end(args);
 
-    write(STDOUT_FILENO, buf, pos);
+    printf_out(buf, pos);
     return (int)pos;
 }

@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <unistd.h>
 #include <string.h>
 
@@ -5,6 +6,6 @@ int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
     const char msg[] = "child running, exiting with code 42\n";
-    write(STDOUT_FILENO, msg, strlen(msg));
+    printf("%s", msg);
     return 42;
 }
