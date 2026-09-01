@@ -44,17 +44,17 @@ static const struct tty_backend pty_backend = { pty_output };
 // extra loop or a spurious EOF check, never a crash.
 
 static void pty_ref(int *counter) {
-    uint64_t fl = spin_lock_raw(&pool_lock);
+    uint64_t fl = spin_lock_irqsave(&pool_lock);
     (*counter)++;
-    spin_unlock_raw(&pool_lock, fl);
+    spin_unlock_irqrestore(&pool_lock, fl);
 }
 
 static void pty_unref(struct pty *pt, int *counter) {
-    uint64_t fl = spin_lock_raw(&pool_lock);
+    uint64_t fl = spin_lock_irqsave(&pool_lock);
     if (*counter > 0) { (*counter)--; }
     int gone = (pt->used && pt->master_refs == 0 && pt->slave_refs == 0);
     if (gone) { pt->used = 0; }
-    spin_unlock_raw(&pool_lock, fl);
+    spin_unlock_irqrestore(&pool_lock, fl);
     if (!gone) { return; }
     char path[16] = "pts/";
     int n = pt->index, k = 4;
@@ -65,9 +65,9 @@ static void pty_unref(struct pty *pt, int *counter) {
 }
 
 static int pty_slave_open(struct pty *pt) {
-    uint64_t fl = spin_lock_raw(&pool_lock);
+    uint64_t fl = spin_lock_irqsave(&pool_lock);
     int r = pt->slave_refs;
-    spin_unlock_raw(&pool_lock, fl);
+    spin_unlock_irqrestore(&pool_lock, fl);
     return r > 0;
 }
 
@@ -261,7 +261,7 @@ void pty_init(void) {
 }
 
 int ptmx_open(struct file_descriptor *f) {
-    uint64_t fl = spin_lock_raw(&pool_lock);
+    uint64_t fl = spin_lock_irqsave(&pool_lock);
     struct pty *pt = 0;
     for (int i = 0; i < PTY_MAX; i++) {
         if (!ptys[i].used) { pt = &ptys[i]; break; }
@@ -272,7 +272,7 @@ int ptmx_open(struct file_descriptor *f) {
         pt->master_refs = 1;
         pt->slave_refs = 0;
     }
-    spin_unlock_raw(&pool_lock, fl);
+    spin_unlock_irqrestore(&pool_lock, fl);
     if (!pt) { return -ENFILE; }
 
     tty_obj_init(&pt->slave, &pty_backend, pt);
@@ -284,9 +284,9 @@ int ptmx_open(struct file_descriptor *f) {
     path[k] = 0;
     int rc = devfs_register(path, &pts_file_ops, pt, pts_devfs_open);
     if (rc != 0) {
-        uint64_t g = spin_lock_raw(&pool_lock);
+        uint64_t g = spin_lock_irqsave(&pool_lock);
         pt->used = 0; pt->master_refs = 0;
-        spin_unlock_raw(&pool_lock, g);
+        spin_unlock_irqrestore(&pool_lock, g);
         return rc;
     }
 
