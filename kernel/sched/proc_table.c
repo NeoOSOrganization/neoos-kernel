@@ -143,7 +143,3 @@ void proc_table_for_each_ref(void (*fn)(struct process *, void *), void *ctx) {
     }
 }
 
-int proc_table_alloc_pid_zero(void) {
-    // PID 0 is reserved for idle; try to allocate it specifically
-    return pid_alloc_specific(&global_proc_table.pid_alloc, 0);
-}

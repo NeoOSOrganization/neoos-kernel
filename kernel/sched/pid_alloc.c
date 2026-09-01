@@ -1,59 +1,16 @@
 #include "sched/pid_alloc.h"
+
+// This allocator hands out PID *numbers* only. Process lookup by pid is
+// proc_table_lookup()'s bucketed hash (kernel/sched/proc_table.c), which
+// has per-bucket locks and refcounted results. A radix tree with
+// insert/remove/lookup lived here until CS2 and was deleted: nothing
+// ever called those three functions, so the tree was never populated,
+// and its lookup path read shared nodes with no lock at all -- a race
+// that was only ever unreachable by accident.
 #include "mm/heap.h"
 #include "drivers/char/serial.h"
 
-static void *pid_lookup_internal(struct pid_radix_node *node, int pid, int level) {
-    if (!node) return 0;
-
-    int idx = (pid >> (level * PID_RADIX_BITS)) & (PID_RADIX_SIZE - 1);
-
-    if (level == 0) {
-        return node->entries[idx];
-    }
-
-    struct pid_radix_node *child = node->children[idx];
-    return pid_lookup_internal(child, pid, level - 1);
-}
-
-static int pid_insert_internal(struct pid_radix_node **node_ptr, int pid, void *process, int level) {
-    if (!*node_ptr) {
-        *node_ptr = (struct pid_radix_node *)kmalloc(sizeof(struct pid_radix_node));
-        if (!*node_ptr) return -1;
-        for (int i = 0; i < PID_RADIX_SIZE; i++) {
-            (*node_ptr)->entries[i] = 0;
-            (*node_ptr)->children[i] = 0;
-        }
-    }
-
-    int idx = (pid >> (level * PID_RADIX_BITS)) & (PID_RADIX_SIZE - 1);
-
-    if (level == 0) {
-        if ((*node_ptr)->entries[idx] != 0) {
-            return -1;  // Already in use
-        }
-        (*node_ptr)->entries[idx] = process;
-        return 0;
-    }
-
-    return pid_insert_internal(&(*node_ptr)->children[idx], pid, process, level - 1);
-}
-
-static void pid_remove_internal(struct pid_radix_node *node, int pid, int level) {
-    if (!node) return;
-
-    int idx = (pid >> (level * PID_RADIX_BITS)) & (PID_RADIX_SIZE - 1);
-
-    if (level == 0) {
-        node->entries[idx] = 0;
-        return;
-    }
-
-    struct pid_radix_node *child = node->children[idx];
-    pid_remove_internal(child, pid, level - 1);
-}
-
 void pid_allocator_init(struct pid_allocator *alloc) {
-    alloc->root = 0;
     alloc->free_list = 0;
     alloc->next_pid = 1;  // PID 0 reserved for idle
     spin_init(&alloc->lock, LOCK_RANK_PROCTABLE, "pid_alloc");
@@ -86,23 +43,6 @@ int pid_alloc(struct pid_allocator *alloc) {
     return pid;
 }
 
-int pid_alloc_specific(struct pid_allocator *alloc, int pid) {
-    if (pid <= 0 || pid >= MAX_PIDS) {
-        return -1;
-    }
-
-    uint64_t f = spin_lock_irqsave(&alloc->lock);
-
-    // Check if PID already in use
-    if (pid_lookup_internal(alloc->root, pid, 2) != 0) {
-        spin_unlock_irqrestore(&alloc->lock, f);
-        return -1;
-    }
-
-    spin_unlock_irqrestore(&alloc->lock, f);
-    return 0;
-}
-
 void pid_free(struct pid_allocator *alloc, int pid) {
     if (pid <= 0) return;
 
@@ -119,32 +59,48 @@ void pid_free(struct pid_allocator *alloc, int pid) {
     spin_unlock_irqrestore(&alloc->lock, f);
 }
 
-void *pid_lookup(struct pid_allocator *alloc, int pid) {
-    if (pid <= 0 || pid >= MAX_PIDS) {
-        return 0;
+void pid_alloc_selftest(void) {
+    struct pid_allocator a;
+    pid_allocator_init(&a);
+
+    // Distinctness: a run of allocations with nothing freed must never
+    // repeat a pid.
+    int ids[64];
+    for (int i = 0; i < 64; i++) {
+        ids[i] = pid_alloc(&a);
+        if (ids[i] <= 0) {
+            serial_write_string("[pid] selftest FAILED: allocation returned 0\n");
+            return;
+        }
+        for (int j = 0; j < i; j++) {
+            if (ids[j] == ids[i]) {
+                serial_write_string("[pid] selftest FAILED: duplicate live pid\n");
+                return;
+            }
+        }
     }
 
-    // RCU read lock would go here in full implementation
-    // For now, single-CPU so no lock needed for read
-    return pid_lookup_internal(alloc->root, pid, 2);
-}
-
-void pid_insert(struct pid_allocator *alloc, int pid, void *process) {
-    if (pid <= 0 || pid >= MAX_PIDS || !process) {
+    // Reuse: a freed pid comes back before next_pid grows again.
+    int freed = ids[10];
+    pid_free(&a, freed);
+    int reused = pid_alloc(&a);
+    if (reused != freed) {
+        serial_write_string("[pid] selftest FAILED: freed pid not reused\n");
         return;
     }
 
-    uint64_t f = spin_lock_irqsave(&alloc->lock);
-    pid_insert_internal(&alloc->root, pid, process, 2);
-    spin_unlock_irqrestore(&alloc->lock, f);
-}
-
-void pid_remove(struct pid_allocator *alloc, int pid) {
-    if (pid <= 0 || pid >= MAX_PIDS) {
-        return;
+    // Drain and refill without handing back anything still outstanding.
+    for (int i = 0; i < 64; i++) {
+        if (ids[i] != freed) { pid_free(&a, ids[i]); }
+    }
+    pid_free(&a, reused);
+    for (int i = 0; i < 64; i++) {
+        int p = pid_alloc(&a);
+        if (p <= 0) {
+            serial_write_string("[pid] selftest FAILED: refill returned 0\n");
+            return;
+        }
     }
 
-    uint64_t f = spin_lock_irqsave(&alloc->lock);
-    pid_remove_internal(alloc->root, pid, 2);
-    spin_unlock_irqrestore(&alloc->lock, f);
+    serial_write_string("[pid] selftest passed\n");
 }

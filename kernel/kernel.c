@@ -30,6 +30,7 @@
 #include "fs/fatfs.h"
 #include "fs/vfs.h"
 #include "sched/proc.h"
+#include "sched/pid_alloc.h"
 #include "syscall/syscall.h"
 #include "arch/cpu.h"
 #include "sync/lock.h"
@@ -160,6 +161,7 @@ void kmain(void *multiboot_info) {
 
     heap_init();
     heap_selftest();
+    pid_alloc_selftest();   // AFTER heap_init: the allocator kmallocs free-list entries
     tlb_init();
 
     // W^X the kernel address space: .text read-only, everything else

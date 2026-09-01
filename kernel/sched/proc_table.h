@@ -85,6 +85,5 @@ void proc_table_remove(struct process *proc);
 void proc_table_for_each_ref(void (*fn)(struct process *p, void *ctx), void *ctx);
 
 // Allocate PID 0 specifically (for idle process)
-int proc_table_alloc_pid_zero(void);
 
 #endif
