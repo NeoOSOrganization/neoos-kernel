@@ -61,6 +61,17 @@ static void region_scroll_up(struct vt *v) {
     dirty_row(v, v->sr_bot);
 }
 
+static void region_scroll_down(struct vt *v) {
+    snap_bottom(v);
+    for (int r = v->sr_bot; r > v->sr_top; r--) {
+        memcpy(screen_row(v, r), screen_row(v, r - 1),
+               sizeof(struct vt_cell) * v->cols);
+        dirty_row(v, r);
+    }
+    row_fill(v, screen_row(v, v->sr_top), BLANK);
+    dirty_row(v, v->sr_top);
+}
+
 // Cursor down one line, scrolling the region at the bottom.
 static void index_down(struct vt *v) {
     snap_bottom(v);
@@ -70,6 +81,17 @@ static void index_down(struct vt *v) {
         region_scroll_up(v);
     } else if (v->cy < v->rows - 1) {
         v->cy++;
+    }
+}
+
+static void index_up(struct vt *v) {
+    snap_bottom(v);
+    if (v->cy > v->sr_top) {
+        v->cy--;
+    } else if (v->cy == v->sr_top) {
+        region_scroll_down(v);
+    } else if (v->cy > 0) {
+        v->cy--;
     }
 }
 
@@ -142,11 +164,203 @@ static void exec_c0(struct vt *v, uint8_t c) {
     }
 }
 
+// --- erase / line ops -----------------------------------------------
+
+static void erase_cells(struct vt *v, int row, int c0, int c1) {
+    struct vt_cell *r = screen_row(v, row);
+    for (int c = c0; c < c1 && c < v->cols; c++) r[c] = BLANK;
+    dirty_row(v, row);
+}
+
+static void erase_display(struct vt *v, int mode) {
+    if (mode == 0) {                          // cursor -> end of screen
+        erase_cells(v, v->cy, v->cx, v->cols);
+        for (int r = v->cy + 1; r < v->rows; r++) erase_cells(v, r, 0, v->cols);
+    } else if (mode == 1) {                   // start of screen -> cursor
+        for (int r = 0; r < v->cy; r++) erase_cells(v, r, 0, v->cols);
+        erase_cells(v, v->cy, 0, v->cx + 1);
+    } else {                                  // 2 / 3: whole screen
+        for (int r = 0; r < v->rows; r++) erase_cells(v, r, 0, v->cols);
+    }
+}
+
+static void erase_line(struct vt *v, int mode) {
+    if (mode == 0)      erase_cells(v, v->cy, v->cx, v->cols);
+    else if (mode == 1) erase_cells(v, v->cy, 0, v->cx + 1);
+    else                erase_cells(v, v->cy, 0, v->cols);
+}
+
+// Insert/delete `n` blank lines at the cursor row, confined to the
+// scroll region (only when the cursor is inside it).
+static void insert_lines(struct vt *v, int n) {
+    if (v->cy < v->sr_top || v->cy > v->sr_bot) return;
+    if (n > v->sr_bot - v->cy + 1) n = v->sr_bot - v->cy + 1;
+    for (int r = v->sr_bot; r >= v->cy + n; r--) {
+        memcpy(screen_row(v, r), screen_row(v, r - n),
+               sizeof(struct vt_cell) * v->cols);
+        dirty_row(v, r);
+    }
+    for (int r = v->cy; r < v->cy + n; r++) {
+        row_fill(v, screen_row(v, r), BLANK);
+        dirty_row(v, r);
+    }
+}
+
+static void delete_lines(struct vt *v, int n) {
+    if (v->cy < v->sr_top || v->cy > v->sr_bot) return;
+    if (n > v->sr_bot - v->cy + 1) n = v->sr_bot - v->cy + 1;
+    for (int r = v->cy; r + n <= v->sr_bot; r++) {
+        memcpy(screen_row(v, r), screen_row(v, r + n),
+               sizeof(struct vt_cell) * v->cols);
+        dirty_row(v, r);
+    }
+    for (int r = v->sr_bot - n + 1; r <= v->sr_bot; r++) {
+        row_fill(v, screen_row(v, r), BLANK);
+        dirty_row(v, r);
+    }
+}
+
+// --- SGR -----------------------------------------------------------
+
+static uint8_t rgb_to_256(int r, int g, int b) {
+    if (r == g && g == b) {                   // grayscale ramp 232..255
+        if (r < 8)  return 16;
+        if (r > 238) return 231;
+        return (uint8_t)(232 + (r - 8) / 10);
+    }
+    int r6 = (r * 5 + 127) / 255;
+    int g6 = (g * 5 + 127) / 255;
+    int b6 = (b * 5 + 127) / 255;
+    return (uint8_t)(16 + 36 * r6 + 6 * g6 + b6);
+}
+
+static void apply_sgr(struct vt *v) {
+    int n = v->nparam;
+    for (int i = 0; i < n; i++) {
+        int p = v->params[i];
+        if (p == 0) {
+            v->pen = BLANK;                    // full reset
+        } else if (p == 1) v->pen.attr |= VT_BOLD;
+        else if (p == 2)  v->pen.attr |= VT_DIM;
+        else if (p == 4)  v->pen.attr |= VT_UNDERLINE;
+        else if (p == 7)  v->pen.attr |= VT_REVERSE;
+        else if (p == 8)  v->pen.attr |= VT_HIDDEN;
+        else if (p == 22) v->pen.attr &= ~(VT_BOLD | VT_DIM);
+        else if (p == 24) v->pen.attr &= ~VT_UNDERLINE;
+        else if (p == 27) v->pen.attr &= ~VT_REVERSE;
+        else if (p == 28) v->pen.attr &= ~VT_HIDDEN;
+        else if (p >= 30 && p <= 37) { v->pen.fg = (uint8_t)(p - 30); v->pen.attr &= ~VT_DEFFG; }
+        else if (p == 39) v->pen.attr |= VT_DEFFG;
+        else if (p >= 40 && p <= 47) { v->pen.bg = (uint8_t)(p - 40); v->pen.attr &= ~VT_DEFBG; }
+        else if (p == 49) v->pen.attr |= VT_DEFBG;
+        else if (p >= 90 && p <= 97) { v->pen.fg = (uint8_t)(p - 90 + 8); v->pen.attr &= ~VT_DEFFG; }
+        else if (p >= 100 && p <= 107) { v->pen.bg = (uint8_t)(p - 100 + 8); v->pen.attr &= ~VT_DEFBG; }
+        else if (p == 38 || p == 48) {
+            int deffg = (p == 38);
+            if (i + 1 < n && v->params[i + 1] == 5 && i + 2 < n) {
+                uint8_t idx = (uint8_t)v->params[i + 2];
+                if (deffg) { v->pen.fg = idx; v->pen.attr &= ~VT_DEFFG; }
+                else       { v->pen.bg = idx; v->pen.attr &= ~VT_DEFBG; }
+                i += 2;
+            } else if (i + 1 < n && v->params[i + 1] == 2 && i + 4 < n) {
+                uint8_t idx = rgb_to_256(v->params[i + 2], v->params[i + 3], v->params[i + 4]);
+                if (deffg) { v->pen.fg = idx; v->pen.attr &= ~VT_DEFFG; }
+                else       { v->pen.bg = idx; v->pen.attr &= ~VT_DEFBG; }
+                i += 4;
+            }
+        }
+        // unknown SGR codes: ignored
+    }
+}
+
+// --- CSI / ESC dispatch -------------------------------------------
+
+static int clamp_row(struct vt *v, int r) { return clampi(r, 0, v->rows - 1); }
+static int clamp_col(struct vt *v, int c) { return clampi(c, 0, v->cols - 1); }
+
+// param i with default def when absent or zero
+static int P(struct vt *v, int i, int def) {
+    if (i < v->nparam && v->params[i] != 0) return v->params[i];
+    return def;
+}
+
+static void dispatch_csi(struct vt *v, uint8_t final) {
+    v->wrap_pending = 0;
+
+    if (v->priv) {
+        // private modes: DECTCEM and a set of accept-noops.
+        int set = (final == 'h');
+        for (int i = 0; i < v->nparam; i++) {
+            switch (v->params[i]) {
+            case 25:  v->cursor_visible = set; break;
+            case 1049: case 1047: case 47:
+                /* alt screen: Task 3 */ break;
+            default:  /* 2004, 1000, 1002, 1006, 1015, 7, ... : ignore */ break;
+            }
+        }
+        return;
+    }
+
+    switch (final) {
+    case 'A': v->cy = clamp_row(v, v->cy - P(v, 0, 1)); break;
+    case 'B': v->cy = clamp_row(v, v->cy + P(v, 0, 1)); break;
+    case 'C': v->cx = clamp_col(v, v->cx + P(v, 0, 1)); break;
+    case 'D': v->cx = clamp_col(v, v->cx - P(v, 0, 1)); break;
+    case 'E': v->cx = 0; v->cy = clamp_row(v, v->cy + P(v, 0, 1)); break;
+    case 'F': v->cx = 0; v->cy = clamp_row(v, v->cy - P(v, 0, 1)); break;
+    case 'G': case '`': v->cx = clamp_col(v, P(v, 0, 1) - 1); break;
+    case 'd': v->cy = clamp_row(v, P(v, 0, 1) - 1); break;
+    case 'H': case 'f':
+        v->cy = clamp_row(v, P(v, 0, 1) - 1);
+        v->cx = clamp_col(v, P(v, 1, 1) - 1);
+        break;
+    case 'J': erase_display(v, P(v, 0, 0)); break;
+    case 'K': erase_line(v, P(v, 0, 0)); break;
+    case 'L': insert_lines(v, P(v, 0, 1)); break;
+    case 'M': delete_lines(v, P(v, 0, 1)); break;
+    case 'S': for (int i = P(v, 0, 1); i > 0; i--) region_scroll_up(v);   break;
+    case 'T': for (int i = P(v, 0, 1); i > 0; i--) region_scroll_down(v); break;
+    case 'r': {
+        int t = P(v, 0, 1) - 1;
+        int b = (v->nparam >= 2 && v->params[1] != 0) ? v->params[1] - 1 : v->rows - 1;
+        if (t < 0) t = 0;
+        if (b > v->rows - 1) b = v->rows - 1;
+        if (t < b) { v->sr_top = t; v->sr_bot = b; v->cx = 0; v->cy = t; }
+        break;
+    }
+    case 's': v->sc_cx = v->cx; v->sc_cy = v->cy; v->sc_pen = v->pen; v->sc_valid = 1; break;
+    case 'u':
+        if (v->sc_valid) { v->cx = clamp_col(v, v->sc_cx); v->cy = clamp_row(v, v->sc_cy); v->pen = v->sc_pen; }
+        break;
+    case 'm': apply_sgr(v); break;
+    case 'n': /* DSR: no reply channel inside vt */ break;
+    default:  break;
+    }
+}
+
+static void dispatch_esc(struct vt *v, uint8_t c) {
+    switch (c) {
+    case '7': v->sc_cx = v->cx; v->sc_cy = v->cy; v->sc_pen = v->pen; v->sc_valid = 1; break;
+    case '8':
+        if (v->sc_valid) { v->cx = clamp_col(v, v->sc_cx); v->cy = clamp_row(v, v->sc_cy); v->pen = v->sc_pen; }
+        break;
+    case 'c': /* RIS: Task 3 */ break;
+    case 'M': index_up(v); break;                 // reverse index
+    case 'D': index_down(v); break;
+    case 'E': v->cx = 0; index_down(v); break;
+    default:  break;
+    }
+}
+
 // --- feed -------------------------------------------------------------
 
-// The escape / CSI / OSC machinery is added in Tasks 2-3. For Task 1 an
-// ESC just resets to GROUND after swallowing its final byte, so stray
-// sequences never corrupt the grid.
+static void csi_reset(struct vt *v) {
+    v->nparam = 1;
+    for (int i = 0; i < VT_MAXPARAM; i++) v->params[i] = 0;
+    v->priv = 0;
+    v->inter = 0;
+}
+
 static void feed_byte(struct vt *v, uint8_t c) {
     switch (v->pstate) {
     case VT_GROUND:
@@ -154,9 +368,38 @@ static void feed_byte(struct vt *v, uint8_t c) {
         if (c < 0x20 || c == 0x7f) { exec_c0(v, c); return; }
         put_char(v, c);
         return;
+
     case VT_ESC:
-        v->pstate = VT_GROUND;            // Task 2 dispatches here
+        if (c == '[') { csi_reset(v); v->pstate = VT_CSI; return; }
+        if (c == '(' || c == ')' || c == '*' || c == '+') { v->pstate = VT_ESC_CHARSET; return; }
+        dispatch_esc(v, c);
+        v->pstate = VT_GROUND;
         return;
+
+    case VT_ESC_CHARSET:
+        v->pstate = VT_GROUND;                    // consume the designator, ignore
+        return;
+
+    case VT_CSI:
+        if (c >= '0' && c <= '9') {
+            v->params[v->nparam - 1] = v->params[v->nparam - 1] * 10 + (c - '0');
+            return;
+        }
+        if (c == ';') {
+            if (v->nparam < VT_MAXPARAM) v->nparam++;
+            return;
+        }
+        if (c == '?') { v->priv = 1; return; }
+        if (c >= 0x20 && c <= 0x2f) { v->inter = c; return; }
+        if (c < 0x20) { exec_c0(v, c); return; } // C0 mid-sequence: execute, stay
+        if (c >= 0x40 && c <= 0x7e) {
+            dispatch_csi(v, c);
+            v->pstate = VT_GROUND;
+            return;
+        }
+        v->pstate = VT_GROUND;
+        return;
+
     default:
         v->pstate = VT_GROUND;
         return;
