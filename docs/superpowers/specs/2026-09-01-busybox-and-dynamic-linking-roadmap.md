@@ -1,7 +1,12 @@
 # BusyBox + dynamic linking — roadmap
 
-**Status:** planning index. Design-only until M1b (framebuffer terminal)
-ships. Each sub-milestone below gets its own full design spec
+**Status:** planning index. **The BusyBox half is superseded by
+`docs/superpowers/plans/2026-09-01-busybox-track.md`** (2026-09-01),
+which reorders it, drops what has landed, and adds a `fork` blocker this
+file did not know about. The decomposition below still stands; its
+ordering does not. The dynamic-linking half (DL1–DL3) is unchanged but
+**deferred** — the user chose to take BusyBox first, which is coherent
+because BusyBox is built static and never depended on DL. Each sub-milestone below gets its own full design spec
 (`docs/superpowers/specs/`) and implementation plan
 (`docs/superpowers/plans/`) when it is reached — this file records the
 decomposition, the ordering, and the decisions that are already
@@ -29,7 +34,7 @@ M2 (done)
            xterm-ish VT + scrollback + NokiaPure-as-PSF; kernel out of
            the printing business.
 
-  ── Dynamic linking ──────────────────────────────────────────────
+  ── Dynamic linking ── DEFERRED, see the BusyBox track plan ──────
   ├─ DL1.  File-backed mmap                 ← prerequisite for everything DL
   ├─ DL2.  PT_INTERP + full auxv
   └─ DL3.  Dynamic TLS + dlopen
