@@ -37,10 +37,14 @@ serial-log markers, the parallel gauntlet.
   code; once `vesafb` reports `{16,8},{8,8},{0,8}`, TERM's existing
   "use the ioctl values if they look sane" guard takes them and its
   XRGB8888 fallback goes dead on its own.
-- **The `con_driver` interface is STREAMING** (`putc`/`write`/`clear`)
-  — the row/col-addressed `putc(row,col,ch,attr)` + `repaint(vc)` ops
-  from spec §3 are added in **M1c-3** when `struct vt_console` exists.
-  Do not add a `vt_console` dependency here.
+- **The `con_driver` interface is STREAMING** with 16-colour cells
+  (`putc_attr(char, uint8_t fg)` / `clear`) — the row/col-addressed
+  `putc(row,col,ch,attr)` + `repaint(vc)` ops from spec §3 are added in
+  **M1c-3** when `struct vt_console` exists. Do not add a `vt_console`
+  dependency here.
+- **Task 3 (boot banner) is a user addition on top of the M1c spec.**
+  It needs the colour `con_driver` (Task 2) and `con_driver_select()`,
+  so it lands here. Record it in the M1c spec's decisions table.
 - **File renames** (`git mv`, symbol renames too): `fb.c` → `vesafb.c`,
   `vga.{c,h}` → `vgacon.{c,h}`, `vga_putc`→`vgacon_putc`,
   `vga_clear`→`vgacon_clear`, `vga_print_string` → delete (unused —
@@ -69,8 +73,12 @@ serial-log markers, the parallel gauntlet.
 | `kernel/tty/console.c` | `console_putc/write/clear` → `con_driver_active()->…` |
 | `kernel/kernel.c` | `fb_init`→`fb_device_probe_all`; `fbcon_init`→`con_driver_select`+init; add the two selftests |
 | `kernel/fs/devfs.c`, `kernel/drivers/input/keyboard.c` | drop the now-unused `#include "drivers/video/vga.h"` |
-| `Makefile` | `REQUIRED_MARKERS += "[fbdev] selftest passed" "[con] selftest passed"` |
-| `docs/abi-compatibility.md`, `docs/stdlib.md` | note the fixed channel reporting; the driver model |
+| `kernel/version.h` (new) | `NEOOS_VERSION`; `NEOOS_GITREV` fallback |
+| `kernel/tty/banner.{c,h}` (new) | the boot banner (Task 3) |
+| `kernel/arch/cpu.{c,h}` | `cpu_brand_string`, `cpu_feature_string` (Task 3) |
+| `kernel/mm/pmm.{c,h}` | `pmm_total_frame_count` if absent (Task 3) |
+| `Makefile` | `REQUIRED_MARKERS += "[fbdev] selftest passed" "[con] selftest passed" "[banner]"`; `-DNEOOS_GITREV` from `git describe` |
+| `README.md`, `docs/abi-compatibility.md`, `docs/stdlib.md` | the driver model, the fixed channel reporting, the banner |
 
 ---
 
@@ -241,20 +249,34 @@ vgacon.{c,h}`; modify `fbcon.c`, `console.c`, `kernel.c`, `devfs.c`,
 - Produces:
   ```c
   // con_driver.h
+  // 16-colour indices (VGA order). fbcon maps to RGB; vgacon uses the
+  // index directly as the attribute fg nibble.
+  #define CON_BLACK 0  #define CON_RED 4   #define CON_MAGENTA 5
+  #define CON_GREY 7    #define CON_LRED 12 #define CON_LMAGENTA 13
+  #define CON_WHITE 15  /* ...the full 0..15 set in the header */
+
   struct con_driver {
       const char *name;
       int priority;
       int  (*probe)(void);
-      void (*init)(int *cols, int *rows);   // set up, report text geometry
-      void (*putc)(char c);
-      void (*write)(const char *s, uint64_t n);
+      void (*init)(int *cols, int *rows);       // set up, report geometry
+      void (*putc_attr)(char c, uint8_t fg);    // fg = CON_* index
       void (*clear)(void);
   };
   void               con_driver_register(struct con_driver *d);
   struct con_driver *con_driver_active(void);
   void               con_driver_select(void);   // probe + init the winner
   void               con_driver_selftest(void); // "[con] ..."
+
+  // convenience: plain grey putc + write, on top of putc_attr
+  static inline void con_putc(char c)  { con_driver_active()->putc_attr(c, CON_GREY); }
+  void con_write(const char *s, uint64_t n);
+  void con_write_attr(const char *s, uint64_t n, uint8_t fg);
   ```
+  `putc_attr` (not `putc`) is the one driver primitive — a 16-colour
+  cell is what M1c-3's VT grid and Task 3's banner both need, and
+  carrying it now avoids a second interface change. `con_write` /
+  `con_putc` are free functions in `con_driver.c`.
 
 - [ ] **Step 1: `con_driver.{c,h}`**
 
@@ -266,7 +288,10 @@ highest-priority `probe()==1`, call its `init(&cols,&rows)`, store
 
 - [ ] **Step 2: `fbcon.c` gains a `con_driver`**
 
-Add, without changing any existing function body:
+Add, without changing any existing function body except that
+`fbcon_putc`/`fbcon_write` gain an `fg` colour and a 16-entry
+`CON_* → 0x00RRGGBB` palette table (VGA colour values). `fbcon_clear`
+unchanged.
 ```c
 static int  fbcon_probe(void) { return fb_device_active() != 0; }
 static void fbcon_init_cd(int *cols, int *rows) {
@@ -274,10 +299,11 @@ static void fbcon_init_cd(int *cols, int *rows) {
     *cols = (int)fbcon_cols();    // add tiny getters, or expose the statics
     *rows = (int)fbcon_rows();
 }
+static void fbcon_putc_attr(char c, uint8_t fg) { /* was fbcon_putc, + colour */ }
 struct con_driver fbcon_drv = {
     .name = "fbcon", .priority = 100,
     .probe = fbcon_probe, .init = fbcon_init_cd,
-    .putc = fbcon_putc, .write = fbcon_write, .clear = fbcon_clear,
+    .putc_attr = fbcon_putc_attr, .clear = fbcon_clear,
 };
 ```
 `fbcon.c` now `#include`s `fb_device.h` (for `fbcon_probe`) and
@@ -286,14 +312,17 @@ struct con_driver fbcon_drv = {
 - [ ] **Step 3: `git mv vga.{c,h} vgacon.{c,h}`; make it a `con_driver`**
 
 Rename symbols `vga_clear`→`vgacon_clear`, `vga_putc`→`vgacon_putc`;
-delete `vga_print_string`. Add `vgacon_write` (loop `vgacon_putc`) and
-`vgacon_init(int*cols,int*rows)` (`*cols=80; *rows=25;` and clear).
+delete `vga_print_string`. `vgacon_putc` gains an `fg` and writes
+`(ch | (fg << 8))` into the cell (VGA hardware attribute byte — the
+`CON_*` indices ARE the VGA fg nibble). Add `vgacon_init(int*,int*)`
+(`*cols=80; *rows=25;` + clear).
 ```c
 static int vgacon_probe(void) { return 1; }   // always available
+static void vgacon_putc_attr(char c, uint8_t fg);
 struct con_driver vgacon_drv = {
     .name = "vgacon", .priority = 10,
     .probe = vgacon_probe, .init = vgacon_init,
-    .putc = vgacon_putc, .write = vgacon_write, .clear = vgacon_clear,
+    .putc_attr = vgacon_putc_attr, .clear = vgacon_clear,
 };
 ```
 Update the two stale includes: `devfs.c` and `keyboard.c` drop
@@ -306,13 +335,12 @@ a `vga_*` symbol).
 #include "tty/con_driver.h"
 static int  dummy_probe(void) { return 1; }
 static void dummy_init(int *c, int *r) { *c = 80; *r = 25; }
-static void dummy_putc(char c) { (void)c; }
-static void dummy_write(const char *s, uint64_t n) { (void)s; (void)n; }
+static void dummy_putc_attr(char c, uint8_t fg) { (void)c; (void)fg; }
 static void dummy_clear(void) {}
 struct con_driver dummycon_drv = {
     .name = "dummycon", .priority = 0,
     .probe = dummy_probe, .init = dummy_init,
-    .putc = dummy_putc, .write = dummy_write, .clear = dummy_clear,
+    .putc_attr = dummy_putc_attr, .clear = dummy_clear,
 };
 ```
 
@@ -327,15 +355,14 @@ void console_set_fb_owned(int on) { fb_owned = on ? 1 : 0; }
 int  console_fb_owned(void) { return fb_owned; }
 
 void console_putc(char c) {
-    if (fb_owned) return;
-    con_driver_active()->putc(c);
+    if (fb_owned || !con_driver_active()) return;
+    con_driver_active()->putc_attr(c, CON_GREY);
 }
 void console_write(const char *s, uint64_t n) {
-    if (fb_owned) return;
-    con_driver_active()->write(s, n);
+    for (uint64_t i = 0; i < n; i++) { console_putc(s[i]); }
 }
 void console_clear(void) {
-    if (fb_owned) return;
+    if (fb_owned || !con_driver_active()) return;
     con_driver_active()->clear();
 }
 ```
@@ -373,6 +400,168 @@ byte-identical selftest lines). Gauntlet 15/15. Update
 
 ---
 
+## Task 3: boot banner
+
+**Files:** Create `kernel/tty/banner.{c,h}`, `kernel/version.h`;
+modify `kernel/arch/cpu.{c,h}`, `kernel/mm/pmm.{c,h}` (a total-frame
+getter if absent), `kernel/kernel.c`, `Makefile`.
+
+**Interfaces:**
+- Produces:
+  ```c
+  // kernel/version.h
+  #define NEOOS_VERSION "0.1"
+  // NEOOS_GITREV is -D'd by the Makefile: git describe --always --dirty
+  #ifndef NEOOS_GITREV
+  #define NEOOS_GITREV "unknown"
+  #endif
+
+  // kernel/arch/cpu.h
+  void cpu_brand_string(char out[49]);      // CPUID 0x80000002..4, NUL-terminated
+  int  cpu_feature_string(char *out, int max);  // "sse2 sse4.2 avx2 aes ..."
+
+  // kernel/mm/pmm.h
+  uint64_t pmm_total_frame_count(void);     // add if not already present
+
+  // kernel/tty/banner.h
+  void banner_show(void);                   // clear + logo + info panel
+  ```
+
+- [ ] **Step 1: `cpu_brand_string` + `cpu_feature_string`**
+
+`cpu.c` already has `cpuid(leaf, &a,&b,&c,&d)` and the SSE/AVX feature
+`#define`s. Add:
+
+```c
+void cpu_brand_string(char out[49]) {
+    uint32_t r[12], unused;
+    cpuid(0x80000000, &r[0], &unused, &unused, &unused);
+    if (r[0] < 0x80000004) { out[0] = 0; return; }
+    for (int i = 0; i < 3; i++) {
+        cpuid(0x80000002 + i, &r[i*4+0], &r[i*4+1], &r[i*4+2], &r[i*4+3]);
+    }
+    __builtin_memcpy(out, r, 48);
+    out[48] = 0;
+    // trim leading spaces some CPUs pad with
+}
+
+int cpu_feature_string(char *out, int max) {
+    // leaf 1 -> edx (sse, sse2), ecx (sse3, ssse3, sse4.1, sse4.2,
+    //   avx, aes, fma, rdrand, xsave, popcnt); leaf 7 ebx (avx2,
+    //   bmi1, bmi2, sha); leaf 0x80000001 ecx (lahf), edx (nx, 1gb,
+    //   rdtscp, lm). Append each present name + ' '.
+}
+```
+
+Emit `[cpu] brand: <brand>` and `[cpu] features: <list>` to serial from
+`cpu_init` (or from `banner_show`) — greppable proof the CPUID reads
+work.
+
+- [ ] **Step 2: `pmm_total_frame_count`**
+
+If `pmm.c` tracks only `total_free_frames`, add a `static uint64_t
+total_frames;` set once in `pmm_init` (sum of every usable region), and
+`pmm_total_frame_count()`. Memory in MiB = `count * 4096 / (1<<20)`.
+
+- [ ] **Step 3: `kernel/tty/banner.c`**
+
+```c
+#include "tty/banner.h"
+#include "tty/con_driver.h"
+#include "version.h"
+#include "arch/cpu.h"
+#include "mm/pmm.h"
+#include "smp/smp.h"
+#include "drivers/char/serial.h"
+
+// The butterfly-N. Two arrays of the same shape: `art[]` is the glyph
+// rows, `col[]` is the per-cell colour (P = purple = CON_LMAGENTA for
+// the N strokes + body, R = red = CON_LRED for the wings/spots). Both
+// checked in; iterate the glyphs freely, keep the two arrays aligned.
+static const char *art[] = { /* ~9 rows, box/block glyphs */ };
+static const char *col[] = { /* same shape: 'P' / 'R' / ' ' */ };
+
+static void put_line_coloured(const char *s, const char *c) {
+    for (int i = 0; s[i]; i++) {
+        uint8_t fg = (c && c[i] == 'P') ? CON_LMAGENTA
+                   : (c && c[i] == 'R') ? CON_LRED : CON_LRED;
+        con_driver_active()->putc_attr(s[i], fg);
+    }
+    con_driver_active()->putc_attr('\n', CON_LRED);
+}
+
+void banner_show(void) {
+    struct con_driver *cd = con_driver_active();
+    if (!cd) { return; }
+    cd->clear();
+
+    for (int i = 0; art[i]; i++) { put_line_coloured(art[i], col[i]); }
+
+    char brand[49]; cpu_brand_string(brand);
+    char feats[160]; cpu_feature_string(feats, sizeof feats);
+    uint64_t mib_total = pmm_total_frame_count() * 4096ull >> 20;
+    uint64_t mib_free  = pmm_free_frame_count()  * 4096ull >> 20;
+
+    // "NeoOS" wordmark in red with a purple 'N', then the panel lines,
+    // all CON_LRED. Use a small printf-to-console helper or format by
+    // hand (kernel has no console printf -- add a tiny one in banner.c
+    // that writes through con_driver_active()->putc_attr).
+    banner_printf(CON_LRED, "\n  NeoOS %s (%s)\n", NEOOS_VERSION, NEOOS_GITREV);
+    banner_printf(CON_LRED, "  %s\n", brand[0] ? brand : "unknown CPU");
+    banner_printf(CON_LRED, "  %d cores  -  %lu MiB free / %lu MiB\n",
+                  smp_online_count(), mib_free, mib_total);
+    banner_printf(CON_LRED, "  %s\n\n", feats);
+
+    // Also to serial, one line, as a REQUIRED_MARKER:
+    serial_write_string("[banner] NeoOS "); serial_write_string(NEOOS_VERSION);
+    serial_write_string(" | "); serial_write_string(brand);
+    serial_write_string(" | "); /* cores, mib, feats */
+    serial_write_string(" shown\n");
+}
+```
+
+`banner_printf` is a ~30-line varargs formatter supporting `%s %d %lu
+%c %%` (mirror `lib/`'s minimal printf) writing through
+`con_driver_active()->putc_attr(ch, fg)`.
+
+- [ ] **Step 4: `Makefile` — git rev**
+
+```make
+NEOOS_GITREV := $(shell git describe --always --dirty --tags 2>/dev/null || echo unknown)
+CFLAGS += -DNEOOS_GITREV='"$(NEOOS_GITREV)"'
+```
+Put it near `CFLAGS :=`. `NEOOS_GITREV` changes per commit, so
+`kernel/kernel.o` (and anything including `version.h`) rebuilds when it
+does — acceptable; only `banner.c` includes `version.h`.
+
+- [ ] **Step 5: `kmain` — show it**
+
+Right after Task 2's `con_driver_select()` + the selftests, replacing
+the bare `console_write("NeoOS booted\n")`:
+
+```c
+banner_show();
+```
+The kernel selftests that follow are serial-only, so the banner stays
+on screen until init / TERM writes.
+
+- [ ] **Step 6: test**
+
+`REQUIRED_MARKERS += "[banner]"` (prefix). `make test`: `[banner] …
+shown`, `[cpu] brand:`, `[cpu] features:` lines present and non-empty
+(under QEMU the brand is `"QEMU Virtual CPU version 2.5+"` or similar;
+features include `sse2 sse4.2`). Gauntlet 15/15. **Visual check:**
+`make run`, confirm the red/purple butterfly-N + panel render on the
+framebuffer and clear the screen first.
+
+- [ ] **Step 7: docs + commit**
+
+`README.md` — a line about the boot banner. `docs/stdlib.md` /
+`abi-compatibility.md` unaffected (kernel-internal). Commit
+`"M1c-2: boot banner -- butterfly-N logo, CPU brand/features, mem, cores"`.
+
+---
+
 ## Self-Review
 
 **Spec coverage (§2, §3, §9 M1c-2):**
@@ -386,27 +575,43 @@ byte-identical selftest lines). Gauntlet 15/15. Update
   Task 2. `console.c` loses the `fb.present` branch → Step 5.
 - Selftests `[fbdev]` + `[con]` → Task 1 Step 5, Task 2 Step 7; added
   to `REQUIRED_MARKERS`.
-- **Deviation from spec §3:** the M1c-2 `con_driver` is streaming
-  (`putc`/`write`/`clear`), not the `putc(row,col,ch,attr)` +
-  `repaint(vc)` of the spec. Flagged in Global Constraints — the
-  grid-addressed ops need `struct vt_console`, which is M1c-3. Same end
-  state, staged.
+- **Deviation from spec §3:** the M1c-2 `con_driver` primitive is
+  `putc_attr(char, uint8_t fg)` (16-colour, streaming), not the
+  `putc(row,col,ch,attr)` + `repaint(vc)` of the spec. The
+  grid-addressed / repaint ops need `struct vt_console`, which is
+  M1c-3. Colour is carried now (not `putc(char)` alone) because Task 3
+  and M1c-3's SGR both need it — one interface change instead of two.
+- **New in this plan (user request, not in the M1c spec):** Task 3,
+  the boot banner — `banner_show()` after `con_driver_select()`:
+  clears the screen, draws a red/purple butterfly-N logo and an info
+  panel (`NEOOS_VERSION` + git rev, CPU brand string via CPUID
+  `0x80000002-4`, online cores, free/total MiB, feature list). Update
+  the M1c spec's decisions table to record it.
 
 **Placeholder scan:** every new struct and function is given in full.
 `fbcon_cols()`/`fbcon_rows()` getters are named with their one-line
-bodies implied ("expose the statics"). No "add error handling" — the
-early-boot `con_driver_active() == NULL` window is called out
-explicitly in Step 5. The commit messages are literal strings.
+bodies implied ("expose the statics"). `cpu_feature_string`'s body is
+a described bit-walk (leaf/register/mask spelled out), not "add the
+features" — the executor transcribes the standard CPUID feature bits.
+The `art[]`/`col[]` logo arrays are "checked in, iterate the glyphs,
+keep the two aligned" — deliberately left to implementation per the
+user's "iterate glyphs in impl" choice. No "add error handling" — the
+early-boot `con_driver_active() == NULL` window is called out in
+Task 2 Step 5 and Task 3 Step 3.
 
 **Type consistency:** `struct fb_device` / `struct fb_mode` /
 `struct fb_channel` fields are identical in the interface block and
 Task 1 Step 3's `vesafb_current`. `struct con_driver` fields
-(`name,priority,probe,init,putc,write,clear`) match between the
+(`name, priority, probe, init, putc_attr, clear`) match between the
 interface block, `fbcon_drv`, `vgacon_drv`, `dummycon_drv`, and
-`console.c`'s calls. `fb_device_active()` / `con_driver_active()`
-return the same-named pointer everywhere. `[fbdev]` and `[con]` marker
-strings match between the plan, the selftests, and `REQUIRED_MARKERS`.
+`console.c`. `CON_*` colour indices are used consistently
+(`CON_GREY` for plain text, `CON_LRED`/`CON_LMAGENTA` for the banner).
+`NEOOS_VERSION` / `NEOOS_GITREV` spelled the same in `version.h`, the
+Makefile, and `banner.c`. `cpu_brand_string(char[49])` /
+`cpu_feature_string(char*, int)` signatures match between `cpu.h` and
+`banner.c`.
 
 **Scope:** no VT layer, no `NEOOS_TIOCSACTIVE` change, no TERM change,
-no new syscalls. Two commits, each `make test`- and gauntlet-green with
-identical on-screen behaviour. Correct for M1c-2; the VT grid is M1c-3.
+no new syscalls. Three commits, each `make test`- and gauntlet-green.
+Tasks 1–2 keep on-screen behaviour identical; Task 3 adds the banner.
+The VT grid is M1c-3.

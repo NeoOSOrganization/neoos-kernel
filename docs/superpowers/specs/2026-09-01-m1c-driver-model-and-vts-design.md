@@ -374,3 +374,4 @@ layout. M1c-3 needs M1c-2's `con_driver`. M1c-4 needs M1c-3.
 | M1b-3's `NEOOS_TIOCSACTIVE` / `fb_owned` / `active_input_tty` | Deleted in M1c-4, replaced by `vt_active` + per-VT `kd_mode`. |
 | M1c-1 method | Scripted `git mv` + `sed` include rewrite; script not kept; serial log must be diff-identical. |
 | virtio-gpu / real GPU drivers | **Not in M1c.** The point is that `fb_device` leaves room for one; writing one is a separate future milestone. |
+| Boot banner | Added to M1c-2 (Task 3, user request): `console_clear()` + a red/purple butterfly-N logo + info panel (`NEOOS_VERSION` + `git describe`, CPU brand string via CPUID `0x80000002-4`, online cores, free/total MiB, CPU feature list), drawn right after `con_driver_select()`. The `con_driver` primitive is `putc_attr(char, uint8_t fg)` (16 colours) so the banner and M1c-3's SGR share one interface. |
