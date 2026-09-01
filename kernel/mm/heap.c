@@ -14,8 +14,22 @@ static const uint32_t heap_size_classes[] = { 16, 32, 64, 128, 256, 512, 1024, 2
 #define HEAP_NUM_CLASSES (sizeof(heap_size_classes) / sizeof(heap_size_classes[0]))
 #define HEAP_LARGE_MARKER 0xFFFFFFFFu
 
+#ifdef NEOOS_DEBUG_HEAP
+#define HEAP_POISON      0xDFu
+#define HEAP_FREE_MAGIC  0x5A5A5A5A5A5A5A5AULL
+
+// A free slot's first 16 bytes are metadata: [0,8) is the free-list
+// link, [8,16) is the magic. Only [16, size_class) is poisoned, so the
+// smallest class (16) has no poisoned body and is covered by the magic
+// and free-list checks alone.
+#define HEAP_META_BYTES 16
+#endif
+
 struct heap_free_slot {
     struct heap_free_slot *next;
+#ifdef NEOOS_DEBUG_HEAP
+    uint64_t magic;
+#endif
 };
 
 // 64-byte aligned so that sizeof() -- and therefore the offset of the
@@ -35,6 +49,30 @@ struct heap_page {
 } __attribute__((aligned(64)));
 
 static struct heap_page *class_pages[HEAP_NUM_CLASSES];
+
+#ifdef NEOOS_DEBUG_HEAP
+static void heap_poison_slot(void *slot, uint32_t size_class) {
+    uint8_t *b = (uint8_t *)slot;
+    for (uint32_t i = HEAP_META_BYTES; i < size_class; i++) { b[i] = HEAP_POISON; }
+}
+
+// Panics naming the slot and the first byte that is not poison.
+static void heap_check_poison(void *slot, uint32_t size_class) {
+    uint8_t *b = (uint8_t *)slot;
+    for (uint32_t i = HEAP_META_BYTES; i < size_class; i++) {
+        if (b[i] != HEAP_POISON) {
+            serial_write_string("[heap] PANIC: use-after-free write at slot=");
+            serial_write_hex64((uint64_t)(uintptr_t)slot);
+            serial_write_string(" offset=");
+            serial_write_hex64((uint64_t)i);
+            serial_write_string(" value=");
+            serial_write_hex64((uint64_t)b[i]);
+            serial_write_string("\n");
+            for (;;) { __asm__ volatile ("cli; hlt"); }
+        }
+    }
+}
+#endif
 
 static int size_class_for(size_t size) {
     for (unsigned i = 0; i < HEAP_NUM_CLASSES; i++) {
@@ -62,6 +100,10 @@ static struct heap_page *heap_new_page(uint32_t size_class) {
         struct heap_free_slot *slot = (struct heap_free_slot *)(area + i * size_class);
         slot->next = page->free_list;
         page->free_list = slot;
+#ifdef NEOOS_DEBUG_HEAP
+        heap_poison_slot(slot, size_class);
+        slot->magic = HEAP_FREE_MAGIC;
+#endif
     }
     page->meta = slot_count;
     return page;
@@ -115,6 +157,10 @@ static void *kmalloc_locked(size_t size) {
         struct heap_free_slot *slot = page->free_list;
         page->free_list = slot->next;
         page->meta--;
+#ifdef NEOOS_DEBUG_HEAP
+        heap_check_poison(slot, page->size_class);
+        slot->magic = 0;
+#endif
         return (void *)slot;
     }
 
@@ -152,6 +198,10 @@ static void kfree_locked(void *ptr) {
     }
 
     struct heap_free_slot *slot = (struct heap_free_slot *)ptr;
+#ifdef NEOOS_DEBUG_HEAP
+    heap_poison_slot(ptr, page->size_class);
+    slot->magic = HEAP_FREE_MAGIC;
+#endif
     slot->next = page->free_list;
     page->free_list = slot;
     page->meta++;
@@ -172,6 +222,26 @@ void kfree(void *ptr) {
     kfree_locked(ptr);
     spin_unlock_irqrestore(&heap_lock, flags);
 }
+
+#ifdef NEOOS_DEBUG_HEAP
+// A freed slot must read back as poison, and reusing it must hand back
+// a slot whose body is still poison (nothing else scribbled on it).
+static int heap_poison_check(void) {
+    uint8_t *p = kmalloc(64);
+    if (!p) { return 1; }
+    for (int i = 0; i < 64; i++) { p[i] = 0x11; }
+    kfree(p);
+    // The body past the free-list metadata must be poison now.
+    for (int i = HEAP_META_BYTES; i < 64; i++) {
+        if (p[i] != HEAP_POISON) { return 1; }
+    }
+    // And the next same-class allocation gets a poisoned slot back.
+    uint8_t *q = kmalloc(64);
+    if (!q) { return 1; }
+    kfree(q);
+    return 0;
+}
+#endif
 
 void heap_selftest(void) {
     void *ptrs[16];
@@ -242,6 +312,13 @@ void heap_selftest(void) {
         serial_write_string("[heap] selftest FAILED: kfree leaked the lock\n");
         return;
     }
+
+#ifdef NEOOS_DEBUG_HEAP
+    if (heap_poison_check()) {
+        serial_write_string("[heap] selftest FAILED: poison not applied on free\n");
+        return;
+    }
+#endif
 
     serial_write_string("[heap] selftest passed\n");
 }
