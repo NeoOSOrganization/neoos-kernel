@@ -276,6 +276,29 @@ void lock_selftest(void) {
         return;
     }
 
+    // CS0: prove the checker rejects a descending acquire at each rank
+    // converted from spin_lock_raw. Holding a high leaf rank, every
+    // lower rank must be refused -- otherwise the conversions made those
+    // locks *look* checked without the checking actually working there.
+    {
+        struct spinlock probe;
+        spin_init(&probe, LOCK_RANK_FBCON, "rank-probe");
+        uint64_t f = spin_lock_irqsave(&probe);
+        int bad = 0;
+        if (lock_rank_ok(LOCK_RANK_VT))    { bad = 1; }   // 251 under 254
+        if (lock_rank_ok(LOCK_RANK_PTY))   { bad = 1; }   // 252 under 254
+        if (lock_rank_ok(LOCK_RANK_DEVFS)) { bad = 1; }   // 253 under 254
+        if (lock_rank_ok(LOCK_RANK_RAND))  { bad = 1; }   // 250 under 254
+        if (lock_rank_ok(LOCK_RANK_FBCON)) { bad = 1; }   // equal rank is an inversion
+        // and the legal direction is still legal
+        if (!lock_rank_ok(LOCK_RANK_SERIAL)) { bad = 1; } // 255 above 254
+        spin_unlock_irqrestore(&probe, f);
+        if (bad) {
+            serial_write_string("[lock] selftest FAILED: rank check wrong at a CS0 rank\n");
+            return;
+        }
+    }
+
     serial_write_string("[lock] selftest passed\n");
 }
 
