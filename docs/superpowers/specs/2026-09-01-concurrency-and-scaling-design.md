@@ -336,6 +336,63 @@ lookups.
 
 ## CS3 — Stress matrix and chaos harness
 
+### OPEN BUG found during CS3: one extra file on the disk breaks `lstat`
+
+**Status: reproducible, root cause unknown, nothing fixed yet.**
+
+Adding a single **unused** binary to the FAT image — `FORKSTORM.ELF`,
+20,816 bytes, `mcopy`'d to `::BIN/` and **not** referenced from
+`/ETC/INITTAB`, so it never executes — makes `stattest` fail in most
+boots.
+
+**Repro:** add any comparable file to the `$(DISK_IMG)` mcopy list, then
+`tools/gauntlet.sh 8 2`.
+
+| disk image | `[stattest] ALL PASSED` |
+|---|---|
+| unchanged | 8/8 |
+| one extra unused file | 2/8 (75% miss) |
+
+**Signature.** Always the same place, and deterministic within a boot:
+
+```
+[stattest] relative stat passed
+[process] task exited, pid=0x10 code=0x0
+```
+
+`stattest` completes five checks, then dies inside `check_lstat`, whose
+first call is `lstat("/HELLO.TXT")`. It exits with status **0** and
+prints neither its next `passed` line nor a `FAILED` line — so
+`main()` never reached its `printf("[stattest] ALL PASSED")` at all,
+and nothing reported why.
+
+**What was ruled out**, each by direct experiment rather than argument:
+
+- *Not KVM.* Reproduces under plain TCG `-cpu Nehalem`.
+- *Not host load.* Reproduces at `CONC=1`; pristine HEAD passes 8/8 with
+  zero retries on the same machine minutes apart.
+- *Not `-DNEOOS_TEST_HOOKS`.* A hookless build boots and passes.
+- *Not the test running.* `FORKSTORM.ELF` is absent from `INITTAB`.
+- *Not `forkstorm`'s own file opens or its process churn.* Removing each
+  in turn changed nothing.
+- *Not a missing file.* `HELLO.TXT` is present in the image (24 bytes).
+- *Not serial interleaving or the VT serial mirror.* Both were
+  investigated and separately improved; neither changed this.
+
+**Why it matters beyond the test.** The failing operation is an ordinary
+`lstat` on a file in the FAT root, and the only variable is unrelated
+data elsewhere on the volume. That points at the FAT/VFS layer being
+sensitive to on-disk layout — a cluster or directory-entry boundary
+crossing — rather than at anything in the concurrency work. A filesystem
+that mis-serves a stat depending on what *other* files exist will break a
+shell far more often than a stress test does.
+
+**Where it sits.** `userland/forkstorm.c` is committed but deliberately
+**not wired into the Makefile**, so the tree stays green and the trigger
+stays available: re-adding its five Makefile sites reproduces the bug on
+demand. Wiring it in is blocked on this being understood.
+
+
 Reusable userland binaries under `userland/`, each with its own
 `[xxxtest] ALL PASSED` marker in `REQUIRED_MARKERS`:
 
