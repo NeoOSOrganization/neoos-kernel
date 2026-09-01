@@ -98,8 +98,8 @@
 // Sits BELOW FBCON because rendering calls into the con_driver
 // underneath it. vt_switch and vt_scroll take t->lock then this, from
 // the keyboard IRQ holding nothing else, so the order is the same on
-// every path. The panic path (vt_panic_reset) takes NEITHER -- see
-// vt.c's panic-mode comment.
+// every path. Only the panic path takes neither, gated on the
+// vt_enter_panic() latch -- see vt.c's panic-mode comment.
 #define LOCK_RANK_VT        251
 // The CSPRNG pool. A leaf: rand_bytes holds it across arithmetic only,
 // and takes nothing under it. It had LOCK_RANK_SERIAL, which is not the
@@ -151,6 +151,20 @@ int lock_rank_ok(uint8_t rank);
 // before cpu_local_init() has installed a GS base -- which serial
 // output needs, since it runs from the very first line of kmain. Only
 // for leaf locks that never nest inside another lock.
+//
+// There are exactly two legitimate uses, and CS5.4 adds a CI check that
+// fails review on any third:
+//   1. serial.c -- runs before cpu_local_init().
+//   2. The panic path: fbcon_acquire() when fbcon_panicking, and vt.c
+//      which skips its lock entirely when vt_panicking. The panicking
+//      CPU may hold any lock, so a checked acquire would call
+//      lock_panic() from inside a panic and recurse. Both latches are
+//      set by the exception handler (fbcon_enter_panic / vt_enter_panic)
+//      and never by the reset functions themselves -- vt_selftest calls
+//      vt_panic_reset in ordinary context, and latching there would
+//      silently disable VT locking for the rest of the boot.
+// Everything else was converted in CS0; a registered-but-always-raw
+// lock is exactly as invisible to the checker as an unregistered one.
 uint64_t spin_lock_raw(struct spinlock *l);
 void     spin_unlock_raw(struct spinlock *l, uint64_t flags);
 

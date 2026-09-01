@@ -103,29 +103,58 @@ localize.
 Two reads, no new subsystems. Both resolve questions that change what
 later sub-milestones have to do.
 
-### CS0.1 — Do the kernel VTs have any locking at all?
+### CS0.1 — Do the kernel VTs have any locking at all? — **RESOLVED: no, and it was a real bug**
 
-`kernel/tty/{console,con_driver,kvt}.c` landed in M1c-2/M1c-3 and
-**contain zero `spin_init` / `LOCK_RANK_*` / `spin_lock` references**
-**[verified: grep returns nothing across all three files]**. That is
-not "uses raw locks like pty" — it is no locking visible at the source
-level, in code reached from a keyboard IRQ (the Alt+Fn VT-switch
-intercept) and from every console writer.
+**Answer: confirmed, fixed in commit `e1868ec`.** The audit looked in
+the wrong file first. `console.c`, `con_driver.c` and `kvt.c` do contain
+no locking — but that is by design for `kvt.c` ("PURE logic -- no
+rendering, no locks"), and the state that actually needs guarding lives
+in **`kernel/tty/vt.c`**, which the original document never examined.
+`vt.c` had no lock either.
 
-The question this must answer: **does a VT switch ever race a
-concurrent console-output writer on another CPU?** If `con_driver`'s
-vtable dispatches into `fbcon.c`, the race may already be partly
-covered by `fbcon_lock` — but that is a call-path read, not an
-assumption to make. If `kvt.c`'s own state (the active-VT index, the
-`params[8]` escape-parser state **[verified: `kvt.h:44`]**) is mutated
-from both the input path and a redraw path with no lock, this is a
-finding as serious as anything already known about, and it gets a
-rank-checked lock plus a regression test in CS2.
+Three races, all reachable:
 
-**Test if confirmed real:** an Alt+Fn VT-switch-injection loop on one
-core racing a console writer targeting the previously-active VT on
-another, asserting no torn writes and no crash under CS1's poisoned
-heap.
+- **`vt_switch`** wrote the global `vt_active` and ran `render_full`
+  over a VT's diff cache holding nothing, concurrently with a writer on
+  another CPU inside `render_diff` on the same cache under `t->lock`.
+  The consequence is not a transient tear: `render_diff` marks cells
+  clean in `shown[]` as it paints them, so cells painted onto a screen
+  a concurrent switch has just cleared are **never repainted**.
+- **`vt_scroll`** mutated the active VT's `struct kvt` holding nothing,
+  racing `kvt_feed` under `t->lock`.
+- **`vt_active`** was a plain `int` read by six functions with no
+  barrier.
+
+Both unlocked paths are reached from the keyboard IRQ
+(`input.c:97,106`) and — usefully — *before* `input.lock` is taken, so
+they hold nothing, which is what made the fix tractable.
+
+What was **not** broken: per-VT writes were already serialized, because
+`tty_obj_write` holds `t->lock` across `vt_backend_output`.
+
+**The fix:** `vt_lock` at `LOCK_RANK_VT` (251), guarding `vt_active`,
+`shown`/`shown_valid` and `kd_mode`. It sits above `LOCK_RANK_TTY` and
+below `LOCK_RANK_FBCON`, so the write path (`t->lock` → render → fbcon)
+is ascending; `vt_switch` and `vt_scroll` take `t->lock` then `vt_lock`
+from the IRQ in the same order. `waitq_wake_all` moved outside both,
+since WAITQ ranks below VT.
+
+**Evidence, not assertion.** `vt_stress_selftest` (in `vt.c`, run after
+`smp_start_aps()` since it needs a second core) flips VTs on CPU 1
+against a writer on the boot CPU and counts every `render_diff` that
+paints a VT which is not the active one — impossible under the lock,
+and guaranteed by every call site otherwise. It fired on 13/13 unlocked
+runs and passes 20/20 locked, with gauntlet 15/15.
+
+**A trap worth recording for CS1 and later.** The first version of the
+fix latched `vt_panicking` inside `vt_panic_reset`. But `vt_selftest`
+calls that reset in ordinary context, so a *selftest* silently disabled
+VT locking for the entire rest of the boot — and the detector correctly
+reported the unlocked renders that followed, which read at first like a
+broken test. The latch now lives in `vt_enter_panic()`, called only
+from the exception handler, exactly as `fbcon_enter_panic()` is. **A
+one-way "we are panicking" flag must never be set by a function a test
+can call.**
 
 ### CS0.2 — `spin_lock_raw` bypasses the rank checker in five files
 
@@ -159,6 +188,25 @@ confirm no call site runs before `cpu_local_init()`, then swap raw →
 checked at every site. Give `rand_lock` its own rank, or justify the
 sharing with a comment in the `TTY`/`DRIVER` style. Serial keeps its
 documented exception.
+
+**RESOLVED** (commits `7ff4323`, `511a4cb`, `efcdce2`, `76b2e39`).
+Two findings worth keeping:
+
+- **None of the four had the before-`cpu_local_init()` excuse.**
+  `con_driver_select()` runs at `kernel.c:111`, after
+  `cpu_local_init_bsp()` at line 93; `pty_init()` (141) and
+  `rand_init()` (147) are later still. Only `serial.c` genuinely
+  predates per-CPU state.
+- **`fbcon` needed a raw path anyway, for a different reason.**
+  `vt_panic_reset()` runs from `exception_dump_and_halt`, and the
+  panicking CPU may hold any lock, so a checked acquire there would
+  call `lock_panic()` from inside a panic and recurse. `fbcon_acquire`
+  picks raw or checked from the `fbcon_enter_panic()` latch; `vt.c`
+  skips its lock entirely under the same condition. Verified by hand
+  with a deliberate page fault, since `make test` never faults: the
+  dump paints with no rank-inversion panic.
+
+`rand_lock` moved to its own `LOCK_RANK_RAND` (250).
 
 ---
 

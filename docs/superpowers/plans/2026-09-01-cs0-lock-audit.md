@@ -1,5 +1,14 @@
 # CS0 — VT-layer locking and the `spin_lock_raw` audit — Implementation Plan
 
+> **Executed 2026-09-01. All seven tasks landed (`7ff4323`..`efcdce2`,
+> `76b2e39`, `e1868ec`); see the spec's CS0 section for what the audit
+> turned up. Two defects in this plan were corrected during execution
+> and are fixed inline below: `make run-headless` does not exist, and
+> the Task 5 test as originally written was both misplaced (it ran
+> pre-SMP, where its helper thread could never run) and vacuous (it
+> called `render_full` before comparing, which rebuilds the very cache
+> it was checking).**
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Put the kernel virtual-terminal layer under a lock (it has
@@ -513,7 +522,14 @@ panic:
 ```
 
 ```bash
-make run-headless 2>&1 | tail -40
+# there is no `make run-headless`; drive QEMU with the same flags `test` uses
+make clean-kernel fresh-disks iso disk-image
+timeout 90 qemu-system-x86_64 -cpu Nehalem -smp 4 -boot order=d \
+  -cdrom build/neoos.iso \
+  -drive file=build/disk.img,format=raw -drive file=build/disk2.img,format=raw \
+  -vga std -no-reboot -display none -serial file:build/panic.log
+grep -c "lock. PANIC" build/panic.log     # expect 0
+grep -A5 "\[exception\]" build/panic.log
 ```
 
 Expected: the `[exception] Page Fault` dump appears with its register
@@ -838,7 +854,14 @@ Re-run Task 4 Step 6's temporary fault, since `vt_panic_reset` changed:
 ```
 
 ```bash
-make run-headless 2>&1 | tail -40
+# there is no `make run-headless`; drive QEMU with the same flags `test` uses
+make clean-kernel fresh-disks iso disk-image
+timeout 90 qemu-system-x86_64 -cpu Nehalem -smp 4 -boot order=d \
+  -cdrom build/neoos.iso \
+  -drive file=build/disk.img,format=raw -drive file=build/disk2.img,format=raw \
+  -vga std -no-reboot -display none -serial file:build/panic.log
+grep -c "lock. PANIC" build/panic.log     # expect 0
+grep -A5 "\[exception\]" build/panic.log
 ```
 
 Expected: the exception dump paints, with no `[lock] PANIC` preceding
