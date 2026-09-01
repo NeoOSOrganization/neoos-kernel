@@ -255,78 +255,84 @@ suite. That is the clean starting point CS2's regression tests are
 written against — and it means any heap panic CS2/CS3 produces is new
 information, not pre-existing noise.
 
-## CS2 — Named regressions
+## CS2 — Named regressions — **DONE**
 
-Bugs visible from a straight read — each is either stated in the
-code's own comments or contradicted by them. Numbering follows the
-source document's A1.1–A1.7 so cross-references keep working.
+Landed 2026-09-01 (`5990938`, `1a2c0b6`, `da08e46`, `463514c`,
+`fc7b0e4`). Four items needed work; three did not.
 
-**CS2.1 — `pid_lookup` is genuinely lockless on an SMP kernel.**
-`kernel/sched/pid_alloc.c`'s `pid_lookup_internal` walks the radix tree
-with zero locking, and the comment says why: *"RCU read lock would go
-here in full implementation. For now, single-CPU so no lock needed for
-read."* NeoOS is not single-CPU. `pid_insert_internal` publishes new
-radix nodes with plain stores — no allocate-barrier-publish sequencing
-— so a `pid_lookup` on another core can dereference a node
-mid-construction. This is the same class the lifetime milestone already
-fixed for `proc_table`/`thread_table`; it just was not applied here.
-*Fix:* copy the existing refcounted-lookup pattern (CS5.5). *Test:*
-fork/exec continuously from N threads across all online CPUs while
-another thread does `wait4`/`kill` PID lookups, under CS1's poisoning
-so a torn read crashes instead of corrupting.
+**CS2.1 — the lockless `pid_lookup` was dead code.** This was the source
+document's headline finding, and it dissolved on inspection. The race is
+real as written — `pid_lookup_internal` walks shared radix nodes with no
+lock, `pid_insert_internal` publishes them with plain stores — but it is
+**unreachable**: `pid_insert`, `pid_remove` and `pid_lookup` had no
+callers anywhere in the tree, so `root` was permanently `NULL` and every
+lookup returned on its first line. Real process lookup is
+`proc_table_lookup`'s bucketed hash: per-bucket locks, refcounted
+results since the SMP-lifetime milestone. **Deleted rather than
+repaired**, along with `pid_alloc_specific` and its sole caller
+`proc_table_alloc_pid_zero`, which could never have worked — it passed
+`0` to a function whose first line rejects `pid <= 0`.
+*Worth recording because a future reader will otherwise re-derive the
+same alarm from the same comment.*
 
-**CS2.2 — `sys_poll.c`'s two caps disagree.** `POLL_MAX_FDS` is 16 but
-`select()`'s `FD_SETSIZE` is 1024 and `nfds` up to 1024 is accepted
-**[verified: `sys_poll.c:18,23,96,109`]**. The collection loop is
-`for (fd = 0; fd < nfds && n < POLL_MAX_FDS; fd++)` — so `select()` on
-more than 16 *interesting* fds silently drops the rest, with no error
-and no truncation flag. A correctness bug today, independent of
-scaling. *Test:* `select()` with 20 non-contiguous ready fds across
-`[0, 100)`; assert every one is reported.
+**CS2.2 — `select()` silently dropped ready fds.** Reproduced exactly:
+`select reported 16 of 20 ready`. It now counts the caller's set bits,
+allocates for that many, and reports all of them.
+**Deviation from this spec, deliberate:** the dynamic array came forward
+from CS4, because the correctness fix is not separable from it — the bug
+*is* the fixed array, and the alternatives without removing it are
+"silently drop" (the bug) or `-EINVAL`, which breaks a shell just as
+badly and is not Linux's behaviour. **CS4 still owns** `poll()`'s own
+`POLL_MAX_FDS` cap and the `FD_TABLE_MAX` bound.
 
-**CS2.3 — rank-checker coverage.** Once CS0.2's raw→checked swaps land,
-an adversarial selftest in `waitq_lock_selftest`'s style acquires a
-PTY-rank lock while holding a higher-numbered one and asserts the panic
-fires; repeated for the DEVFS and FBCON ranks.
+**CS2.4 — the waitq exit-vs-drain race now has a regression test**, and
+proving it discriminating took two attempts. A deterministic double
+`thread_put` in the drain crashes with *or* without the churn, since
+ordinary selftest threads already exercise that path. Injecting the
+**real** race instead — removing `thread_wait_off_cpu` — gives the
+result that matters:
 
-**CS2.4 — the waitq double-free is diagnosed but not regression-tested.**
-The comment at the bottom of `selftest_thread` in `waitq.c` describes a
-real bug found from a `free_list` pointer of `0xfffffffc`: a thread
-freeing itself while still executing on its own about-to-be-freed
-kernel stack, with a timer interrupt on another CPU running the same
-free path via `idle_entry`'s kzombies drain. The fix is in place;
-nothing forces the race to recur. *Test:* spawn and exit hundreds of
-short-lived kernel threads back-to-back across all CPUs with the tick
-rate raised (CS3's `NEOOS_DEBUG_HZ`), asserting via CS1's poisoning
-that no slot is ever double-freed.
+| | outcome |
+|---|---|
+| race reintroduced, churn **off** | clean boot, zero panics — invisible |
+| race reintroduced, churn **on** | `[heap] PANIC: use-after-free write` |
 
-**CS2.5 — `fd_table_dup2`'s race is time-bombed, not fixed.** Its
-comment says outright: *"NeoOS userland is effectively single-threaded
-per fd table today; revisit if that changes."* `clone()` does not exist
-yet **[verified: no `sys_clone` in `kernel/syscall/`]**, so this stays a
-**blocking pre-condition recorded against the `clone()` milestone**, not
-a follow-up to it. *Test, once `clone()` exists:* two threads sharing an
-fd table racing `dup2`/`close`, checking via `fstat` that a target fd is
-never briefly attached to neither object nor to two.
+That is CS1's poisoned heap doing precisely the job it was built for.
 
-**CS2.6 — `tlb_shootdown`'s `shootdown_busy` is an unchecked global
-spin, by design.** The comment explains why it cannot be a rank-checked
-spinlock (the ack-wait needs interrupts on and no lock held) — but that
-also makes it invisible to the lock tooling and a single global
-bottleneck for every address-space mutation on the machine. *Test:*
-N threads (N ≥ CPU count) looping `mmap → touch → mprotect → munmap` on
-disjoint regions; assert (a) `"[tlb] shootdown timed out; continuing"`
-never fires under normal load — that line appearing outside a
-deliberately wedged CPU means correctness has quietly degraded to
-"continuing anyway" — and (b) `pmm_free_frame_count()` returns to its
-starting value, proving no deferred frame leaked or was double-freed.
-**Re-diff `vma.c` first**: commit `7313b77` ("mm: reclaim deferred
-frames, keep mprotect's pages, single-thread exec") touched exactly
-these paths and may already cover part of assertion (b).
+**CS2.6 — the TLB shootdown holds up under contention.** 4 processes ×
+150 rounds of mmap/touch/mprotect/munmap: the timeout path never fires,
+and no frames are lost. `TESTHOOK_PMM_FREE` exposes the free-frame count
+to userland.
+**One honest limit**, found by trying to prove the frame assertion
+fires: every leak big enough to cross its threshold kills something
+first — disabling the deferred `pmm_free` starves the machine before the
+test runs, and leaking one frame in four gets the test process killed
+mid-storm. The count is a reported number and a second line of defence;
+the child-status checks are what actually catch a broken deferred free.
 
-**CS2.7 — VT-switch locking**, if CS0.1 confirms it is real.
+**CS2.3 and CS2.7 were already delivered by CS0** — the adversarial
+rank-checker selftest (`6b12e35`) and the VT-switch locking fix
+(`e1868ec`).
 
----
+**CS2.5 remains deferred.** `clone()` still does not exist, so
+`fd_table_dup2`'s race is unreachable; it stays a blocking pre-condition
+recorded against that milestone.
+
+**A CS0 defect found during CS2 and fixed here:** `vt_stress_selftest`'s
+call site in `kernel.c` was never committed. CS0 Task 5 added it, then
+reverted `kernel.c` to remove a temporary fault injection and took the
+call with it — so the VT stress test had not run since. Both stress
+selftests are now wired, and placed **before** `spawn("/SBIN/INIT.ELF")`
+rather than after: run alongside the userland workload, `vt_stress`
+cleared the screen under TERM and failed its render check.
+
+**Also swept, at the user's request** (`1a2c0b6`): 23 dead functions
+from earlier kernel eras, found with linker garbage collection rather
+than grep — grep cannot see vtable or assembly callers and wrongly
+flagged `vgacon_putc`, `fbcon_clear` and `isr_handler`, all live. Mostly
+the streaming character-at-a-time console API from before M1b/M1c, plus
+`thread_table_alloc_tid`/`thread_table_lookup` superseded by refcounted
+lookups.
 
 ## CS3 — Stress matrix and chaos harness
 
