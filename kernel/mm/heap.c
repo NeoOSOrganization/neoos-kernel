@@ -41,11 +41,24 @@ struct heap_free_slot {
 // attribute the header is 24 bytes and every slot lands on an 8-mod-16
 // address (observed: #GP in schedule()'s fxrstor of a heap-allocated
 // struct thread).
+#ifdef NEOOS_DEBUG_HEAP
+// Largest slot count any class can produce: the smallest class is 16
+// bytes over a 4096-byte frame.
+#define HEAP_MAX_SLOTS (PMM_FRAME_SIZE / 16)
+#endif
+
 struct heap_page {
     struct heap_page *next;
     struct heap_free_slot *free_list;
     uint32_t size_class; // bytes per slot, or HEAP_LARGE_MARKER for a large (multi-page) allocation
     uint32_t meta;        // size-class pages: free slot count. Large allocations: the pmm buddy order.
+#ifdef NEOOS_DEBUG_HEAP
+    // Requested size per slot index, so kfree can find where the
+    // redzone starts. In the header rather than in front of each slot:
+    // a per-slot header would shift every slot off the 64-byte
+    // alignment that fxsave/XSAVE buffers in heap objects depend on.
+    uint16_t req[HEAP_MAX_SLOTS];
+#endif
 } __attribute__((aligned(64)));
 
 static struct heap_page *class_pages[HEAP_NUM_CLASSES];
@@ -63,6 +76,39 @@ static void heap_check_poison(void *slot, uint32_t size_class) {
         if (b[i] != HEAP_POISON) {
             serial_write_string("[heap] PANIC: use-after-free write at slot=");
             serial_write_hex64((uint64_t)(uintptr_t)slot);
+            serial_write_string(" offset=");
+            serial_write_hex64((uint64_t)i);
+            serial_write_string(" value=");
+            serial_write_hex64((uint64_t)b[i]);
+            serial_write_string("\n");
+            for (;;) { __asm__ volatile ("cli; hlt"); }
+        }
+    }
+}
+
+#define HEAP_REDZONE 0xBBu
+
+static uint32_t heap_slot_index(struct heap_page *page, void *slot) {
+    uint8_t *area = (uint8_t *)page + sizeof(struct heap_page);
+    return (uint32_t)(((uint8_t *)slot - area) / page->size_class);
+}
+
+static void heap_set_redzone(struct heap_page *page, void *slot, uint32_t req) {
+    uint8_t *b = (uint8_t *)slot;
+    page->req[heap_slot_index(page, slot)] = (uint16_t)req;
+    for (uint32_t i = req; i < page->size_class; i++) { b[i] = HEAP_REDZONE; }
+}
+
+static void heap_check_redzone(struct heap_page *page, void *slot) {
+    uint8_t *b = (uint8_t *)slot;
+    uint32_t req = page->req[heap_slot_index(page, slot)];
+    if (req == 0 || req > page->size_class) { return; }   // never allocated with a size
+    for (uint32_t i = req; i < page->size_class; i++) {
+        if (b[i] != HEAP_REDZONE) {
+            serial_write_string("[heap] PANIC: heap overrun past slot=");
+            serial_write_hex64((uint64_t)(uintptr_t)slot);
+            serial_write_string(" requested=");
+            serial_write_hex64((uint64_t)req);
             serial_write_string(" offset=");
             serial_write_hex64((uint64_t)i);
             serial_write_string(" value=");
@@ -126,6 +172,9 @@ static void *kmalloc_locked(size_t size) {
     if (size == 0) {
         return 0;
     }
+#ifdef NEOOS_DEBUG_HEAP
+    size_t requested = size;
+#endif
     if (size < sizeof(struct heap_free_slot)) {
         size = sizeof(struct heap_free_slot);
     }
@@ -160,6 +209,7 @@ static void *kmalloc_locked(size_t size) {
 #ifdef NEOOS_DEBUG_HEAP
         heap_check_poison(slot, page->size_class);
         slot->magic = 0;
+        heap_set_redzone(page, slot, (uint32_t)requested);
 #endif
         return (void *)slot;
     }
@@ -219,6 +269,8 @@ static void kfree_locked(void *ptr) {
         serial_write_string("\n");
         for (;;) { __asm__ volatile ("cli; hlt"); }
     }
+    heap_check_redzone(page, ptr);
+    page->req[heap_slot_index(page, ptr)] = 0;
     heap_poison_slot(ptr, page->size_class);
     slot->magic = HEAP_FREE_MAGIC;
 #endif
@@ -268,6 +320,13 @@ static int heap_poison_check(void) {
     uint8_t *r2 = kmalloc(128);
     if (!r2) { return 1; }
     kfree(r2);
+
+    // A 40-byte request lands in the 64 class; bytes [40,64) are
+    // redzone and must survive an allocation that writes exactly 40.
+    uint8_t *z = kmalloc(40);
+    if (!z) { return 1; }
+    for (int i = 0; i < 40; i++) { z[i] = 0x77; }
+    kfree(z);   // panics if the redzone was clobbered
     return 0;
 }
 #endif
