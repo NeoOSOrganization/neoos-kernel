@@ -7,6 +7,7 @@
 #include "drivers/input/evdev.h"
 #include "drivers/video/fb.h"
 #include "tty/pty.h"
+#include "tty/vt.h"
 #include <stddef.h>
 
 // Forward declarations of file_ops implementations
@@ -135,6 +136,24 @@ static int tty_open(struct file_descriptor *f) {
     return 0;
 }
 
+// /dev/tty0 .. /dev/tty6 all share vt_file_ops; what distinguishes them
+// is the VT index, which is the digit at the end of the device name.
+// devfs is the only place that knows those names, so the mapping lives
+// here and vt.c reads the result out of f->priv. Index 0 (/dev/tty0)
+// means "the active VT", resolved per call.
+static int vt_dev_open(struct file_descriptor *f) {
+    const struct devfs_dev *dev = f->vn ? (const struct devfs_dev *)f->vn->fs_private : 0;
+    int index = 0;
+    if (dev && dev->name) {
+        const char *n = dev->name;
+        while (n[1]) { n++; }                       // last character
+        if (*n >= '0' && *n <= '9') { index = *n - '0'; }
+    }
+    f->ops  = &vt_file_ops;
+    f->priv = (void *)(long)index;
+    return 0;
+}
+
 // Device table using the new devfs_dev structure with file_ops
 static const struct devfs_dev devices[] = {
     // Format: { name, type, fops, open }
@@ -150,6 +169,17 @@ static const struct devfs_dev devices[] = {
     { "fb0",     VNODE_DEVICE, &fb_file_ops,  fb_open },
     { "ptmx",    VNODE_DEVICE, NULL,          ptmx_open },
     { "kmsg",    VNODE_DEVICE, &kmsg_file_ops, kmsg_open },
+    // The six kernel virtual terminals, plus tty0 = whichever is
+    // active. Appended here rather than next to CONSOLE for the same
+    // reason fb0/ptmx/kmsg were: inode ids are positional and the
+    // input/* ids are hardcoded in devfs_lookup / devfs_readdir.
+    { "tty0",    VNODE_DEVICE, &vt_file_ops,  vt_dev_open },
+    { "tty1",    VNODE_DEVICE, &vt_file_ops,  vt_dev_open },
+    { "tty2",    VNODE_DEVICE, &vt_file_ops,  vt_dev_open },
+    { "tty3",    VNODE_DEVICE, &vt_file_ops,  vt_dev_open },
+    { "tty4",    VNODE_DEVICE, &vt_file_ops,  vt_dev_open },
+    { "tty5",    VNODE_DEVICE, &vt_file_ops,  vt_dev_open },
+    { "tty6",    VNODE_DEVICE, &vt_file_ops,  vt_dev_open },
     // Static parent for the dynamic /dev/pts/N entries (Task 6/7).
     // Must stay last: DEVFS_PTS_INODE == DEVFS_COUNT.
     { "pts",     VNODE_DIR,    NULL,          NULL },
@@ -474,17 +504,18 @@ const struct vfs_ops devfs_ops = {
     .readdir    = devfs_readdir,
 };
 
-// CONSOLE and TTY are the same underlying terminal; NULL and ZERO are
-// not terminals and must report -ENOTTY, or isatty() would claim a
-// redirect to /dev/null was a tty.
+// CONSOLE and TTY are the same underlying terminal, and so is every
+// /dev/ttyN virtual terminal; NULL and ZERO are not terminals and must
+// report -ENOTTY, or isatty() would claim a redirect to /dev/null was a
+// tty.
 int devfs_vnode_is_tty(struct vnode *vn) {
     if (!vn || vn->type != VNODE_DEVICE) { return 0; }
     if (vn->inode_id == 0) { return 0; }  // Root is not a device
     if (vn->inode_id >= DEVFS_DYN_BASE) { return 1; }  // a pts slave is a tty
     uint64_t dev_idx = vn->inode_id - 1;
     if (dev_idx >= DEVFS_COUNT) { return 0; }
-    return name_eq(devices[dev_idx].name, "CONSOLE") ||
-           name_eq(devices[dev_idx].name, "TTY");
+    return devices[dev_idx].fops == &tty_file_ops ||
+           devices[dev_idx].fops == &vt_file_ops;
 }
 
 void devfs_selftest(void) {

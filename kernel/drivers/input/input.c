@@ -1,6 +1,8 @@
 #include "drivers/input/input.h"
 #include "drivers/input/keyboard.h"
+#include "drivers/input/keymap_us.h"
 #include "tty/tty.h"
+#include "tty/vt.h"
 #include "drivers/char/timer.h"
 #include "drivers/char/rtc.h"
 #include "drivers/char/serial.h"
@@ -82,6 +84,27 @@ static void get_timestamp(int64_t *tv_sec, int64_t *tv_usec) {
 void input_key_event(const struct key_event *e) {
     if (!e || e->keycode == 0) {
         return;  // Unmapped scancode, ignore
+    }
+
+    // VT hotkeys are consumed entirely, before anything else sees them:
+    // no evdev event, no tty character. That is what Linux does, and it
+    // is the only behaviour that makes sense -- Alt+F2 is a request to
+    // the console layer, not a keystroke for whatever is reading.
+    // Checked ahead of the grab, too: an evdev client holding a grab
+    // must not be able to lock the user out of switching away from it.
+    if (e->pressed && (e->mods & (MOD_LALT | MOD_RALT)) &&
+        e->keycode >= KEY_F1 && e->keycode < KEY_F1 + VT_COUNT) {
+        vt_switch(e->keycode - KEY_F1);
+        return;
+    }
+    if (e->pressed && (e->mods & (MOD_LSHIFT | MOD_RSHIFT)) &&
+        (e->keycode == KEY_PAGEUP || e->keycode == KEY_PAGEDOWN)) {
+        int rows = 25;
+        vt_active_geometry(0, &rows);
+        int half = rows / 2;
+        if (half < 1) { half = 1; }
+        vt_scroll(e->keycode == KEY_PAGEUP ? -half : +half);
+        return;
     }
 
     int64_t should_call_tty = 0;
@@ -307,12 +330,42 @@ void evdev_client_state_bitmap(uint8_t *out, uint64_t len) {
     evdev_client_key_bitmap(out, len);
 }
 
-// Test hook: inject a key event
+// Test hook: inject a key event.
+//
+// The injected stream carries its own modifier state. keyboard_decode's
+// `mods` are built from SCANCODES and an injected key never goes near
+// the 8042, so a test that wants Alt+F2 has to be able to press Alt
+// first and have the F2 event see it. Tracked here, one static, in the
+// same make/break shape the real decoder uses.
+//
+// This is also why `mods` must be assigned unconditionally below rather
+// than left to whatever was on the stack: a stray MOD_LALT in an
+// uninitialised field would make an injected KEY_F2 switch VTs.
+static uint32_t inject_mods;
+
+static uint32_t inject_mod_bit(uint16_t keycode) {
+    switch (keycode) {
+    case KEY_LSHIFT: return MOD_LSHIFT;
+    case KEY_RSHIFT: return MOD_RSHIFT;
+    case KEY_LCTRL:  return MOD_LCTRL;
+    case KEY_RCTRL:  return MOD_RCTRL;
+    case KEY_LALT:   return MOD_LALT;
+    case KEY_RALT:   return MOD_RALT;
+    default:         return 0;
+    }
+}
+
 void input_inject_key(uint16_t keycode, int pressed) {
     struct key_event e;
     e.keycode = keycode;
     e.pressed = pressed ? 1 : 0;
     e.raw_scan = 0;  // No raw scancode for injected keys
+
+    uint32_t bit = inject_mod_bit(keycode);
+    if (bit) {
+        if (pressed) { inject_mods |= bit; } else { inject_mods &= ~bit; }
+    }
+    e.mods = inject_mods;
 
     // Map keycode back to ASCII if possible (simplified)
     // For testing: just support a few common keys

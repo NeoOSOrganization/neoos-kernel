@@ -2,6 +2,8 @@
 #include "tty/kvt.h"
 #include "tty/tty.h"
 #include "tty/con_driver.h"
+#include "fs/file.h"
+#include "sched/proc.h"
 #include "drivers/char/serial.h"
 #include "sync/waitq.h"
 #include "sync/lock.h"
@@ -170,6 +172,78 @@ int64_t vt_ioctl(int vt_index, uint64_t request, void *arg) {
         return -ENOTTY;
     }
 }
+
+// --- /dev/tty0 .. /dev/ttyN -------------------------------------------
+//
+// One set of ops for all seven nodes; the node's VT index is in
+// f->priv, put there by devfs's vt_dev_open (which is the only place
+// that knows the device names). Index 0 is /dev/tty0 -- "whatever is
+// active right now", re-resolved on every call rather than bound at
+// open, exactly like Linux's.
+//
+// Only ioctl differs from /dev/CONSOLE: the VT_*/KD* set is tried
+// first, and vt_ioctl returns -ENOTTY for anything outside it so the
+// ordinary terminal ioctls (TCGETS, TIOCGWINSZ, ...) still work on the
+// same fd.
+
+static int vt_index_of(struct file_descriptor *f) {
+    return (int)(long)(intptr_t)f->priv;
+}
+
+static struct tty *vt_of(struct file_descriptor *f) {
+    return vt_tty(vt_index_of(f));
+}
+
+static int64_t vt_fop_read(struct file_descriptor *f, void *buf, uint64_t len) {
+    struct tty *t = vt_of(f);
+    if (!t) { return -ENODEV; }
+    return tty_obj_read(t, buf, (uint32_t)len, f->nonblock);
+}
+
+static int64_t vt_fop_write(struct file_descriptor *f, const void *buf, uint64_t len) {
+    struct tty *t = vt_of(f);
+    if (!t) { return -ENODEV; }
+    return tty_obj_write(t, buf, (uint32_t)len);
+}
+
+static int64_t vt_fop_lseek(struct file_descriptor *f, int64_t offset, int whence) {
+    (void)f; (void)offset; (void)whence;
+    return -ESPIPE;
+}
+
+static int64_t vt_fop_getdents(struct file_descriptor *f, void *buf, int bytes) {
+    (void)f; (void)buf; (void)bytes;
+    return -ENOTDIR;
+}
+
+static int64_t vt_fop_ioctl(struct file_descriptor *f, uint64_t request, void *arg) {
+    int64_t rc = vt_ioctl(vt_index_of(f), request, arg);
+    if (rc != -ENOTTY) { return rc; }
+    struct tty *t = vt_of(f);
+    if (!t) { return -ENODEV; }
+    return tty_obj_ioctl(t, request, arg);
+}
+
+static int vt_fop_poll(struct file_descriptor *f, int events) {
+    struct tty *t = vt_of(f);
+    if (!t) { return 0; }
+    return tty_obj_poll(t, events);
+}
+
+static void vt_fop_dup(struct file_descriptor *f)   { (void)f; }
+static void vt_fop_close(struct file_descriptor *f) { (void)f; }
+
+const struct file_ops vt_file_ops = {
+    .name     = "vt",
+    .read     = vt_fop_read,
+    .write    = vt_fop_write,
+    .lseek    = vt_fop_lseek,
+    .getdents = vt_fop_getdents,
+    .ioctl    = vt_fop_ioctl,
+    .poll     = vt_fop_poll,
+    .dup      = vt_fop_dup,
+    .close    = vt_fop_close,
+};
 
 void vt_selftest(void) {
     int fail = 0;

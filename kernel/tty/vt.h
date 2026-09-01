@@ -11,6 +11,7 @@
 
 struct tty;
 struct vt_console;
+struct file_ops;
 
 void  vt_init(void);                        // build all VTs, wire their ttys
 struct tty *vt_active_tty(void);            // for tty_console()
@@ -29,6 +30,12 @@ int64_t vt_ioctl(int vt_index, uint64_t request, void *arg);
 
 // devfs helpers: map /dev/ttyN -> the VT's struct tty.
 struct tty *vt_tty(int vt_index);           // 0 == active, 1..VT_COUNT
+
+// /dev/tty0../dev/ttyN. The VT index lives in f->priv (0 = "whichever
+// is active"), which devfs's open sets from the device name; every
+// operation then routes to that VT's struct tty, with ioctl trying the
+// VT_*/KD* set first.
+extern const struct file_ops vt_file_ops;
 
 void  vt_selftest(void);
 
