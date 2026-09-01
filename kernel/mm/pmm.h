@@ -30,5 +30,6 @@ void pmm_frame_share(uint64_t phys);
 unsigned pmm_frame_refcount(uint64_t phys);
 
 uint64_t pmm_free_frame_count(void);
+uint64_t pmm_total_frame_count(void);   // usable frames seeded at boot
 
 #endif

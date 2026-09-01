@@ -25,6 +25,7 @@ static struct free_block *free_lists[PMM_MAX_ORDER + 1];
 // "is my buddy free" in O(1) instead of walking a free list.
 static uint8_t frame_order[PMM_MAX_FRAMES];
 static uint64_t total_free_frames;
+static uint64_t total_usable_frames;   // set once during add_region; never falls
 // One entry per frame: how many live mappings point at it. pmm_alloc()
 // sets this to 1 (sole owner, as always); fork()'s COW duplication is
 // the only caller that ever raises it above 1 (via pmm_frame_share()).
@@ -153,6 +154,8 @@ uint64_t pmm_free_frame_count(void) {
     return n;
 }
 
+uint64_t pmm_total_frame_count(void) { return total_usable_frames; }
+
 static void add_region(uint64_t start, uint64_t end) {
     start = (start + PMM_FRAME_SIZE - 1) & ~(uint64_t)(PMM_FRAME_SIZE - 1);
     end = end & ~(uint64_t)(PMM_FRAME_SIZE - 1);
@@ -162,6 +165,7 @@ static void add_region(uint64_t start, uint64_t end) {
             break;
         }
         pmm_free(phys, 0);
+        total_usable_frames++;
     }
 }
 

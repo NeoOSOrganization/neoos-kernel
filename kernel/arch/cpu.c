@@ -195,6 +195,76 @@ uint64_t cpu_state_xcr0(void) { return xstate_mask; }
 int cpu_has_avx(void)  { return have_avx; }
 int cpu_has_avx2(void) { return have_avx2; }
 
+// CPUID 0x80000002..0x80000004: the 48-byte processor brand string.
+// out must be >= 49 bytes. Empty string if the CPU does not support it.
+void cpu_brand_string(char out[49]) {
+    uint32_t a, b, c, d;
+    cpuid(0x80000000, &a, &b, &c, &d);
+    if (a < 0x80000004) { out[0] = 0; return; }
+
+    uint32_t *w = (uint32_t *)out;
+    for (uint32_t leaf = 0; leaf < 3; leaf++) {
+        cpuid(0x80000002 + leaf, &w[leaf * 4 + 0], &w[leaf * 4 + 1],
+              &w[leaf * 4 + 2], &w[leaf * 4 + 3]);
+    }
+    out[48] = 0;
+
+    // Some CPUs left-pad with spaces; shift them off.
+    int i = 0;
+    while (out[i] == ' ') { i++; }
+    if (i) {
+        int j = 0;
+        while (out[i]) { out[j++] = out[i++]; }
+        out[j] = 0;
+    }
+}
+
+// Space-separated feature names, e.g. "sse2 sse4.2 avx2 aes rdrand nx".
+// Returns the length written (excluding the NUL).
+int cpu_feature_string(char *out, int max) {
+    uint32_t a, b, c, d;
+    int n = 0;
+
+    #define ADD(name) do {                                       \
+        int _l = 0; while ((name)[_l]) _l++;                      \
+        if (n + _l + 1 < max) {                                   \
+            if (n) out[n++] = ' ';                                \
+            for (int _k = 0; (name)[_k]; _k++) out[n++] = (name)[_k]; \
+        }                                                        \
+    } while (0)
+
+    cpuid(1, &a, &b, &c, &d);
+    if (d & (1u << 25)) ADD("sse");
+    if (d & (1u << 26)) ADD("sse2");
+    if (c & (1u << 0))  ADD("sse3");
+    if (c & (1u << 9))  ADD("ssse3");
+    if (c & (1u << 19)) ADD("sse4.1");
+    if (c & (1u << 20)) ADD("sse4.2");
+    if (c & (1u << 28)) ADD("avx");
+    if (c & (1u << 12)) ADD("fma");
+    if (c & (1u << 25)) ADD("aes");
+    if (c & (1u << 30)) ADD("rdrand");
+    if (c & (1u << 23)) ADD("popcnt");
+    if (c & (1u << 26)) ADD("xsave");
+
+    cpuid_count(7, 0, &a, &b, &c, &d);
+    if (b & (1u << 5))  ADD("avx2");
+    if (b & (1u << 3))  ADD("bmi1");
+    if (b & (1u << 8))  ADD("bmi2");
+    if (b & (1u << 29)) ADD("sha");
+    if (c & (1u << 3))  ADD("waitpkg");
+
+    cpuid(0x80000001, &a, &b, &c, &d);
+    if (d & (1u << 20)) ADD("nx");
+    if (d & (1u << 26)) ADD("1gb");
+    if (d & (1u << 27)) ADD("rdtscp");
+    if (c & (1u << 0))  ADD("lahf");
+
+    #undef ADD
+    out[n] = 0;
+    return n;
+}
+
 void cpu_state_init(void *buf) {
     uint8_t *out = (uint8_t *)buf;
     for (uint32_t i = 0; i < xstate_size; i++) { out[i] = default_state[i]; }

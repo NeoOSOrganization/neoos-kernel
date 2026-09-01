@@ -5,6 +5,7 @@
 #include "tty/pty.h"
 #include "tty/console.h"
 #include "tty/con_driver.h"
+#include "tty/banner.h"
 #include "drivers/char/serial.h"
 #include "arch/tss.h"
 #include "arch/gdt.h"
@@ -108,8 +109,6 @@ void kmain(void *multiboot_info) {
     con_driver_select();
     fbcon_selftest();
     con_driver_selftest();
-    console_clear();
-    console_write("NeoOS booted\n", 13);
 
     idt_init();
     serial_write_string("[idt] loaded\n");
@@ -235,6 +234,10 @@ void kmain(void *multiboot_info) {
     smp_reschedule_ipi_selftest();
     tlb_shootdown_selftest();
     panic_stop_selftest();
+
+    // Everything the banner reports is now known: framebuffer/console up,
+    // pmm seeded, CPU probed, every AP online.
+    banner_show();
 
     // PID 1. /SBIN/INIT reads /ETC/INITTAB, launches the workload, reaps
     // every child and orphan, and powers the machine off via reboot(2)

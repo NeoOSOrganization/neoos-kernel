@@ -32,6 +32,11 @@ uint64_t cpu_state_xcr0(void);
 int cpu_has_avx(void);
 int cpu_has_avx2(void);
 
+// The 48-byte CPUID processor brand string, NUL-terminated (out >= 49).
+void cpu_brand_string(char out[49]);
+// Space-separated feature names ("sse2 sse4.2 avx2 ..."); returns length.
+int  cpu_feature_string(char *out, int max);
+
 // Saves/restores the calling CPU's extended state to/from a
 // cpu_state_size()-byte, 64-byte-aligned buffer. Used by schedule()
 // around every context switch, and by signal delivery.

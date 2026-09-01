@@ -1,7 +1,8 @@
 CC := $(HOME)/opt/cross-x86_64-elf/bin/x86_64-elf-gcc
 AS := nasm
 
-CFLAGS := -ffreestanding -fno-stack-protector -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -mcmodel=kernel -Wall -Wextra -std=gnu11 -O2 -Ikernel
+NEOOS_GITREV := $(shell git describe --always --dirty --tags 2>/dev/null || echo unknown)
+CFLAGS := -ffreestanding -fno-stack-protector -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -mcmodel=kernel -Wall -Wextra -std=gnu11 -O2 -Ikernel -DNEOOS_GITREV='"$(NEOOS_GITREV)"'
 ASFLAGS := -f elf64
 
 ifdef NEOOS_DEBUG_STOP_WINDOW
@@ -486,6 +487,7 @@ REQUIRED_MARKERS := \
 	"[fbdev] selftest passed" \
 	"[fbcon] selftest passed" \
 	"[con] selftest passed" \
+	"[banner]" \
 	"[rtc] selftest passed" \
 	"[keyboard] decode selftest passed" \
 	"[input] selftest passed"
