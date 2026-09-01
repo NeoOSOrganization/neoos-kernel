@@ -124,7 +124,12 @@
 #define SYS_POLL            67
 #define SYS_SELECT          68
 
+// reboot(2). PID-1 only (NeoOS has no uids/capabilities -- see
+// docs/stdlib.md). POWER_OFF / HALT / RESTART command words match
+// Linux's magic-2 values.
+#define SYS_REBOOT          69
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX             69
+#define SYS_MAX             70
 
 #endif

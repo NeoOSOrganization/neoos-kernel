@@ -263,6 +263,7 @@ static const struct syscall_desc syscall_table[SYS_MAX] = {
     [SYS_TEST_HOOK]       = { sys_test_hook,       "test_hook" },
     [SYS_POLL]            = { sys_poll,            "poll" },
     [SYS_SELECT]          = { sys_select,          "select" },
+    [SYS_REBOOT]          = { sys_reboot,          "reboot" },
 };
 
 // Asserts what the table's shape is supposed to guarantee. Cheap, and

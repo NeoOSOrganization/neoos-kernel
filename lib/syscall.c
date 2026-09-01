@@ -392,6 +392,16 @@ int poll(struct pollfd *fds, unsigned long nfds, int timeout_ms) {
                          (int64_t)nfds, timeout_ms);
 }
 
+// ------------------------------------------------------------- reboot
+
+#include "sys/reboot.h"
+#define SYS_REBOOT_NR 69
+
+int reboot(int cmd) {
+    long rc = syscall1(SYS_REBOOT_NR, cmd);
+    return rc < 0 ? -1 : 0;
+}
+
 int select(int nfds, fd_set *rd, fd_set *wr, fd_set *ex, struct timeval *tv) {
     // nfds/rd/wr/ex in the usual arg registers; tv (5th) in r8, which
     // the kernel reads as frame->r8 -- same trick as mmap_fd_raw.

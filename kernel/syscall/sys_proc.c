@@ -22,6 +22,7 @@
 #include "arch/cpu_local.h"
 #include "smp/smp.h"
 #include "net/socket.h"
+#include "kernel.h"
 
 int64_t sys_exit(struct syscall_args *a) {
     process_exit((int)a->a1);
@@ -195,4 +196,39 @@ int64_t sys_set_tid_address(struct syscall_args *a) {
 int64_t sys_exit_group(struct syscall_args *a) {
     process_exit((int)a->a1);
     return 0;   // not reached
+}
+
+// reboot(2). Linux's magic-2 command words; Linux gates on
+// CAP_SYS_BOOT, NeoOS on "caller is PID 1" -- see docs/stdlib.md. Only
+// the three real commands are accepted; none of them return.
+#define REBOOT_RESTART   0x01234567u
+#define REBOOT_HALT      0xcdef0123u
+#define REBOOT_POWER_OFF 0x4321fedcu
+
+int64_t sys_reboot(struct syscall_args *a) {
+    struct process *p = current_proc();
+    if (!p || p->pid != 1) { return -EPERM; }
+
+    switch ((uint32_t)a->a1) {
+    case REBOOT_POWER_OFF:
+        kernel_shutdown();                 // ACPI S5, never returns
+        break;
+    case REBOOT_HALT:
+        __asm__ volatile ("cli");
+        for (;;) { __asm__ volatile ("hlt"); }
+    case REBOOT_RESTART: {
+        // 8042 CPU-reset pulse; if the platform ignores it, fall through
+        // to a triple fault via a zero-length IDT.
+        __asm__ volatile ("outb %0, %1" :: "a"((uint8_t)0xFE),
+                          "Nd"((uint16_t)0x64));
+        for (volatile int i = 0; i < 1000000; i++) { }
+        struct { uint16_t limit; uint64_t base; } __attribute__((packed))
+            idt0 = { 0, 0 };
+        __asm__ volatile ("lidt %0; int3" :: "m"(idt0));
+        for (;;) { __asm__ volatile ("hlt"); }
+    }
+    default:
+        return -EINVAL;
+    }
+    return 0;   // unreachable for the three real commands
 }
