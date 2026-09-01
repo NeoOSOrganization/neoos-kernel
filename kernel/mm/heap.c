@@ -185,6 +185,18 @@ static void *kmalloc_locked(size_t size) {
     return (void *)((uint8_t *)page + sizeof(struct heap_page));
 }
 
+#ifdef NEOOS_DEBUG_HEAP
+// The magic alone is a hint, not proof: caller data can happen to equal
+// it. Confirm by walking the page's free list, which is O(free slots)
+// and only ever runs on that hint.
+static int heap_on_free_list(struct heap_page *page, struct heap_free_slot *slot) {
+    for (struct heap_free_slot *s = page->free_list; s; s = s->next) {
+        if (s == slot) { return 1; }
+    }
+    return 0;
+}
+#endif
+
 // Unlocked. Caller must hold heap_lock.
 static void kfree_locked(void *ptr) {
     if (!ptr) {
@@ -199,6 +211,14 @@ static void kfree_locked(void *ptr) {
 
     struct heap_free_slot *slot = (struct heap_free_slot *)ptr;
 #ifdef NEOOS_DEBUG_HEAP
+    if (slot->magic == HEAP_FREE_MAGIC && heap_on_free_list(page, slot)) {
+        serial_write_string("[heap] PANIC: double free of slot=");
+        serial_write_hex64((uint64_t)(uintptr_t)slot);
+        serial_write_string(" class=");
+        serial_write_hex64((uint64_t)page->size_class);
+        serial_write_string("\n");
+        for (;;) { __asm__ volatile ("cli; hlt"); }
+    }
     heap_poison_slot(ptr, page->size_class);
     slot->magic = HEAP_FREE_MAGIC;
 #endif
@@ -239,6 +259,15 @@ static int heap_poison_check(void) {
     uint8_t *q = kmalloc(64);
     if (!q) { return 1; }
     kfree(q);
+
+    // A slot freed, reallocated and freed again must not look like a
+    // double free: reallocation clears the magic.
+    uint8_t *r = kmalloc(128);
+    if (!r) { return 1; }
+    kfree(r);
+    uint8_t *r2 = kmalloc(128);
+    if (!r2) { return 1; }
+    kfree(r2);
     return 0;
 }
 #endif
