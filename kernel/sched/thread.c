@@ -85,7 +85,20 @@ struct thread *thread_alloc(struct process *p) {
     // only ever allocated from spawn()/fork_task() on a process not yet
     // visible to any other CPU, so that read is not racy. Every later
     // thread goes through alloc_id() unconditionally.
-    int tid = (p && !p->threads) ? p->pid : alloc_id();
+    // A process's first thread takes the pid; later threads draw from
+    // the pid allocator so a tid never collides with a pid. A process-
+    // LESS kernel thread, though, never enters a thread table and is
+    // never joined by tid -- taking a pid-allocator number for it would
+    // permanently burn PID 1..N, and PID 1 must stay free for
+    // /SBIN/INIT. Give it a private descending id instead, the same
+    // negative space the idle threads already use.
+    int tid;
+    if (p) {
+        tid = (!p->threads) ? p->pid : alloc_id();
+    } else {
+        static int kernel_tid_next = -1000;
+        tid = __atomic_fetch_sub(&kernel_tid_next, 1, __ATOMIC_RELAXED);
+    }
     t->tid        = tid;
     t->ref        = 1;   // the thread list's reference (kzombies list for p==0)
     t->proc       = p;

@@ -43,7 +43,7 @@
 #include "lib/rand.h"
 
 void kernel_shutdown(void) {
-    serial_write_string("\n[kernel] last user process exited, powering off\n");
+    serial_write_string("\n[kernel] shutdown requested, powering off\n");
     cli();
 
     // ACPI S5 (soft-off): SLP_EN | SLP_TYP=0 written as a WORD to
@@ -231,44 +231,17 @@ void kmain(void *multiboot_info) {
     tlb_shootdown_selftest();
     panic_stop_selftest();
 
-    // Hold one reference across the whole spawn sequence: a test that
-    // exits fast on another CPU must not drive the live-process count to
-    // zero (which powers the machine off) before the boot has finished
-    // launching everything. Released just before schedule().
-    user_proc_started();
-
-    struct process *parent_task = spawn("/BIN/PARENT.ELF");
-    if (!parent_task) {
-        serial_write_string("[process] spawn FAILED for /BIN/PARENT.ELF\n");
+    // PID 1. /SBIN/INIT reads /ETC/INITTAB, launches the workload, reaps
+    // every child and orphan, and powers the machine off via reboot(2)
+    // when they have all exited. The kernel no longer knows the test
+    // list -- it lives in the disk image's /ETC/INITTAB (see Makefile).
+    struct process *init_task = spawn("/SBIN/INIT.ELF");
+    if (!init_task || init_task->pid != 1) {
+        serial_write_string("[init] PANIC: /SBIN/INIT did not start as PID 1 (pid=");
+        serial_write_hex64(init_task ? (uint64_t)init_task->pid : 0);
+        serial_write_string(")\n");
+        for (;;) { __asm__ volatile ("hlt"); }
     }
-    spawn("/BIN/LOOPER.ELF");
-    spawn("/BIN/LOOPER.ELF");
-    spawn("/BIN/YIELDER.ELF");
-    spawn("/BIN/VFSTEST.ELF");
-    spawn("/BIN/CWDTEST.ELF");
-    spawn("/BIN/STATTEST.ELF");
-    spawn("/BIN/DIRTEST.ELF");
-    spawn("/BIN/LFNTEST.ELF");
-    spawn("/BIN/TIER0.ELF");
-    spawn("/BIN/MUSLHELO.ELF");
-    spawn("/BIN/TTYTEST.ELF");
-    spawn("/BIN/THRDTEST.ELF");
-    spawn("/BIN/SIGTEST.ELF");
-    spawn("/BIN/FAULTER.ELF");
-    spawn("/BIN/AVXTEST.ELF");
-    spawn("/BIN/MMAPTEST.ELF");
-    spawn("/BIN/REBTEST.ELF");
-    spawn("/BIN/ORPHANTEST.ELF");
-    spawn("/BIN/FBTEST.ELF");
-    spawn("/BIN/POLLTEST.ELF");
-    spawn("/BIN/PTYTEST.ELF");
-    spawn("/BIN/SMPTEST.ELF");
-    spawn("/BIN/EVTEST.ELF");
-    spawn("/BIN/IPCTEST.ELF");
-    spawn("/BIN/PIPETEST.ELF");
-    spawn("/BIN/TLSTEST.ELF");
-    spawn("/BIN/NETTEST.ELF");
-    spawn("/BIN/MPITEST.ELF");
 
     // After the spawns so the selftest's own kernel threads draw ids
     // above the real processes', keeping pids stable across boots.
@@ -280,11 +253,6 @@ void kmain(void *multiboot_info) {
 
     serial_write_string("NeoOS: interrupts enabled, starting scheduler\n");
     __asm__ volatile ("sti");
-
-    // Drop kmain's spawn-sequence reference. If every test somehow
-    // already finished, this is the drop that powers off; normally the
-    // real processes are still running and it just balances the count.
-    user_proc_exited();
 
     schedule(); // never returns in practice -- control passes permanently into the task system
     for (;;) {
