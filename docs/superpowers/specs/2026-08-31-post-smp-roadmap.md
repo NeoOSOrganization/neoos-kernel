@@ -30,6 +30,7 @@ is independently shippable.
       │      plan 2026-09-01-m2-init.md.
       ├─ M1b. Framebuffer terminal          ← NEXT: xterm-ish VT + scrollback +
       │      NokiaPure-as-PSF; the kernel out of the printing business.
+      │      spec 2026-09-01-m1b-framebuffer-terminal-design.md (M1b-1..4).
       │
       ├─ DL.  Dynamic linking               ← after M1b. file-backed mmap,
       │      PT_INTERP + full auxv, dynamic TLS + dlopen. Highest leverage
