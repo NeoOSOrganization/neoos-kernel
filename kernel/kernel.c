@@ -1,6 +1,7 @@
 #include "kernel.h"
 #include "drivers/video/vga.h"
 #include "drivers/video/fb.h"
+#include "drivers/video/fb_device.h"
 #include "drivers/video/fbcon.h"
 #include "tty/pty.h"
 #include "tty/console.h"
@@ -66,9 +67,10 @@ void kmain(void *multiboot_info) {
     serial_write_hex64((uint64_t)(uintptr_t)kmain);
     serial_write_string("\n");
 
-    // Parse the framebuffer tag now (identity-mapped MBI, no allocation);
-    // the mapping waits for pmm + the physmap in paging_init below.
-    fb_init(multiboot_info);
+    // Probe for a framebuffer device now (identity-mapped MBI, no
+    // allocation); the mapping waits for pmm + the physmap below.
+    fb_device_register_builtin();
+    fb_device_probe_all(multiboot_info);
 
     // BEFORE pmm_init: every rank-checked spinlock calls this_cpu(),
     // which reads gs:0. Until cpu_local_init() installs a GS base that
@@ -101,6 +103,7 @@ void kmain(void *multiboot_info) {
     // renders through fbcon (fb.virt lives in the physmap, so it works
     // from any address space).
     fb_map();
+    fb_device_selftest();
     fbcon_init();
     fbcon_selftest();
     console_clear();

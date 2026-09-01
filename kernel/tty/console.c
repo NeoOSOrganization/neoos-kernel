@@ -1,5 +1,6 @@
 #include "tty/console.h"
 #include "drivers/video/fb.h"
+#include "drivers/video/vesafb_internal.h"
 #include "drivers/video/fbcon.h"
 #include "drivers/video/vga.h"
 

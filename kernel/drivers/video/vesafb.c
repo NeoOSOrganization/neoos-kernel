@@ -1,4 +1,6 @@
 #include "drivers/video/fb.h"
+#include "drivers/video/fb_device.h"
+#include "drivers/video/vesafb_internal.h"
 #include "drivers/char/serial.h"
 #include "mm/paging.h"
 #include "mm/vma.h"
@@ -36,7 +38,8 @@ struct mb2_fb_tag {
     uint8_t  b_pos, b_size;
 } __attribute__((packed));
 
-void fb_init(void *multiboot_info) {
+void vesafb_parse(void *multiboot_info) {
+    if (fb.present) { return; }   // idempotent: probe may run more than once
     fb.present = 0;
 
     uint32_t total_size = *(uint32_t *)multiboot_info;
@@ -67,6 +70,21 @@ void fb_init(void *multiboot_info) {
     }
 
     if (fb.present) {
+        // The MB2 tag's channel positions have been seen inconsistent
+        // (r==g, or > 24) under GRUB + QEMU stdvga. Every 32bpp mode
+        // NeoOS supports is XRGB8888, and fbcon already assumes it.
+        int bad = (fb.r.pos == fb.g.pos) || (fb.g.pos == fb.b.pos) ||
+                  fb.r.pos > 24 || fb.g.pos > 24 || fb.b.pos > 24;
+        if (bad) {
+            serial_write_string("[fb] MB2 channel positions bogus (r=");
+            serial_write_hex64(fb.r.pos); serial_write_string(" g=");
+            serial_write_hex64(fb.g.pos); serial_write_string(" b=");
+            serial_write_hex64(fb.b.pos);
+            serial_write_string("), assuming XRGB8888\n");
+            fb.r.pos = 16; fb.g.pos = 8; fb.b.pos = 0;
+            fb.r.size = fb.g.size = fb.b.size = 8;
+        }
+
         serial_write_string("[fb] framebuffer ");
         serial_write_hex64(fb.width);
         serial_write_string("x");
@@ -112,6 +130,49 @@ void fb_map(void) {
     serial_write_hex64(FB_VIRT_BASE);
     serial_write_string("\n");
 }
+
+// ---------------------------------------------------------------- fb_device
+
+static int vesafb_probe(void *mbi) {
+    vesafb_parse(mbi);
+    return fb.present;
+}
+
+static void vesafb_current(struct fb_mode *m, uint64_t *phys, uint64_t *size) {
+    m->width  = fb.width;
+    m->height = fb.height;
+    m->bpp    = fb.bpp;
+    m->pitch  = fb.pitch;
+    m->r = (struct fb_channel){ fb.r.pos, fb.r.size };
+    m->g = (struct fb_channel){ fb.g.pos, fb.g.size };
+    m->b = (struct fb_channel){ fb.b.pos, fb.b.size };
+    if (phys) { *phys = fb.phys; }
+    if (size) { *size = fb.size; }
+}
+
+static int vesafb_modes(struct fb_mode *out, int max) {
+    if (max < 1) { return 0; }
+    vesafb_current(&out[0], 0, 0);
+    return 1;
+}
+
+static int vesafb_set_mode(const struct fb_mode *m) {
+    struct fb_mode cur;
+    vesafb_current(&cur, 0, 0);
+    return (m->width == cur.width && m->height == cur.height &&
+            m->bpp == cur.bpp) ? 0 : -EINVAL;
+}
+
+static void vesafb_flush_rect(int x, int y, int w, int h) {
+    (void)x; (void)y; (void)w; (void)h;      // linear framebuffer: scanout is live
+}
+
+struct fb_device vesafb_drv = {
+    .name = "vesafb", .priority = 100,
+    .probe = vesafb_probe, .current = vesafb_current,
+    .modes = vesafb_modes, .set_mode = vesafb_set_mode,
+    .flush_rect = vesafb_flush_rect, .cursor = 0,
+};
 
 // ---------------------------------------------------------------- /dev/fb0
 

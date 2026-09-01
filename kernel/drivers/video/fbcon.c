@@ -1,5 +1,6 @@
 #include "drivers/video/fbcon.h"
 #include "drivers/video/fb.h"
+#include "drivers/video/vesafb_internal.h"
 #include "drivers/char/serial.h"
 #include "sync/lock.h"
 
