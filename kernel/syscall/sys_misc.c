@@ -135,6 +135,13 @@ int64_t sys_test_hook(struct syscall_args *a) {
         return 0;
     case TESTHOOK_MIG_COUNT:
         return (int64_t)smp_user_migration_count();
+    case TESTHOOK_PARENT_PID: {
+        struct process *p = proc_find((int)a->a2);
+        if (!p) { return -ESRCH; }
+        int pp = p->parent_pid;
+        proc_put(p);
+        return pp;
+    }
     default:
         return -EINVAL;
     }

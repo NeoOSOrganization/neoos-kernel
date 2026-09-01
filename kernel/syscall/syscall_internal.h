@@ -61,6 +61,7 @@ typedef int64_t (*syscall_handler)(struct syscall_args *);
 // Test-hook request codes (SYS_TEST_HOOK only in NEOOS_TEST_HOOKS builds)
 #define TESTHOOK_INJECT_KEY   1   // a2 = keycode, a3 = pressed
 #define TESTHOOK_MIG_COUNT    2   // returns the user-thread migration count
+#define TESTHOOK_PARENT_PID   3   // a2 = pid; returns that process's parent_pid or -ESRCH
 
 // ---- shared helpers, defined in syscall.c ---------------------------
 

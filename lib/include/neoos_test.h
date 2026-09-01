@@ -12,4 +12,8 @@ int neoos_test_inject_key(unsigned keycode, int pressed);
 // kernel steal path was exercised. Returns -ENOSYS in production.
 long neoos_test_migration_count(void);
 
+// Return the parent_pid of process `pid`, or -ESRCH if no such process
+// (including one already reaped). Returns -ENOSYS in production.
+int neoos_test_parent_pid(int pid);
+
 #endif

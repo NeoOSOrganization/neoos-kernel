@@ -776,6 +776,18 @@ void proc_put(struct process *p) {
 
 void proc_get_live(struct process *p) { p->live_threads++; }
 
+// Orphan reparenting. When a process becomes a zombie, any child of it
+// still alive is handed to PID 1, matching Linux -- init's wait4(-1)
+// loop is then what reaps it. proc_table_for_each_ref holds no lock
+// across the callback, and process_exit is never reached from inside
+// another _for_each_ref walk (kill_one / tkill_scan only post signals),
+// so this walk is safe from the exit path.
+struct reparent_ctx { int dead_pid; };
+static void reparent_one(struct process *c, void *v) {
+    struct reparent_ctx *rc = (struct reparent_ctx *)v;
+    if (c->parent_pid == rc->dead_pid) { c->parent_pid = 1; }
+}
+
 // Drops one live-thread count. On the last one, frees the address
 // space and the file descriptors, and turns the process into a zombie
 // carrying only its exit code -- the struct itself outlives its
@@ -810,6 +822,16 @@ void proc_put_live(struct process *p) {
 
     p->state = PROC_ZOMBIE;
     waitq_wake_all(&p->exit_waiters);
+
+    if (p->pid != 1) {
+        struct reparent_ctx rc = { .dead_pid = p->pid };
+        proc_table_for_each_ref(reparent_one, &rc);
+        struct process *init = proc_find(1);
+        if (init) {
+            waitq_wake_all(&init->child_waiters);
+            proc_put(init);
+        }
+    }
 
     // SIGCHLD's default action is ignore, so this changes nothing for a
     // process with no handler -- but it is what makes wait4(WNOHANG)

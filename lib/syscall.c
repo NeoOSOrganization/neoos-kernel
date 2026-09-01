@@ -75,6 +75,7 @@
 // Test-hook request codes
 #define TESTHOOK_INJECT_KEY   1
 #define TESTHOOK_MIG_COUNT    2
+#define TESTHOOK_PARENT_PID   3
 
 static inline int64_t syscall0(int64_t num) {
     int64_t ret;
@@ -535,4 +536,8 @@ int neoos_test_inject_key(unsigned keycode, int pressed) {
 
 long neoos_test_migration_count(void) {
     return (long)syscall1(SYS_TEST_HOOK, TESTHOOK_MIG_COUNT);
+}
+
+int neoos_test_parent_pid(int pid) {
+    return (int)syscall3(SYS_TEST_HOOK, TESTHOOK_PARENT_PID, (int64_t)pid, 0);
 }

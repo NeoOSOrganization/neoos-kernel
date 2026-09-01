@@ -257,6 +257,8 @@ void kmain(void *multiboot_info) {
     spawn("/BIN/FAULTER.ELF");
     spawn("/BIN/AVXTEST.ELF");
     spawn("/BIN/MMAPTEST.ELF");
+    spawn("/BIN/REBTEST.ELF");
+    spawn("/BIN/ORPHANTEST.ELF");
     spawn("/BIN/FBTEST.ELF");
     spawn("/BIN/POLLTEST.ELF");
     spawn("/BIN/PTYTEST.ELF");
