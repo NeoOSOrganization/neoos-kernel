@@ -454,7 +454,20 @@ $(DISK2_IMG): $(DISK_IMG)
 disk-image: $(DISK_IMG) $(DISK2_IMG)
 
 SMP_CPUS ?= 4
-QEMU_COMMON := -cpu Nehalem -smp $(SMP_CPUS) -boot order=d \
+# The reference machine is TCG with -cpu Nehalem (CLAUDE.md): it is what
+# the gauntlet's flake signatures are tuned for, and it pins the CPU
+# feature set the tests actually cover. KVM=1 swaps in hardware
+# virtualisation for local iteration -- 2.3x faster on a full boot, and
+# it gives TRUE parallelism where TCG round-robins the vCPUs, so it can
+# reach SMP interleavings TCG cannot. Use it to iterate; sign off on the
+# default.
+ifdef KVM
+QEMU_MACHINE := -enable-kvm -cpu host
+else
+QEMU_MACHINE := -cpu Nehalem
+endif
+
+QEMU_COMMON := $(QEMU_MACHINE) -smp $(SMP_CPUS) -boot order=d \
 	-cdrom $(BUILD_DIR)/neoos.iso \
 	-drive file=$(DISK_IMG),format=raw -drive file=$(DISK2_IMG),format=raw \
 	-vga std \

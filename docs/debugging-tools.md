@@ -166,6 +166,39 @@ exercise what ships, and it deliberately builds without
 
 ---
 
+## Running faster: `KVM=1`
+
+```bash
+make KVM=1 test
+KVM=1 tools/gauntlet.sh 15 3
+```
+
+Swaps TCG emulation for hardware virtualisation (`-enable-kvm -cpu
+host`). Measured on this machine:
+
+| | single boot | gauntlet 15x3 |
+|---|---|---|
+| TCG, `-cpu Nehalem` (default) | 9.11 s | 110.6 s |
+| KVM, `-cpu host` | 3.90 s | 37.0 s |
+
+Roughly **3x on the gauntlet**, which is where the time goes.
+
+**The default stays TCG/Nehalem deliberately**, for two reasons. The
+gauntlet's `FLAKY_RE` signatures are tuned for TCG's host-contention
+artifacts (a starved emulated ATA controller, a guest clock that does
+not advance), and `-cpu host` exposes whatever the host CPU has, so the
+feature set the tests cover stops being pinned. Sign off on the default;
+iterate with `KVM=1`.
+
+One property makes `KVM=1` more than a speed knob: **TCG round-robins
+the vCPUs, KVM runs them genuinely in parallel.** SMP interleavings that
+need true simultaneity are reachable under KVM and not under TCG, so a
+race the CS track is hunting may only ever appear there. A failure under
+`KVM=1` that does not reproduce under TCG is therefore worth taking
+seriously rather than dismissing as an accelerator artifact.
+
+Requires access to `/dev/kvm` (group membership or a POSIX ACL).
+
 ## Combining them
 
 The heap poisoner and the lock statistics are independent flags and can
