@@ -10,6 +10,7 @@
 #include "mm/pmm.h"
 #include "mm/paging.h"
 #include "mm/heap.h"
+#include "mm/vma.h"
 #include "smp/tlb.h"
 #include "arch/tss.h"
 #include "drivers/char/serial.h"
@@ -528,8 +529,19 @@ int exec_task(const char *path, struct syscall_frame *frame) {
 
     cpu_state_init(current_thread()->xstate);
 
-    // The new address space has no stacks at all: reset the slot bitmap
-    // and lay down slot 0 for the (now only) thread.
+    // The new address space has no stacks and no mappings at all: reset
+    // the slot bitmap and the vma bookkeeping, then lay down slot 0 for
+    // the (now only) thread.
+    //
+    // The vma list described the address space that was just freed.
+    // Carrying it into the new image is not a leak but something worse:
+    // a fault at one of those addresses would find a mapping and be
+    // answered with a fresh zero page instead of the SIGSEGV the new
+    // program has every right to expect. The structures are only
+    // forgotten, never unmapped -- free_address_space above already
+    // returned every frame they described.
+    vma_forget_all(p);
+    p->mmap_next   = MMAP_BASE;
     p->stack_slots = 0;
     uint64_t user_stack_top;
     if (thread_stack_alloc(p, &user_stack_top) != 0) {
@@ -690,9 +702,22 @@ struct thread *fork_task(struct syscall_frame *frame) {
         return 0;
     }
 
+    // The page tables are only half the address space. Without the vma
+    // list the child has every page the parent had already touched and
+    // no record of what it is allowed to touch next: a fault on an
+    // mmap'd-but-untouched page finds no mapping and becomes SIGSEGV,
+    // and its mmap cursor restarts at MMAP_BASE on top of what it just
+    // inherited. A shell hits both on its first forked command.
+    if (!vma_copy_all(child_proc, parent)) {
+        serial_write_string("[process] fork FAILED: out of memory copying the vma list\n");
+        free_address_space(child_pml4_phys);
+        return 0;
+    }
+
     uint64_t kstack_phys = pmm_alloc(KERNEL_STACK_ORDER);
     if (!kstack_phys) {
         serial_write_string("[process] fork FAILED: out of memory for kernel stack\n");
+        vma_forget_all(child_proc);
         free_address_space(child_pml4_phys);
         return 0;
     }
@@ -725,6 +750,7 @@ struct thread *fork_task(struct syscall_frame *frame) {
         serial_write_string("[process] fork FAILED: out of memory for fd table\n");
         fd_table_free(child_proc->fd_table);
         pmm_free(kstack_phys, KERNEL_STACK_ORDER);
+        vma_forget_all(child_proc);
         free_address_space(child_pml4_phys);
         return 0;
     }
@@ -735,6 +761,7 @@ struct thread *fork_task(struct syscall_frame *frame) {
     if (!child) {
         serial_write_string("[process] fork FAILED: out of memory for thread\n");
         pmm_free(kstack_phys, KERNEL_STACK_ORDER);
+        vma_forget_all(child_proc);
         free_address_space(child_pml4_phys);
         return 0;
     }

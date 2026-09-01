@@ -379,6 +379,58 @@ void vma_destroy_all(struct process *p) {
     vma_tlb_settle(p);
 }
 
+// fork's other half. See the header for why the page tables alone are
+// not enough.
+//
+// Only `src`'s lock is taken. Two locks of equal rank at once is exactly
+// what the rank checker forbids, and `dst` does not need one: fork_task
+// has not created its thread yet, so no CPU but this one can reach the
+// child's vma list. (proc_alloc does publish the child in the process
+// table before this runs, but the only callbacks that walk it -- kill,
+// tkill, reparent -- touch signals and parent pids, never mappings.)
+//
+// The list is built in order with a tail pointer rather than by
+// repeatedly walking to the end: vma_insert's merge logic is wrong here
+// anyway, since the parent's list may legitimately hold adjacent
+// entries that must NOT be merged (a PROT_NONE reservation next to the
+// RW piece mprotect split out of it is the shape musl's allocator
+// makes), and copying is not the place to re-run placement policy.
+int vma_copy_all(struct process *dst, struct process *src) {
+    uint64_t f = spin_lock_irqsave(&src->mm_lock);
+
+    struct vma *head = 0, *tail = 0;
+    for (struct vma *v = src->vmas; v; v = v->next) {
+        struct vma *c = (struct vma *)kmalloc(sizeof(struct vma));
+        if (!c) {
+            spin_unlock_irqrestore(&src->mm_lock, f);
+            while (head) { struct vma *n = head->next; kfree(head); head = n; }
+            dst->vmas = 0;
+            return 0;
+        }
+        c->start = v->start; c->end = v->end;
+        c->prot  = v->prot;  c->flags = v->flags;
+        c->next  = 0;
+        if (tail) { tail->next = c; } else { head = c; }
+        tail = c;
+    }
+
+    // The cursor comes too. Without it the child's next mmap restarts at
+    // MMAP_BASE and hands back an address it already holds.
+    dst->mmap_next = src->mmap_next;
+    spin_unlock_irqrestore(&src->mm_lock, f);
+
+    dst->vmas = head;
+    return 1;
+}
+
+void vma_forget_all(struct process *p) {
+    uint64_t f = spin_lock_irqsave(&p->mm_lock);
+    struct vma *v = p->vmas;
+    p->vmas = 0;
+    spin_unlock_irqrestore(&p->mm_lock, f);
+    while (v) { struct vma *n = v->next; kfree(v); v = n; }
+}
+
 static int vma_count(struct process *p) {
     int n = 0;
     for (struct vma *v = p->vmas; v; v = v->next) { n++; }

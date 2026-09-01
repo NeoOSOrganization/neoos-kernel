@@ -59,6 +59,23 @@ int  vma_fault(struct process *p, uint64_t addr, int write);
 // Frees every mapping structure and every frame still mapped in it.
 void vma_destroy_all(struct process *p);
 
+// Gives `dst` a copy of `src`'s mapping list and its mmap cursor. This
+// is fork's other half: duplicating the page tables hands the child
+// every page the parent had already touched, and the vma list is what
+// says which addresses are legal at all.
+//
+// Returns 1, or 0 on out-of-memory having freed whatever it had already
+// copied -- `dst` is left with an empty list either way, never a
+// partial one.
+int vma_copy_all(struct process *dst, struct process *src);
+
+// Frees the mapping STRUCTURES and nothing else -- no unmapping, no
+// frames returned. For a caller that is discarding the whole address
+// space by another route (fork's failure paths, which hand the page
+// tables to free_address_space); calling vma_destroy_all there instead
+// would free every frame a second time.
+void vma_forget_all(struct process *p);
+
 void vma_selftest(void);
 void vma_selftest_start(void);
 

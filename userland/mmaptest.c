@@ -7,7 +7,11 @@
 #define PROT_WRITE 2
 #define PROT_EXEC  4
 #define MAP_PRIVATE   0x02
+#define MAP_FIXED     0x10
 #define MAP_ANONYMOUS 0x20
+
+// Must match STALE_PROBE_ADDR in userland/exec_target.c.
+#define STALE_PROBE_ADDR 0x500000000000UL
 
 extern long mmap_raw(unsigned long addr, unsigned long len, int prot, int flags);
 extern int  munmap_raw(unsigned long addr, unsigned long len);
@@ -15,6 +19,87 @@ extern int  mprotect(void *addr, unsigned long length, int prot);
 
 static volatile int segv_seen;
 static void segv_handler(int sig) { (void)sig; segv_seen = 1; exit(88); }
+
+// fork must hand the child the address-space BOOKKEEPING, not just the
+// page tables. Duplicating the PTEs alone gives the child every page the
+// parent had already touched and nothing else, so:
+//   - a fault on an mmap'd page the parent never touched finds no vma
+//     and becomes SIGSEGV;
+//   - the child's mmap cursor restarts at the bottom of the mmap range
+//     and can hand back an address the child already holds;
+//   - munmap and mprotect on an inherited region silently do nothing.
+// A shell hits all three immediately: it forks per command, and the
+// allocator gets its heap from mmap.
+static int check_fork_inherits_mappings(void) {
+    unsigned long len = 4096 * 4;
+    long a = mmap_raw(0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS);
+    if (a < 0) { printf("[mmaptest] FAILED: mmap for the fork test\n"); return 0; }
+    volatile unsigned char *m = (volatile unsigned char *)(unsigned long)a;
+    m[0] = 0x11;                       // ONLY the first page is touched here
+
+    int child = fork();
+    if (child < 0) { printf("[mmaptest] FAILED: fork\n"); return 0; }
+    if (child == 0) {
+        if (m[0] != 0x11) { exit(60); }             // inherited page kept its bytes
+        m[4096] = 0x22;                             // untouched page: needs the vma
+        if (m[4096] != 0x22) { exit(61); }
+        m[len - 1] = 0x33;                          // and the last one
+        if (m[len - 1] != 0x33) { exit(62); }
+
+        // The mmap cursor came along too, so a fresh mapping lands past
+        // everything inherited rather than on top of it.
+        long n = mmap_raw(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS);
+        if (n < 0) { exit(63); }
+        if (n < a + (long)len) { exit(64); }
+        *(volatile unsigned char *)(unsigned long)n = 0x44;
+        if (m[0] != 0x11) { exit(65); }             // ...and did not alias us
+
+        // mprotect and munmap of an inherited region are real operations.
+        if (mprotect((void *)(unsigned long)a, len, PROT_READ) != 0) { exit(66); }
+        if (m[0] != 0x11) { exit(67); }
+        if (munmap_raw((unsigned long)a, len) != 0) { exit(68); }
+        exit(0);
+    }
+
+    int code = wait(child);
+    if (code != 0) {
+        printf("[mmaptest] FAILED: fork mapping inheritance, child exited %d\n", code);
+        return 0;
+    }
+    // The parent's own copy is untouched by anything the child did.
+    if (m[0] != 0x11) {
+        printf("[mmaptest] FAILED: child's writes reached the parent\n");
+        return 0;
+    }
+    munmap_raw((unsigned long)a, len);
+    printf("[mmaptest] fork inherits the vma list passed\n");
+    return 1;
+}
+
+// The other half of the same defect: exec frees the old address space,
+// so it must forget the mappings that described it. A stale vma would
+// have the fault handler answer a dead address with a fresh zero page
+// instead of the SIGSEGV the new image expects. EXECTARG does the
+// probing -- it is the one running in the new address space.
+static int check_exec_forgets_mappings(void) {
+    int child = fork();
+    if (child < 0) { printf("[mmaptest] FAILED: fork for the exec test\n"); return 0; }
+    if (child == 0) {
+        long a = mmap_raw(STALE_PROBE_ADDR, 4096, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED);
+        if (a < 0 || (unsigned long)a != STALE_PROBE_ADDR) { exit(50); }
+        *(volatile unsigned char *)STALE_PROBE_ADDR = 0x77;   // populate it
+        exec("/BIN/EXECTARG.ELF");                            // must not return
+        exit(51);
+    }
+    int code = wait(child);
+    if (code != 0) {
+        printf("[mmaptest] FAILED: exec left a stale mapping, child exited %d\n", code);
+        return 0;
+    }
+    printf("[mmaptest] exec forgets the old mappings passed\n");
+    return 1;
+}
 
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
@@ -38,6 +123,9 @@ int main(int argc, char **argv) {
         printf("[mmaptest] FAILED: munmap\n"); return 1;
     }
     printf("[mmaptest] munmap passed\n");
+
+    if (!check_fork_inherits_mappings()) { return 1; }
+    if (!check_exec_forgets_mappings()) { return 1; }
 
     // A read-only mapping must fault on write -- proving the protection
     // check rather than just the happy path. Done in a child so the
