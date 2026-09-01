@@ -17,6 +17,12 @@ ifdef DEBUG_LOCKSTAT
 CFLAGS += -DNEOOS_DEBUG_LOCKSTAT
 endif
 
+# Fire the LAPIC timer N times faster while keeping timer_ticks() at
+# 100 Hz, so preemption windows widen without disturbing the clock.
+ifdef DEBUG_HZ
+CFLAGS += -DNEOOS_DEBUG_HZ=$(DEBUG_HZ)
+endif
+
 ifeq ($(MAKECMDGOALS),test)
 CFLAGS += -DNEOOS_TEST_HOOKS
 endif

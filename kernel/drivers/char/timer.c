@@ -24,6 +24,19 @@ void timer_handler(void) {
     c->timer_ticks_local++;
 
     if (c == &cpus[0]) {
+#ifdef NEOOS_DEBUG_HZ
+        // Only the BSP reaches here, so a plain static needs no
+        // synchronisation. The wall clock advances once per
+        // NEOOS_DEBUG_HZ interrupts, so tick_count, TICKS_PER_LOG,
+        // waitq_timeout_tick, poll deadlines and nanosleep all keep
+        // measuring real time while the interrupt itself fires
+        // NEOOS_DEBUG_HZ times more often. The timeslice countdown
+        // below is deliberately NOT gated: running it on every
+        // interrupt is what multiplies preemption points.
+        static unsigned subtick;
+        if (++subtick >= NEOOS_DEBUG_HZ) {
+            subtick = 0;
+#endif
         tick_count++;
         if (tick_count % TICKS_PER_LOG == 0) {
             serial_write_string("[timer] tick=");
@@ -35,6 +48,9 @@ void timer_handler(void) {
         // cheaper than a heap at NeoOS's thread counts, and much easier to
         // get right.
         waitq_timeout_tick();
+#ifdef NEOOS_DEBUG_HZ
+        }
+#endif
     }
 
     // Never preempt a CPU that has not yet entered the scheduler.
@@ -77,5 +93,13 @@ void timer_init(void) {
 // repeated; the count is the same on every core.
 void timer_init_this_cpu(void) {
     this_cpu()->timeslice_remaining = TIMESLICE_TICKS;
+#ifdef NEOOS_DEBUG_HZ
+    // Interrupt NEOOS_DEBUG_HZ times more often; the handler divides the
+    // tick counter back down, so only the preemption rate changes.
+    uint32_t count = lapic_ticks_per_10ms / NEOOS_DEBUG_HZ;
+    if (count == 0) { count = 1; }
+    lapic_timer_start_periodic(count, VECTOR_TIMER);
+#else
     lapic_timer_start_periodic(lapic_ticks_per_10ms, VECTOR_TIMER);
+#endif
 }
