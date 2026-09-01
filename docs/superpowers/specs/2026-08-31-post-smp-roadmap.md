@@ -28,9 +28,15 @@ is independently shippable.
       │      /ETC/INITTAB, reboot(2) (PID-1-only), orphan reparenting,
       │      the workload runs through init. spec 2026-09-01-m2-init-design.md,
       │      plan 2026-09-01-m2-init.md.
-      ├─ M1b. Framebuffer terminal          ← NEXT: xterm-ish VT + scrollback +
-      │      NokiaPure-as-PSF; the kernel out of the printing business.
-      │      spec 2026-09-01-m1b-framebuffer-terminal-design.md (M1b-1..4).
+      ├─ M1b. Framebuffer terminal          ← IN PROGRESS: xterm-ish VT +
+      │      Spleen font; the kernel out of the printing business.
+      │      spec 2026-09-01-m1b-framebuffer-terminal-design.md.
+      │      M1b-1 font, M1b-2 VT engine, M1b-3 TERM process = DONE.
+      │      M1b-4 (scrollback + evdev keys) folded into M1c-4.
+      ├─ M1c. Driver model + kernel VTs     ← NEXT: kernel/drivers/ reorg,
+      │      fb_device + con_driver abstractions, /dev/tty1..6 with
+      │      Alt+Fn, TERM becomes a VT_PROCESS client. Linux VT/KD ioctls.
+      │      spec 2026-09-01-m1c-driver-model-and-vts-design.md (M1c-1..4).
       │
       ├─ DL.  Dynamic linking               ← after M1b. file-backed mmap,
       │      PT_INTERP + full auxv, dynamic TLS + dlopen. Highest leverage
