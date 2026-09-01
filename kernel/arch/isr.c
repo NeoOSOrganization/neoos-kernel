@@ -29,6 +29,7 @@ static const char *exception_names[32] = {
 static void exception_dump_and_halt(struct registers *regs) {
     // Reclaim the screen from any userland terminal so this dump paints.
     fbcon_enter_panic();          // drop the rank check: we may hold anything
+    vt_enter_panic();             // ditto for the VT layer
     console_set_fb_owned(0);
     tty_set_active(0);
     vt_panic_reset();

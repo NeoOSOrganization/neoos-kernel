@@ -23,6 +23,7 @@ void  vt_scroll(int delta_lines);           // active VT scrollback
 
 void  vt_write_active(const char *s, unsigned n);   // kernel console output
 void  vt_panic_reset(void);                 // force VT0, KD_TEXT, repaint
+void  vt_enter_panic(void);                 // one-way: drop VT locking while panicking
 
 // ioctl on /dev/ttyN (vt_index 0 == active). Handles VT_* / KD*; returns
 // -ENOTTY for anything else so the caller can fall through to the tty.
@@ -38,6 +39,7 @@ struct tty *vt_tty(int vt_index);           // 0 == active, 1..VT_COUNT
 extern const struct file_ops vt_file_ops;
 
 void  vt_selftest(void);
+void  vt_stress_selftest(void);   // switch-vs-write race; needs APs online
 
 // Linux VT / KD ioctl numbers.
 #define VT_OPENQRY   0x5600

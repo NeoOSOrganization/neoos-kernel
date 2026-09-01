@@ -7,6 +7,7 @@
 #include "drivers/char/serial.h"
 #include "sync/waitq.h"
 #include "sync/lock.h"
+#include "smp/smp.h"
 #include "errno.h"
 
 struct vt_console {
@@ -19,8 +20,26 @@ struct vt_console {
 };
 
 static struct vt_console vts[VT_COUNT];
-static int vt_active;
+// vt_active is volatile and read without vt_lock by vt_active_tty,
+// vt_tty and vt_active_index on purpose: those resolve "whichever VT is
+// active right now", which is inherently a snapshot. An aligned int
+// cannot tear, so the worst case is routing to the VT that was active a
+// moment ago -- which is what /dev/tty0 means anyway.
+static volatile int vt_active;
 static int g_cols, g_rows;
+
+// CS0. Guards vt_active, each VT's diff cache (shown / shown_valid) and
+// kd_mode. Rank VT sits above TTY and below FBCON: the write path
+// arrives here already holding t->lock (tty_obj_write -> backend
+// output) and calls into the con_driver underneath, so the chain
+// TTY -> VT -> FBCON is ascending on every path. vt_switch and
+// vt_scroll come from the keyboard IRQ holding nothing and take
+// t->lock first, in that same order.
+static struct spinlock vt_lock;
+
+// One-way, set by the panic path: it may hold any lock, so it takes
+// none. Same reasoning as fbcon_panicking.
+static volatile int vt_panicking;
 
 // pack a cell to the con_driver attr byte (fg | bg<<4), honouring reverse
 static uint8_t pack(const struct vc_cell *c) {
@@ -29,9 +48,22 @@ static uint8_t pack(const struct vc_cell *c) {
     return (uint8_t)(fg | (bg << 4));
 }
 
-static void render_diff(struct vt_console *vc) {
+// CS0 race detector. render_diff must only ever paint the VT that is
+// active *at the moment it paints*: vt_backend_output guards on it,
+// vt_switch sets vt_active=n before rendering vts[n], vt_scroll and
+// KDSETMODE render only the active one, and vt_panic_reset sets
+// vt_active=0 first. So a non-zero count here means a switch landed
+// between one of those guards and the paint -- which is the bug: the
+// screen now belongs to another VT and we painted this one's cells
+// onto it, while marking them clean in this VT's diff cache, so they
+// are never repainted.
+static volatile uint64_t vt_race_hits;
+
+// Callers must hold vt_lock, or be the panic path.
+static void render_diff_locked(struct vt_console *vc) {
     struct con_driver *cd = con_driver_active();
     if (!cd || !cd->putc_at) { return; }
+    if (vc != &vts[vt_active]) { vt_race_hits++; }
     for (int r = 0; r < g_rows; r++) {
         for (int c = 0; c < g_cols; c++) {
             const struct vc_cell *cell = kvt_cell(&vc->scr, r, c);
@@ -44,32 +76,40 @@ static void render_diff(struct vt_console *vc) {
             }
         }
     }
+    // Checked again on the way out: the switch that breaks this can land
+    // anywhere in the loop above, so the exit check has a window
+    // thousands of cells wide where the entry check has only a few
+    // instructions.
+    if (vc != &vts[vt_active]) { vt_race_hits++; }
     vc->shown_valid = 1;
     int x, y, vis;
     kvt_cursor(&vc->scr, &x, &y, &vis);
     if (cd->cursor) { cd->cursor(y, x, vis); }
 }
 
-static void render_full(struct vt_console *vc) {
+static void render_full_locked(struct vt_console *vc) {
     vc->shown_valid = 0;
-    render_diff(vc);
+    render_diff_locked(vc);
 }
 
 // --- tty backend: cooked output feeds the parser ---------------------
 
 static void vt_backend_output(struct tty *t, const char *s, uint32_t n) {
     struct vt_console *vc = t->backend_priv;
-    kvt_feed(&vc->scr, s, n);
+    kvt_feed(&vc->scr, s, n);                  // under t->lock already
+    uint64_t f = vt_panicking ? 0 : spin_lock_irqsave(&vt_lock);
     if (vc == &vts[vt_active]) {
         serial_write_raw_n(s, n);              // the visible VT mirrors to serial
-        if (vc->kd_mode == KD_TEXT) { render_diff(vc); }
+        if (vc->kd_mode == KD_TEXT) { render_diff_locked(vc); }
     }
+    if (!vt_panicking) { spin_unlock_irqrestore(&vt_lock, f); }
 }
 static const struct tty_backend vt_backend = { vt_backend_output };
 
 // --- public ------------------------------------------------------
 
 void vt_init(void) {
+    spin_init(&vt_lock, LOCK_RANK_VT, "vt");
     con_driver_geometry(&g_cols, &g_rows);
     if (g_cols <= 0) { g_cols = 80; }
     if (g_rows <= 0) { g_rows = 25; }
@@ -103,29 +143,72 @@ struct tty *vt_tty(int vt_index) {
 }
 
 void vt_switch(int n) {
-    if (n < 0 || n >= VT_COUNT || n == vt_active) { return; }
-    vt_active = n;
-    struct con_driver *cd = con_driver_active();
-    if (cd && cd->clear) { cd->clear(); }
-    if (vts[n].kd_mode == KD_TEXT) { render_full(&vts[n]); }
+    if (n < 0 || n >= VT_COUNT) { return; }
+    // The target VT's tty lock first, so render_full_locked's read of
+    // vts[n].scr cannot race a kvt_feed on the same VT, then vt_lock.
+    struct tty *t = &vts[n].tty;
+    uint64_t tf = spin_lock_irqsave(&t->lock);
+    uint64_t f  = spin_lock_irqsave(&vt_lock);
+    // Tested under the lock: read outside it and two CPUs can both
+    // decide they are the one switching.
+    if (n != vt_active) {
+        vt_active = n;
+        struct con_driver *cd = con_driver_active();
+        if (cd && cd->clear) { cd->clear(); }
+        if (vts[n].kd_mode == KD_TEXT) { render_full_locked(&vts[n]); }
+    }
+    spin_unlock_irqrestore(&vt_lock, f);
+    spin_unlock_irqrestore(&t->lock, tf);
+    // Outside both: WAITQ ranks below VT, so waking under vt_lock would
+    // be a descending acquire.
     waitq_wake_all(&vts[n].wait_active);
 }
 
 void vt_scroll(int delta_lines) {
-    kvt_scroll_view(&vts[vt_active].scr, delta_lines);
-    render_full(&vts[vt_active]);
+    uint64_t f = spin_lock_irqsave(&vt_lock);
+    int n = vt_active;
+    spin_unlock_irqrestore(&vt_lock, f);
+
+    // kvt_scroll_view mutates the same struct kvt that kvt_feed does,
+    // and that is protected by t->lock -- so the scroll needs it too.
+    struct tty *t = &vts[n].tty;
+    uint64_t tf = spin_lock_irqsave(&t->lock);
+    f = spin_lock_irqsave(&vt_lock);
+    if (n == vt_active) {                    // still current after the re-lock
+        kvt_scroll_view(&vts[n].scr, delta_lines);
+        render_full_locked(&vts[n]);
+    }
+    spin_unlock_irqrestore(&vt_lock, f);
+    spin_unlock_irqrestore(&t->lock, tf);
 }
 
 void vt_write_active(const char *s, unsigned n) {
     tty_obj_write(&vts[vt_active].tty, s, n);
 }
 
+// Set by the exception handler, never by vt_panic_reset itself --
+// vt_selftest calls that reset in ordinary context, and latching the
+// flag there would silently disable VT locking for the rest of the boot.
+void vt_enter_panic(void) { vt_panicking = 1; }
+
 void vt_panic_reset(void) {
+    // Locked normally, EXCEPT on the panic path: a panicking CPU may
+    // hold any lock, and a checked acquire would call lock_panic() from
+    // inside a panic and recurse. fbcon splits this the same way.
+    uint64_t tf = 0, f = 0;
+    if (!vt_panicking) {
+        tf = spin_lock_irqsave(&vts[0].tty.lock);
+        f  = spin_lock_irqsave(&vt_lock);
+    }
     vt_active = 0;
     vts[0].kd_mode = KD_TEXT;
     struct con_driver *cd = con_driver_active();
     if (cd && cd->clear) { cd->clear(); }
-    render_full(&vts[0]);
+    render_full_locked(&vts[0]);
+    if (!vt_panicking) {
+        spin_unlock_irqrestore(&vt_lock, f);
+        spin_unlock_irqrestore(&vts[0].tty.lock, tf);
+    }
 }
 
 int64_t vt_ioctl(int vt_index, uint64_t request, void *arg) {
@@ -160,14 +243,22 @@ int64_t vt_ioctl(int vt_index, uint64_t request, void *arg) {
     case VT_SETMODE:
     case VT_RELDISP:
         return 0;                       // accepted, inert until M1c-4
-    case KDSETMODE:
+    case KDSETMODE: {
+        uint64_t f = spin_lock_irqsave(&vt_lock);
         vts[idx].kd_mode = (a == KD_GRAPHICS) ? KD_GRAPHICS : KD_TEXT;
-        if (idx == vt_active && vts[idx].kd_mode == KD_TEXT) { render_full(&vts[idx]); }
+        if (idx == vt_active && vts[idx].kd_mode == KD_TEXT) {
+            render_full_locked(&vts[idx]);
+        }
+        spin_unlock_irqrestore(&vt_lock, f);
         return 0;
-    case KDGETMODE:
+    }
+    case KDGETMODE: {
         if (!arg) { return -EFAULT; }
+        uint64_t f = spin_lock_irqsave(&vt_lock);
         *(int *)arg = vts[idx].kd_mode;
+        spin_unlock_irqrestore(&vt_lock, f);
         return 0;
+    }
     default:
         return -ENOTTY;
     }
@@ -244,6 +335,57 @@ const struct file_ops vt_file_ops = {
     .dup      = vt_fop_dup,
     .close    = vt_fop_close,
 };
+
+// CS0: the switch-vs-write race. A background kernel thread flips
+// between VT 0 and VT 1 while the caller writes to VT 0. Without a
+// lock, render_full (from the switch) and render_diff (from the write)
+// interleave on vts[0].shown, and shown_valid ends up 1 with cells that
+// were never painted -- so a later diff skips them forever. The check
+// is that the diff cache agrees with the grid once both settle.
+static volatile int vtstress_run;
+static volatile int vtstress_done;
+
+static void vt_stress_thread(void) {
+    while (vtstress_run) {
+        vt_switch(1);
+        vt_switch(0);
+    }
+    vtstress_done = 1;
+    thread_exit_self(0);
+}
+
+// Runs AFTER smp_start_aps(): the switcher must land on a real second
+// core, and vt_selftest() runs long before the APs exist.
+void vt_stress_selftest(void) {
+    if (smp_online_count() < 2) {
+        serial_write_string("[vt] stress SKIPPED: single CPU\n");
+        return;
+    }
+    vtstress_run = 1;
+    vtstress_done = 0;
+    vt_race_hits = 0;
+    vt_switch(0);
+    // _on(cpu 1): the race needs the switcher on a DIFFERENT core from
+    // the writer.
+    if (!thread_alloc_kernel_on(vt_stress_thread, 1)) {
+        serial_write_string("[vt] stress SKIPPED: no thread\n");
+        return;
+    }
+    for (int i = 0; i < 2000; i++) {
+        tty_obj_write(&vts[0].tty, "x", 1);
+    }
+    vtstress_run = 0;
+    while (!vtstress_done) { __asm__ volatile("pause"); }
+    vt_switch(0);
+
+    if (vt_race_hits) {
+        serial_write_string("[vt] stress FAILED: painted a background VT, hits=");
+        serial_write_hex64(vt_race_hits);
+        serial_write_string("\n");
+        return;
+    }
+    serial_write_string("[vt] stress passed\n");
+}
 
 void vt_selftest(void) {
     int fail = 0;
