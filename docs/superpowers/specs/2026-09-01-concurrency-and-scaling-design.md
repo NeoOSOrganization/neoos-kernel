@@ -210,33 +210,50 @@ Two findings worth keeping:
 
 ---
 
-## CS1 — Instrumentation to build once, use everywhere
+## CS1 — Instrumentation to build once, use everywhere — **DONE**
 
-None of this exists in the tree today.
+Landed 2026-09-01 (`eb41951`, `20d3fe3`, `ec0e577`, `dd91b12`,
+`3011f49`, `c6ced21`). Full usage in `docs/debugging-tools.md`.
 
-- **Poisoned-free / redzone heap mode.** A compile-time toggle for
-  `kernel/mm/heap.c` that fills freed blocks with a poison byte and
-  checks a redzone on free — turning "freed the same block twice" and
-  "wrote past a `kmalloc`'d radix node" from silent corruption into an
-  immediate panic naming the culprit. Directly targets CS2.1 and
-  CS2.4.
-- **Lock hold-time / contention histogram.** `spin_lock_irqsave`
-  already funnels through one place, so a debug build can timestamp
-  acquire/release and bucket hold times per rank, dumped at shutdown or
-  on a serial command. This turns "the global `vfs_lock` is a
-  throughput killer" from an architectural guess into a number CS5 can
-  move.
-- **Promote the gauntlet.** `pgauntlet.sh` exists, but only inside
-  `.superpowers/sdd/2026-08-31-phase14-input-and-solidity/` — a
-  milestone working directory, not somewhere future plans can point at.
-  Move it to a stable checked-in location and add a pass/fail
-  aggregation mode: run N times, grep for `PANIC`/`FAILED`/each
-  `REQUIRED_MARKER`, and report a **flakiness percentage per marker**,
-  so a test passing 14/15 shows up as a tracked flake rather than a
-  green checkmark someone got lucky on. Three baseline flakes are
-  already known; this makes the count official.
+- **Poisoned-free / redzone heap mode** — `make DEBUG_HEAP=1`. Freed
+  size-class slots are filled with `0xDF`; every slot handed out is
+  verified still poison; a free magic plus a free-list walk catches
+  double frees; and `[requested, size_class)` is filled with `0xBB` and
+  checked on free. Each of the three detectors was proved by making it
+  fire, then reverting the proof.
+  Two constraints shaped this and are worth not rediscovering: `kfree`
+  gets no size (only `page->size_class`), so the requested length lives
+  in a `req[]` table in the **page header** — a per-allocation header
+  in front of the slot would shift every slot off the 64-byte alignment
+  `fxsave`/`XSAVE` buffers in heap objects depend on, which `heap.c`
+  already has a `#GP` in `schedule()` on record for.
+  **Known limitation, deliberate:** large allocations are not covered —
+  their memory returns to the pmm on free, leaving nothing to check.
+- **Lock hold-time / contention histogram** — `make DEBUG_LOCKSTAT=1`,
+  dumped at shutdown as rank / count / max_tsc / long_holds. Per-CPU
+  and lock-free by construction; the row is found in O(1) from an index
+  cached in the CPU block. Sparse ranks fold into 38 slots × 16 buckets
+  (~5.5 KiB/CPU) because the naive table would have been ~9 MiB of
+  `.bss`.
+  **First measurement, and a CS5 target:** rank 8
+  (`LOCK_RANK_TTY`/`DRIVER`) puts **2209 of 2260 holds in the top
+  bucket** (max ~118M TSC ticks) — the console render path holding a
+  tty lock across a full framebuffer paint.
+- **Promote the gauntlet.** It was worse than "buried in a milestone
+  directory": it was **untracked**, matched by
+  `.superpowers/sdd/.gitignore`, so nothing preserved it and no plan
+  could point at it. Now `tools/gauntlet.sh`, working in
+  `build/gauntlet`, with a `GAUNTLET_MAKEFLAGS` passthrough so CS2/CS3
+  can stress the poisoned kernel, and a per-marker flakiness table so a
+  marker missing 1 run in 15 reads as `6% 1/15 …` instead of
+  disappearing behind a green `15/15`.
 
----
+**Baseline for CS2:** 15 boots under `GAUNTLET_MAKEFLAGS=DEBUG_HEAP=1`
+produced **zero heap panics**. The current kernel has no use-after-free,
+double free, or size-class overrun reachable by a full boot of every
+suite. That is the clean starting point CS2's regression tests are
+written against — and it means any heap panic CS2/CS3 produces is new
+information, not pre-existing noise.
 
 ## CS2 — Named regressions
 
