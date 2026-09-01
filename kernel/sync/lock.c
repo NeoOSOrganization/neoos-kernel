@@ -3,6 +3,43 @@
 #include "arch/cpu_local.h"
 #include "drivers/char/serial.h"
 
+#ifdef NEOOS_DEBUG_LOCKSTAT
+// Ranks are sparse: 0..21 today, plus the leaf block 250..255. Fold
+// them into a compact slot so the tables stay small. A naive
+// [256 ranks][32 buckets] table per CPU is 64 KiB, and MAX_CPUS is 128
+// -- nearly 9 MiB of .bss for a debug counter. This is ~5.5 KiB per
+// CPU, and only in a DEBUG_LOCKSTAT build.
+#define LOCKSTAT_LOW     32
+#define LOCKSTAT_SLOTS   (LOCKSTAT_LOW + 6)
+#define LOCKSTAT_BUCKETS 16
+
+static inline int lockstat_slot(uint8_t rank) {
+    if (rank < LOCKSTAT_LOW) { return rank; }
+    if (rank >= 250) { return LOCKSTAT_LOW + (rank - 250); }
+    return -1;                       // a rank added between 32 and 249
+}
+
+struct lockstat {
+    uint64_t count[LOCKSTAT_SLOTS];
+    uint64_t max[LOCKSTAT_SLOTS];
+    uint64_t buckets[LOCKSTAT_SLOTS][LOCKSTAT_BUCKETS];
+};
+static struct lockstat lockstats[MAX_CPUS];
+
+static inline uint64_t lockstat_now(void) {
+    uint32_t lo, hi;
+    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+// O(1) via the index cached in the block. A scan would run on every
+// single unlock, which is not acceptable even in a debug build.
+static inline struct lockstat *lockstat_mine(struct cpu *c) {
+    int i = c->lockstat_index;
+    return &lockstats[(i >= 0 && i < MAX_CPUS) ? i : 0];
+}
+#endif
+
 // Writes without taking the serial lock: this is reachable from inside
 // a lock acquisition, and the panicking context may already hold it.
 static void panic_puts(const char *s) {
@@ -126,6 +163,9 @@ uint64_t spin_lock_irqsave(struct spinlock *l) {
 
     c->held_names[c->held_depth] = l->name;
     c->held_ranks[c->held_depth++] = l->rank;
+#ifdef NEOOS_DEBUG_LOCKSTAT
+    c->lockstat_acquire_tsc[c->held_depth - 1] = lockstat_now();
+#endif
     return flags;
 }
 
@@ -134,6 +174,20 @@ void spin_unlock_irqrestore(struct spinlock *l, uint64_t flags) {
     if (c->held_depth <= 0) {
         lock_panic("unlock with nothing held", l->name, 0);
     }
+#ifdef NEOOS_DEBUG_LOCKSTAT
+    {
+        int sl = lockstat_slot(l->rank);
+        if (sl >= 0) {
+            uint64_t held = lockstat_now() - c->lockstat_acquire_tsc[c->held_depth - 1];
+            struct lockstat *ls = lockstat_mine(c);
+            ls->count[sl]++;
+            if (held > ls->max[sl]) { ls->max[sl] = held; }
+            unsigned b = 0;
+            while (b < LOCKSTAT_BUCKETS - 1 && (held >> (b + 1))) { b++; }
+            ls->buckets[sl][b]++;
+        }
+    }
+#endif
     c->held_depth--;
     __atomic_store_n(&l->locked, 0u, __ATOMIC_RELEASE);
     if (flags & (1ULL << 9)) {
@@ -329,4 +383,34 @@ void mutex_unlock(struct mutex *m) {
     m->locked = 0;
     waitq_wake_one(&m->waiters);
     spin_unlock_irqrestore(&m->guard, f);
+}
+
+void lock_stats_dump(void) {
+#ifdef NEOOS_DEBUG_LOCKSTAT
+    // rank, total acquisitions, longest hold in TSC ticks, and how many
+    // holds landed in the top bucket (>= 2^15 ticks) -- the column that
+    // says "this lock is held a long time", which is what CS5's
+    // vfs_lock and poll_broadcast work needs to move.
+    serial_write_string("[lockstat] rank count max_tsc long_holds\n");
+    for (int sl = 0; sl < LOCKSTAT_SLOTS; sl++) {
+        uint64_t count = 0, max = 0, longh = 0;
+        for (int i = 0; i < MAX_CPUS; i++) {
+            count += lockstats[i].count[sl];
+            if (lockstats[i].max[sl] > max) { max = lockstats[i].max[sl]; }
+            longh += lockstats[i].buckets[sl][LOCKSTAT_BUCKETS - 1];
+        }
+        if (!count) { continue; }
+        uint64_t rank = (sl < LOCKSTAT_LOW) ? (uint64_t)sl
+                                            : (uint64_t)(250 + (sl - LOCKSTAT_LOW));
+        serial_write_string("[lockstat] ");
+        serial_write_hex64(rank);
+        serial_write_string(" ");
+        serial_write_hex64(count);
+        serial_write_string(" ");
+        serial_write_hex64(max);
+        serial_write_string(" ");
+        serial_write_hex64(longh);
+        serial_write_string("\n");
+    }
+#endif
 }

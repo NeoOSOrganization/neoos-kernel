@@ -75,6 +75,14 @@ struct cpu {
     // had no name to pass costs a reproduction run to learn what a
     // recorded string would have said outright.
     const char       *held_names[LOCK_MAX_HELD];
+#ifdef NEOOS_DEBUG_LOCKSTAT
+    // CS1: TSC at acquire, per held-stack depth, and this block's index
+    // into lock.c's lockstats[]. The histograms themselves live in
+    // lock.c -- see the sizing note there. Appended at the END: the
+    // CPU_* offsets above are mirrored in assembly by eye.
+    uint64_t          lockstat_acquire_tsc[LOCK_MAX_HELD];
+    int               lockstat_index;
+#endif
 };
 
 _Static_assert(offsetof(struct cpu, self)             == CPU_SELF,     "CPU_SELF");

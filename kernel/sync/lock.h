@@ -170,6 +170,10 @@ void     spin_unlock_raw(struct spinlock *l, uint64_t flags);
 
 // Number of spinlocks currently held by this CPU. Used by the mutex
 // code to refuse to sleep with a spinlock held.
+// Prints per-rank hold-time statistics gathered by a DEBUG_LOCKSTAT
+// build. A no-op otherwise.
+void lock_stats_dump(void);
+
 int lock_held_depth(void);
 const char *lock_held_top_name(void);
 

@@ -47,6 +47,7 @@
 #include "lib/rand.h"
 
 void kernel_shutdown(void) {
+    lock_stats_dump();   // no-op unless DEBUG_LOCKSTAT
     serial_write_string("\n[kernel] shutdown requested, powering off\n");
     cli();
 

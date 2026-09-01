@@ -17,6 +17,9 @@ static void cpu_local_install(int index) {
     c->kernel_stack     = 0;
     c->lapic_id         = 0;
     c->held_depth       = 0;
+#ifdef NEOOS_DEBUG_LOCKSTAT
+    c->lockstat_index   = index;
+#endif
     c->ready_head       = 0;
     c->ready_tail       = 0;
     c->ready_count      = 0;
