@@ -550,6 +550,13 @@ static void deliver_one(struct thread *t, int sig, struct siginfo *info,
         case SIGACT_STOP: signal_do_stop(t, sig); return;
         case SIGACT_CONT: return;
         default:
+            // execve asked for THIS THREAD alone to die
+            // (thread_kill_solo): the process is being re-imaged, and
+            // taking it down here would turn every multi-threaded exec
+            // into a kill.
+            if (__atomic_load_n(&t->solo_kill, __ATOMIC_ACQUIRE)) {
+                thread_exit_self(0);    // never returns
+            }
             signal_terminate(p, sig);   // never returns
         }
     }

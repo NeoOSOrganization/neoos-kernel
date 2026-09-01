@@ -92,7 +92,7 @@ builds; it is not part of the stable ABI.)
 | 5 | wait | *(NeoOS wait-by-pid)* | implemented |
 | 7 | open | `open` | implemented, **`O_CREAT` value diverges** (§5) |
 | 8–11 | close/mkdir/unlink/lseek | same names | implemented |
-| 12/13 | fork/exec | `fork`/`execve` | implemented (COW); **exec takes no argv** |
+| 12/13 | fork/exec | `fork`/`execve` | implemented (COW); **exec takes no argv**. Like `execve`, it terminates every other thread of the process first (and waits for them) before releasing the old address space |
 | 14/15 | mount/umount | `mount`/`umount2` | implemented, NeoOS-shaped |
 | 16 | getdents | `getdents64` | implemented, **struct now MATCHES** (§4) |
 | 17–20 | thread create/exit/join/self | `clone`/`exit`/`futex`/`gettid` | NeoOS-shaped, **not `clone`** |
@@ -100,7 +100,7 @@ builds; it is not part of the stable ABI.)
 | 29–31 | kill / tkill / tgkill | same names | implemented |
 | 32 | wait4 | `wait4` | implemented |
 | 33–36 | setpgid/getpgid/setsid/getsid | same names | implemented |
-| 37–39 | mmap / munmap / mprotect | same names | implemented, anonymous only |
+| 37–39 | mmap / munmap / mprotect | same names | implemented, anonymous only; `mprotect` preserves page contents in both directions and supports `PROT_NONE` |
 | 40–41 | cpu_count / getcpu | `sysconf`/`getcpu` | implemented |
 | **42** | **futex** | `futex` | **NEW.** WAIT and WAKE only (§6) |
 | **43** | **pipe2** | `pipe2` | **NEW.** `pipe()` is library code over it |

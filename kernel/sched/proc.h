@@ -78,6 +78,14 @@ struct process {
     // (proc_alloc zeroes); the generation counter starts at 1.
     uint32_t iter_gen;
     uint64_t pml4_phys;             // 0 = shares the kernel address space
+    // What pml4_phys was when the address space was torn down.
+    // proc_put_live cannot shoot down (it runs with interrupts off on a
+    // thread already marked ZOMBIE), so it defers every frame instead
+    // and proc_reap performs the shootdown -- which needs to know which
+    // address space to name. The value stays unambiguous because those
+    // frames, the PML4 frame among them, are still sitting on the
+    // deferred queue and cannot have been handed to anyone else yet.
+    uint64_t reap_pml4_phys;
     // What the ELF loader learned about the image: where its program
     // headers landed, and its PT_TLS template. Kept for the whole life
     // of the process because every thread created later needs the TLS
@@ -186,6 +194,11 @@ struct thread {
     // and by the stop itself. It is what lets a SIGCONT cancel a stop
     // that has been decided but not yet committed -- see signal_do_stop.
     int           stopping;
+    // Set by thread_kill_solo (execve). A fatal signal normally takes
+    // the WHOLE process down -- that is what SIGKILL means -- but exec
+    // has to end its siblings while the process itself keeps going, so
+    // this redirects the fatal default action to thread_exit_self.
+    volatile int  solo_kill;
     stack_t_k     altstack;         // sigaltstack; zeroed = none
     // cpu_state_size() bytes, 64-byte aligned. A pointer rather than an
     // inline array because the size is only known at run time -- see
@@ -291,6 +304,7 @@ int64_t wait_for_pid(int pid);
 // RDI = `arg`. Returns the new thread, or 0 if the process is exiting,
 // out of stack slots, or out of memory.
 void thread_kill(struct thread *t);
+void thread_kill_solo(struct thread *t);
 struct thread *thread_create(uint64_t entry, uint64_t arg);
 
 // Reference counting for `struct thread` (see the `ref` field). Take a

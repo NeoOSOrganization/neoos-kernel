@@ -82,14 +82,22 @@ static void shootdown_release(void) {
 // lock ranks above mm_lock but below nothing this path holds, whereas
 // deferred_lock is the innermost rank in the kernel and nothing may be
 // acquired beneath it.
+//
+// Each entry also records the address space it was unmapped from. A
+// stale translation for a frame can only exist on a CPU running in that
+// address space, so a shootdown aimed at one pml4 may release exactly
+// its own frames -- which is what keeps an ordinary munmap from having
+// to broadcast an IPI to every CPU in the machine. Owner 0 means "not
+// known"; those wait for a full shootdown.
 #define DEFER_MAX 256
-struct deferred { uint64_t phys; unsigned order; };
+struct deferred { uint64_t phys; uint64_t owner; unsigned order; };
 static struct deferred deferred_frames[DEFER_MAX];
 static int             deferred_n;
 
 struct deferred_node {
     struct deferred_node *next;
     uint64_t phys;
+    uint64_t owner;
     unsigned order;
 };
 static struct deferred_node *deferred_overflow;
@@ -104,10 +112,11 @@ void tlb_init(void) {
     deferred_n = 0;
 }
 
-void tlb_defer_free(uint64_t phys, unsigned order) {
+void tlb_defer_free(uint64_t phys, unsigned order, uint64_t owner_pml4) {
     uint64_t f = spin_lock_irqsave(&deferred_lock);
     if (deferred_n < DEFER_MAX) {
         deferred_frames[deferred_n].phys  = phys;
+        deferred_frames[deferred_n].owner = owner_pml4;
         deferred_frames[deferred_n].order = order;
         deferred_n++;
         spin_unlock_irqrestore(&deferred_lock, f);
@@ -130,6 +139,7 @@ void tlb_defer_free(uint64_t phys, unsigned order) {
         return;
     }
     n->phys  = phys;
+    n->owner = owner_pml4;
     n->order = order;
 
     f = spin_lock_irqsave(&deferred_lock);
@@ -138,7 +148,7 @@ void tlb_defer_free(uint64_t phys, unsigned order) {
     spin_unlock_irqrestore(&deferred_lock, f);
 }
 
-void tlb_flush_deferred(void) {
+void tlb_flush_deferred(uint64_t pml4_phys) {
     // The array is drained one entry at a time rather than copied out
     // wholesale. A 256-entry copy is 4KiB, which is too much to put on
     // a 16KiB kernel stack that interrupts also nest on -- and making
@@ -146,26 +156,52 @@ void tlb_flush_deferred(void) {
     // once would clobber each other's copy the moment the first one
     // dropped the lock. Taking the lock per entry costs nothing next to
     // the pmm_free it guards.
-    for (;;) {
+    //
+    // Scanned from the back with a swap-remove, so releasing a subset
+    // stays O(n) and the surviving entries need no shuffling. `i` is
+    // re-read from deferred_n on every pass because the lock is dropped
+    // across pmm_free and another CPU may have pushed or pulled.
+    for (int i = 0; ; i++) {
         uint64_t lf = spin_lock_irqsave(&deferred_lock);
-        if (deferred_n == 0) { spin_unlock_irqrestore(&deferred_lock, lf); break; }
-        struct deferred d = deferred_frames[--deferred_n];
+        if (i >= deferred_n) { spin_unlock_irqrestore(&deferred_lock, lf); break; }
+        struct deferred d = deferred_frames[i];
+        if (pml4_phys != 0 && d.owner != pml4_phys) {
+            spin_unlock_irqrestore(&deferred_lock, lf);
+            continue;                      // someone else's; leave it queued
+        }
+        deferred_frames[i] = deferred_frames[--deferred_n];
         spin_unlock_irqrestore(&deferred_lock, lf);
         pmm_free(d.phys, d.order);
+        i--;                               // re-examine the entry swapped in
     }
 
     // The overflow list is detached with a single pointer swap, so it
-    // needs no copy at all and can be walked outside the lock.
+    // needs no copy at all and can be walked outside the lock. Entries
+    // that do not belong to this shootdown go back on afterwards.
     uint64_t f = spin_lock_irqsave(&deferred_lock);
     struct deferred_node *over = deferred_overflow;
     deferred_overflow = 0;
     spin_unlock_irqrestore(&deferred_lock, f);
 
+    struct deferred_node *keep = 0;
     while (over) {
         struct deferred_node *next = over->next;
-        pmm_free(over->phys, over->order);
-        kfree(over);
+        if (pml4_phys != 0 && over->owner != pml4_phys) {
+            over->next = keep;
+            keep = over;
+        } else {
+            pmm_free(over->phys, over->order);
+            kfree(over);
+        }
         over = next;
+    }
+    if (keep) {
+        struct deferred_node *tail = keep;
+        while (tail->next) { tail = tail->next; }
+        f = spin_lock_irqsave(&deferred_lock);
+        tail->next = deferred_overflow;
+        deferred_overflow = keep;
+        spin_unlock_irqrestore(&deferred_lock, f);
     }
 }
 
@@ -243,7 +279,15 @@ void tlb_shootdown(uint64_t pml4_phys) {
     if (!(caller_flags & (1ULL << 9))) { __asm__ volatile ("cli"); }
 
     shootdown_release();
-    tlb_flush_deferred();
+
+    // Release exactly what this shootdown covered. The deferred list is
+    // global -- one address space's frames sit in it next to another's
+    // -- so a targeted shootdown may only release frames tagged with
+    // the pml4 it targeted; handing back a neighbour's would put a frame
+    // in pmm while a CPU this shootdown never touched still had a
+    // translation for it. A full shootdown (pml4_phys == 0) reached
+    // every CPU and releases everything.
+    tlb_flush_deferred(pml4_phys);
 }
 
 void tlb_shootdown_selftest(void) {
@@ -257,7 +301,7 @@ void tlb_shootdown_selftest(void) {
         return;
     }
     uint64_t free_before = pmm_free_frame_count();
-    tlb_defer_free(frame, 0);
+    tlb_defer_free(frame, 0, 0);   // owner 0: released only by a full shootdown
     if (pmm_free_frame_count() != free_before) {
         serial_write_string("[tlb] selftest FAILED: deferred free returned the frame early\n");
         return;
@@ -274,6 +318,30 @@ void tlb_shootdown_selftest(void) {
     if (smp_online_count() > 1 &&
         __atomic_load_n(&ipi_tlb_count, __ATOMIC_ACQUIRE) <= before) {
         serial_write_string("[tlb] selftest FAILED: shootdown IPI never delivered\n");
+        return;
+    }
+
+    // Ownership tagging: a shootdown aimed at one address space must
+    // release that address space's deferred frames and NOBODY else's.
+    // Getting this wrong is silent -- a frame handed back to pmm while
+    // another CPU still has a translation for it -- so it is asserted
+    // rather than assumed. The two owner values are fake pml4
+    // addresses: no CPU is running in either, so neither shootdown
+    // sends an IPI, which is exactly the case the fast path relies on.
+    uint64_t owned = pmm_alloc(0);
+    if (!owned) { serial_write_string("[tlb] selftest FAILED: no memory (owner)\n"); return; }
+    uint64_t mine = 0xAAAA000, theirs = 0xBBBB000;
+    free_before = pmm_free_frame_count();
+    tlb_defer_free(owned, 0, mine);
+
+    tlb_shootdown(theirs);
+    if (pmm_free_frame_count() != free_before) {
+        serial_write_string("[tlb] selftest FAILED: shootdown released another address space's frame\n");
+        return;
+    }
+    tlb_shootdown(mine);
+    if (pmm_free_frame_count() != free_before + 1) {
+        serial_write_string("[tlb] selftest FAILED: targeted shootdown did not release its own frame\n");
         return;
     }
     serial_write_string("[tlb] shootdown selftest passed, acks=");

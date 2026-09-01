@@ -95,7 +95,9 @@ int paging_unmap_from(uint64_t *pml4, uint64_t virt, int free_frame) {
     uint64_t *pdpt = table_entry(pml4, PML4_INDEX(virt), 0, 0);
     uint64_t *pd   = pdpt ? table_entry(pdpt, PDPT_INDEX(virt), 0, 0) : 0;
     uint64_t *pt   = pd ? table_entry(pd, PD_INDEX(virt), 0, 0) : 0;
-    if (!pt || !(pt[PT_INDEX(virt)] & PAGE_PRESENT)) {
+    // PAGE_PROTNONE without PAGE_PRESENT is still an owned frame (see
+    // paging.h): unmapping a PROT_NONE range must free it, not leak it.
+    if (!pt || !(pt[PT_INDEX(virt)] & PAGE_HAS_FRAME)) {
         return 0;
     }
     uint64_t phys = pt[PT_INDEX(virt)] & PAGE_ADDR_MASK;
@@ -105,8 +107,44 @@ int paging_unmap_from(uint64_t *pml4, uint64_t virt, int free_frame) {
         // NOT pmm_free: the frame must not be reusable until every CPU
         // that might hold a stale TLB entry for it has acknowledged a
         // shootdown. The local invlpg above only covers THIS CPU.
-        tlb_defer_free(phys, 0);
+        //
+        // The owner is this very page table: `pml4` is a physmap alias,
+        // so its physical address is the pml4_phys a shootdown targets.
+        tlb_defer_free(phys, 0, virt_to_phys_physmap((uint64_t)(uintptr_t)pml4));
     }
+    return 1;
+}
+
+// Rewrites one leaf's access bits in place (see paging.h). The caller
+// must still shoot down the TLB afterwards: the invlpg here covers only
+// the CPU that ran it, and a stale WRITABLE entry on another CPU is
+// exactly the permission mprotect was asked to take away.
+int paging_setprot_from(uint64_t *pml4, uint64_t virt, uint64_t flags) {
+    uint64_t *pdpt = table_entry(pml4, PML4_INDEX(virt), 0, 0);
+    uint64_t *pd   = pdpt ? table_entry(pdpt, PDPT_INDEX(virt), 0, 0) : 0;
+    uint64_t *pt   = pd ? table_entry(pd, PD_INDEX(virt), 0, 0) : 0;
+    if (!pt) { return 0; }
+
+    unsigned idx = PT_INDEX(virt);
+    uint64_t e = pt[idx];
+    if (!(e & PAGE_HAS_FRAME)) { return 0; }
+
+    // Bits describing the FRAME rather than the access to it survive
+    // untouched: the address, PAGE_NOFREE (a device frame the kernel
+    // owns forever) and PAGE_COW (fork's sharing marker).
+    uint64_t keep = e & (PAGE_ADDR_MASK | PAGE_NOFREE | PAGE_COW);
+
+    if (flags & PAGE_PRESENT) {
+        // A copy-on-write page stays read-only whatever the new prot
+        // says. Granting PAGE_WRITABLE here would let a write land in a
+        // frame the other side of a fork() still shares; the COW fault
+        // handler is what grants write, after making a private copy.
+        if (e & PAGE_COW) { flags &= ~PAGE_WRITABLE; }
+        pt[idx] = keep | (flags & ~PAGE_ADDR_MASK);
+    } else {
+        pt[idx] = keep | PAGE_PROTNONE;
+    }
+    __asm__ volatile ("invlpg (%0)" :: "r"(virt) : "memory");
     return 1;
 }
 
@@ -385,6 +423,16 @@ uint64_t paging_leaf_entry(uint64_t virt) {
 // pml4[1] -- pml4[0] being the low identity map that pmm dereferences
 // free blocks through. See task_exit(), which switches to p4_table
 // first.
+//
+// Every frame goes to tlb_defer_free rather than straight to pmm. This
+// address space may still be live in another CPU's CR3 -- a sibling
+// thread that has been killed but has not yet reached schedule() is
+// still running on it -- and handing its page tables back to the
+// allocator while a CPU can still walk them is the worst version of a
+// stale translation: the CPU walks whatever the next owner writes
+// there. The frames come back to pmm at the next full shootdown
+// (tlb_shootdown(0)), which proc_reap performs once the process is
+// completely gone.
 void free_address_space(uint64_t pml4_phys) {
     uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
 
@@ -413,18 +461,18 @@ void free_address_space(uint64_t pml4_phys) {
                 uint64_t *pt = (uint64_t *)phys_to_virt(pt_phys);
 
                 for (unsigned i1 = 0; i1 < 512; i1++) {
-                    if ((pt[i1] & PAGE_PRESENT) && !(pt[i1] & PAGE_NOFREE)) {
-                        pmm_free(pt[i1] & PAGE_ADDR_MASK, 0);
+                    if ((pt[i1] & PAGE_HAS_FRAME) && !(pt[i1] & PAGE_NOFREE)) {
+                        tlb_defer_free(pt[i1] & PAGE_ADDR_MASK, 0, pml4_phys);
                     }
                 }
-                pmm_free(pt_phys, 0);
+                tlb_defer_free(pt_phys, 0, pml4_phys);
             }
-            pmm_free(pd_phys, 0);
+            tlb_defer_free(pd_phys, 0, pml4_phys);
         }
-        pmm_free(pdpt_phys, 0);
+        tlb_defer_free(pdpt_phys, 0, pml4_phys);
     }
 
-    pmm_free(pml4_phys, 0);
+    tlb_defer_free(pml4_phys, 0, pml4_phys);
 }
 
 // Called from isr.c on a #PF with error_code bits present=1, write=1,

@@ -59,7 +59,11 @@ alongside the library code that exposes it.
   descriptors, PID, and parent are preserved. On success, never
   returns. Returns `-1` on failure (bad path, out of memory), leaving
   the calling process completely unchanged and still running its
-  original code.
+  original code — *including* its other threads, which are terminated
+  only once the new image has been built successfully. As in Linux
+  `execve`, the new program starts as the single remaining thread of
+  the process; every sibling is terminated and waited for before the
+  old address space is released.
 - `int mount(const char *source, const char *target, const char *fstype)`
   — mounts a filesystem at `target`. `fstype` is `"fat"`, `"ramfs"`, or
   `"devfs"`; `source` is `"hd0"` or `"hd1"` for `"fat"` and ignored
@@ -655,6 +659,18 @@ int arch_prctl(int code, unsigned long addr);   /* ARCH_SET_FS, ARCH_GET_FS */
 `mmap_raw`/`munmap_raw` the rest of this library's convention uses.
 Only anonymous private mappings are supported: a non-negative `fd` or a
 non-zero offset returns `MAP_FAILED`.
+
+`mprotect` has POSIX/Linux semantics for page contents: it changes
+access only and never discards data, in either direction. A range made
+`PROT_READ` keeps everything written to it and becomes read-only; made
+`PROT_READ|PROT_WRITE` again it is still there and writable.
+`PROT_NONE` is supported and faults on read as well as write, and the
+contents survive a `PROT_NONE` round trip. A `PROT_NONE` page keeps its
+frame, so a large `PROT_NONE` guard region costs physical memory only
+for the pages that were actually touched before it was protected.
+`mprotect` on a copy-on-write page (either side of a `fork`) does not
+break the sharing itself: the page is left read-only and the first
+write takes the ordinary COW fault.
 
 ### DIVERGENCE — W^X enforced
 

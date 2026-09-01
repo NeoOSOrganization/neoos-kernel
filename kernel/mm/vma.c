@@ -2,6 +2,7 @@
 #include "mm/pmm.h"
 #include "mm/paging.h"
 #include "mm/heap.h"
+#include "smp/tlb.h"
 #include "sched/proc.h"
 #include "errno.h"
 #include "drivers/char/serial.h"
@@ -216,13 +217,31 @@ static int vma_mprotect_locked(struct process *p, uint64_t addr, uint64_t len, u
 
         v->prot = prot;
 
-        // Already-populated pages keep their old PTE bits until they
-        // are faulted again. A mapping being made MORE permissive is
-        // fine -- the next fault re-evaluates. A mapping being made
-        // LESS permissive must lose its pages now, or a stale writable
-        // PTE would outlive the mprotect that removed the right.
-        if (!(prot & PROT_WRITE)) {
-            unmap_range(p, v->start, v->end, !(v->flags & VMA_PHYS));
+        // Rewrite the PTEs of everything already populated, keeping the
+        // frames and their contents.
+        //
+        // This used to unmap-and-free the range whenever the new prot
+        // was not writable -- which includes plain PROT_READ, so
+        // mprotect(p, n, PROT_READ) silently threw the data away. A page
+        // that has been written must survive being made read-only; that
+        // is most of what mprotect is for.
+        //
+        // Widening is applied here too rather than left to the next
+        // fault: a page parked PROT_NONE is not present, but a page
+        // being made writable again IS, so no fault would ever arrive to
+        // re-evaluate it. paging_setprot_from is the one that refuses to
+        // hand PAGE_WRITABLE to a copy-on-write page.
+        if (p->pml4_phys) {
+            uint64_t pf = 0;
+            if (prot != PROT_NONE) {
+                pf = PAGE_PRESENT | PAGE_USER;
+                if (prot & PROT_WRITE) { pf |= PAGE_WRITABLE; }
+                if (!(prot & PROT_EXEC)) { pf |= PAGE_NO_EXECUTE; }
+            }
+            uint64_t *pml4 = (uint64_t *)phys_to_virt(p->pml4_phys);
+            for (uint64_t a = v->start; a < v->end; a += PMM_FRAME_SIZE) {
+                paging_setprot_from(pml4, a, pf);
+            }
         }
     }
     return 0;
@@ -274,11 +293,37 @@ static void vma_destroy_all_locked(struct process *p) {
 // within an already-locked region. The lock ranks at LOCK_RANK_MM (3),
 // beneath which the allocator (HEAP 12, PMM 13) is legally reachable,
 // and none of these paths sleep or reach schedule().
+//
+// They are also where the TLB is settled, because it can only be
+// settled with mm_lock RELEASED: tlb_shootdown panics if any lock is
+// held, since a target CPU spinning on that same mm_lock with
+// interrupts off could never acknowledge the IPI.
+//
+// Skipping this was a permanent frame leak, not just a stale-TLB bug.
+// paging_unmap_from does not call pmm_free at all -- it calls
+// tlb_defer_free, and the deferred queue is drained by exactly one
+// thing, the tail of tlb_shootdown. With no shootdown after boot, every
+// frame ever munmap'd, mprotect'd away or freed with a thread stack sat
+// in that queue forever.
+//
+// Targeted at this process's own pml4, which is both correct and the
+// difference between an munmap costing a local CR3 reload and an munmap
+// broadcasting an IPI to every CPU in the machine: only a CPU running a
+// thread of THIS process can hold a translation for the pages it just
+// unmapped, and tlb_defer_free tagged the frames with the same pml4 so
+// the drain releases exactly them.
+
+static void vma_tlb_settle(struct process *p) {
+    // A scratch process with no address space (vma_selftest) never
+    // mapped anything and never deferred anything.
+    if (p->pml4_phys) { tlb_shootdown(p->pml4_phys); }
+}
 
 int vma_munmap(struct process *p, uint64_t addr, uint64_t len) {
     uint64_t f = spin_lock_irqsave(&p->mm_lock);
     int rc = vma_munmap_locked(p, addr, len);
     spin_unlock_irqrestore(&p->mm_lock, f);
+    vma_tlb_settle(p);
     return rc;
 }
 
@@ -287,6 +332,9 @@ int64_t vma_mmap(struct process *p, uint64_t addr, uint64_t len,
     uint64_t f = spin_lock_irqsave(&p->mm_lock);
     int64_t rc = vma_mmap_locked(p, addr, len, prot, flags);
     spin_unlock_irqrestore(&p->mm_lock, f);
+    // MAP_FIXED over a live mapping unmaps it first; a plain mmap maps
+    // nothing and has nothing to settle.
+    if (flags & MAP_FIXED) { vma_tlb_settle(p); }
     return rc;
 }
 
@@ -302,6 +350,8 @@ int64_t vma_map_phys(struct process *p, uint64_t phys, uint64_t len, uint32_t pr
     uint64_t f = spin_lock_irqsave(&p->mm_lock);
     int64_t rc = vma_map_phys_locked(p, phys, len, prot);
     spin_unlock_irqrestore(&p->mm_lock, f);
+    // Only the failure path unmaps anything (its own rollback).
+    if (rc < 0) { vma_tlb_settle(p); }
     return rc;
 }
 
@@ -309,6 +359,9 @@ int vma_mprotect(struct process *p, uint64_t addr, uint64_t len, uint32_t prot) 
     uint64_t f = spin_lock_irqsave(&p->mm_lock);
     int rc = vma_mprotect_locked(p, addr, len, prot);
     spin_unlock_irqrestore(&p->mm_lock, f);
+    // Unconditional: the PTEs were rewritten in place, so another CPU's
+    // TLB can still hold the permission this call just took away.
+    vma_tlb_settle(p);
     return rc;
 }
 
@@ -323,6 +376,7 @@ void vma_destroy_all(struct process *p) {
     uint64_t f = spin_lock_irqsave(&p->mm_lock);
     vma_destroy_all_locked(p);
     spin_unlock_irqrestore(&p->mm_lock, f);
+    vma_tlb_settle(p);
 }
 
 static int vma_count(struct process *p) {

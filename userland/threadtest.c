@@ -101,6 +101,48 @@ static int check_shared_fd_table(void) {
     return 1;
 }
 
+// Spins forever, writing its own stack the whole time. If exec() frees
+// the address space with this thread still running, this is the loop
+// that scribbles over whatever pmm handed the frames to next.
+static void exec_sibling(void *arg) {
+    (void)arg;
+    unsigned sum = 0;
+    for (;;) {
+        volatile unsigned char scratch[512];
+        for (int i = 0; i < 512; i++) { scratch[i] = (unsigned char)i; }
+        for (int i = 0; i < 512; i++) { sum += scratch[i]; }
+        yield();
+    }
+}
+
+// exec() must reduce the process to a single thread BEFORE it frees the
+// old address space -- Linux execve() does, and the siblings are
+// executing in exactly the address space being freed. Run in a forked
+// child, since a successful exec never returns.
+static int check_exec_kills_threads(void) {
+    int child = fork();
+    if (child < 0) {
+        printf("[threadtest] FAILED: fork for exec test\n");
+        return 0;
+    }
+    if (child == 0) {
+        thread_t t[3];
+        for (int i = 0; i < 3; i++) {
+            if (thread_create(&t[i], exec_sibling, 0) != 0) { exit(1); }
+        }
+        for (volatile int i = 0; i < 500000; i++) { }   // let them get going
+        exec("/BIN/EXECTARG.ELF");                      // must not return
+        exit(2);
+    }
+    int code = wait(child);
+    if (code != 0) {
+        printf("[threadtest] FAILED: exec with live siblings exited %d\n", code);
+        return 0;
+    }
+    printf("[threadtest] exec reduces the process to one thread passed\n");
+    return 1;
+}
+
 // Never exits, so anything joining it blocks forever.
 static void spinner(void *arg) {
     (void)arg;
@@ -128,6 +170,7 @@ int main(int argc, char **argv) {
     ok &= check_separate_stacks();
     ok &= check_distinct_tids();
     ok &= check_shared_fd_table();
+    ok &= check_exec_kills_threads();
 
     printf("[threadtest] %s\n", ok ? "ALL PASSED" : "SOME CHECKS FAILED");
 

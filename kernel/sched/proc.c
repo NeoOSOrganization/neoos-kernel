@@ -10,6 +10,7 @@
 #include "mm/pmm.h"
 #include "mm/paging.h"
 #include "mm/heap.h"
+#include "smp/tlb.h"
 #include "arch/tss.h"
 #include "drivers/char/serial.h"
 #include "fs/vfs.h"
@@ -135,6 +136,9 @@ int thread_stack_alloc(struct process *p, uint64_t *out_top) {
                 paging_unmap_from(pml4, v, 1);
             }
             spin_unlock_irqrestore(&p->mm_lock, f);
+            // The rollback deferred frames; only a shootdown returns
+            // them to pmm. See the note above vma_tlb_settle.
+            tlb_shootdown(p->pml4_phys);
             return -1;
         }
         zero_frames(frame, 0);
@@ -151,6 +155,11 @@ int thread_stack_alloc(struct process *p, uint64_t *out_top) {
 
 void thread_stack_free(struct process *p, int slot) {
     if (slot < 0) { return; }
+    // The address space is already gone (the process exited, or exec
+    // replaced it): the stack went with it and there is nothing here to
+    // unmap. Walking a zero pml4 through phys_to_virt would be a wild
+    // pointer into the physmap's first page.
+    if (!p->pml4_phys) { return; }
     uint64_t top = thread_stack_top_for(slot);
     uint64_t f = spin_lock_irqsave(&p->mm_lock);
     uint64_t *pml4 = (uint64_t *)phys_to_virt(p->pml4_phys);
@@ -160,6 +169,10 @@ void thread_stack_free(struct process *p, int slot) {
     }
     p->stack_slots &= (uint16_t)~(1u << slot);
     spin_unlock_irqrestore(&p->mm_lock, f);
+    // With mm_lock released: the unmapped frames are only deferred until
+    // a shootdown runs, and a sibling on another CPU may still hold a
+    // writable translation for the stack that just went away.
+    tlb_shootdown(p->pml4_phys);
 }
 
 // Builds a complete, freshly-loaded user address space from the ELF
@@ -421,6 +434,57 @@ struct process *spawn_argv(const char *path, const struct spawn_args *args) {
     return p;
 }
 
+// Reduces the calling process to a single thread -- this one -- and
+// does not return until that is actually true.
+//
+// Linux execve() does the same, and for the same reason: the address
+// space exec_task() is about to free is the one every sibling is
+// executing in. Leaving them running turned exec into a
+// use-after-free of the whole old address space the moment a
+// multi-threaded process exec'd.
+//
+// The snapshot-then-kill shape is process_exit()'s, and so is its
+// reason: thread_kill -> signal_send_thread can spin waiting for its
+// target to leave a CPU, and a target blocked on p->lock inside
+// thread_exit_self would never get there if this still held it.
+static void exec_reduce_to_one_thread(struct process *p) {
+    struct thread *self = current_thread();
+
+    struct thread *victims[MAX_THREADS_PER_PROC];
+    int nv = 0;
+    uint64_t f = spin_lock_irqsave(&p->lock);
+    for (struct thread *t = p->threads;
+         t && nv < MAX_THREADS_PER_PROC; t = t->proc_next) {
+        if (t != self) { thread_get(t); victims[nv++] = t; }
+    }
+    spin_unlock_irqrestore(&p->lock, f);
+    for (int i = 0; i < nv; i++) {
+        thread_kill_solo(victims[i]);
+        thread_put(victims[i]);
+    }
+    if (nv == 0) { return; }
+
+    // Now WAIT for them, which is the part that makes this a fix rather
+    // than a gesture. A killed thread ends in thread_exit_self, which
+    // parks itself on p->zombies and only then drops live_threads -- so
+    // the count reaching one (ours) means every sibling is past that
+    // point and off its own CPU. schedule() rather than a bare pause:
+    // on a single CPU a sibling cannot make any progress at all until
+    // this thread gives the CPU up.
+    while (__atomic_load_n(&p->live_threads, __ATOMIC_ACQUIRE) > 1) {
+        schedule();
+    }
+
+    // Those zombies' user stacks belong to the address space that is
+    // about to be freed, and exec resets the slot bitmap below. Forget
+    // the slots now, or whichever reaper eventually runs thread_join /
+    // proc_reap would unmap that slot's addresses out of the NEW address
+    // space -- where the new program's own thread may by then be living.
+    uint64_t zf = spin_lock_irqsave(&p->lock);
+    for (struct thread *z = p->zombies; z; z = z->proc_next) { z->stack_slot = -1; }
+    spin_unlock_irqrestore(&p->lock, zf);
+}
+
 // Replaces the calling task's address space in place with the ELF
 // image at `path`. Open files, pid, and parent_pid are preserved
 // (POSIX default: exec() does not close file descriptors). Returns 1
@@ -439,6 +503,11 @@ int exec_task(const char *path, struct syscall_frame *frame) {
 
     struct process *p = current_proc();
 
+    // Only now that the new image is built and validated -- everything
+    // above this line leaves the caller completely unchanged on
+    // failure, and killing its threads would not.
+    exec_reduce_to_one_thread(p);
+
     // Switch to the new address space BEFORE freeing the old one, for
     // the same reason task_exit() does: pmm stores each free block's
     // links inside the block itself, so freeing the old PML4 while it
@@ -450,6 +519,12 @@ int exec_task(const char *path, struct syscall_frame *frame) {
     p->pml4_phys = new_pml4_phys;
     __asm__ volatile ("mov %0, %%cr3" :: "r"(new_pml4_phys) : "memory");
     free_address_space(old_pml4_phys);
+    // free_address_space only DEFERS the frames; this is what returns
+    // them to pmm, and it is legal here -- syscall context, no lock
+    // held, interrupts on. Targeted at the OLD pml4, which no CPU is in
+    // any more (this one switched above, and the siblings are dead), so
+    // it sends no IPI and simply releases the frames.
+    tlb_shootdown(old_pml4_phys);
 
     cpu_state_init(current_thread()->xstate);
 
@@ -516,7 +591,10 @@ static int fork_duplicate_user_pages(uint64_t *parent_pml4, uint64_t *child_pml4
                 uint64_t *parent_pt = (uint64_t *)phys_to_virt(parent_pd[i2] & PAGE_ADDR_MASK);
 
                 for (unsigned i1 = 0; i1 < 512; i1++) {
-                    if (!(parent_pt[i1] & PAGE_PRESENT)) {
+                    // PAGE_PROTNONE without PAGE_PRESENT is an
+                    // mprotect(PROT_NONE) page that still owns its
+                    // frame. The child inherits it, PROT_NONE and all.
+                    if (!(parent_pt[i1] & PAGE_HAS_FRAME)) {
                         continue;
                     }
                     uint64_t virt = ((uint64_t)i4 << 39) | ((uint64_t)i3 << 30) |
@@ -543,7 +621,15 @@ static int fork_duplicate_user_pages(uint64_t *parent_pml4, uint64_t *child_pml4
                     // COW page from an earlier fork (its PAGE_COW bit is
                     // copied through below). Marking a real RO page COW
                     // would hand a writable copy to anyone who faults it.
-                    if (parent_pt[i1] & PAGE_WRITABLE) {
+                    // A PROT_NONE page has no present PTE to take a
+                    // write fault on, so it cannot be write-protected
+                    // into copy-on-write the ordinary way. Mark it COW
+                    // anyway: paging_setprot_from refuses PAGE_WRITABLE
+                    // to a COW page, so whichever side later mprotects
+                    // it writable gets a present read-only page and
+                    // breaks the sharing through the normal COW fault.
+                    int protnone = !(parent_pt[i1] & PAGE_PRESENT);
+                    if ((parent_pt[i1] & PAGE_WRITABLE) || protnone) {
                         parent_pt[i1] &= ~PAGE_WRITABLE;
                         parent_pt[i1] |= PAGE_COW;
                         // The parent's TLB may still cache a stale writable
@@ -566,6 +652,9 @@ static int fork_duplicate_user_pages(uint64_t *parent_pml4, uint64_t *child_pml4
                     if (paging_map_into(child_pml4, virt, phys, flags) != 0) {
                         return 0;
                     }
+                    // paging_map_into always sets PAGE_PRESENT; park the
+                    // child's copy back down to PROT_NONE.
+                    if (protnone) { paging_setprot_from(child_pml4, virt, 0); }
                 }
             }
         }
@@ -754,7 +843,9 @@ void proc_put(struct process *p) {
     kfree(p);
 }
 
-void proc_get_live(struct process *p) { p->live_threads++; }
+void proc_get_live(struct process *p) {
+    __atomic_add_fetch(&p->live_threads, 1, __ATOMIC_ACQ_REL);
+}
 
 // Orphan reparenting. When a process becomes a zombie, any child of it
 // still alive is handed to PID 1, matching Linux -- init's wait4(-1)
@@ -773,7 +864,13 @@ static void reparent_one(struct process *c, void *v) {
 // carrying only its exit code -- the struct itself outlives its
 // address space and is freed by proc_reap dropping the last reference.
 void proc_put_live(struct process *p) {
-    if (--p->live_threads > 0) { return; }
+    // Atomic: siblings SIGKILLed together by process_exit() run this
+    // concurrently on several CPUs. A non-atomic `--` lets the last two
+    // both read 1 and both write 0 -- either the address space is freed
+    // twice (every frame double-freed into the buddy allocator, then
+    // handed to two owners at once) or neither decrement wins and it
+    // leaks. Exactly one caller must see the count reach zero.
+    if (__atomic_sub_fetch(&p->live_threads, 1, __ATOMIC_ACQ_REL) > 0) { return; }
 
     if (p->pml4_phys) {
         // Leave the dying address space BEFORE freeing it. A freed frame
@@ -790,8 +887,19 @@ void proc_put_live(struct process *p) {
         // same reason schedule() falls back to it for kernel-only
         // threads: kernel text (PML4[511]) and the physmap (PML4[256])
         // live there too, and nothing below runs through user mappings.
+        //
+        // No TLB shootdown here, deliberately. This runs from
+        // thread_exit_self with interrupts disabled on a thread already
+        // marked ZOMBIE, and tlb_shootdown must enable interrupts to
+        // wait for acknowledgements -- a timer landing in that window
+        // would schedule this thread away for good, leaving the address
+        // space half-freed and the parent never notified. So
+        // free_address_space defers every frame instead, and proc_reap
+        // performs the shootdown that releases them once the process is
+        // completely off every CPU.
         __asm__ volatile ("mov %0, %%cr3" :: "r"((uint64_t)(uintptr_t)p4_table) : "memory");
         free_address_space(p->pml4_phys);
+        p->reap_pml4_phys = p->pml4_phys;
         p->pml4_phys = 0;
     }
 
@@ -936,6 +1044,28 @@ static int proc_reap(struct process *p) {
     // lookup is mid-flight it holds its own ref and does the real free;
     // otherwise the struct + pid are freed right here.
     proc_table_remove(p);
+
+    // Settle the TLB for the address space this process used to have.
+    // proc_put_live could not do it: it runs from thread_exit_self with
+    // interrupts disabled and a thread already marked ZOMBIE, and
+    // tlb_shootdown must enable interrupts to wait for its
+    // acknowledgements -- being preempted there would leave a thread
+    // that schedule() never resumes. So the whole address space is
+    // handed to tlb_defer_free instead, and this is where it comes back:
+    // by now every thread of the process is off its CPU (the loop above
+    // waited for exactly that), so no CPU can still be walking those
+    // page tables. It is also, with no lock held and interrupts on, a
+    // legal place to shoot down.
+    //
+    // Named rather than broadcast: every CPU that ever ran this process
+    // has since context-switched, and schedule() writes CR3 on every
+    // switch, so none of them can still hold one of its translations.
+    // The shootdown therefore sends no IPI at all and exists purely to
+    // release the frames.
+    if (p->reap_pml4_phys) {
+        tlb_shootdown(p->reap_pml4_phys);
+        p->reap_pml4_phys = 0;
+    }
     return 1;
 }
 

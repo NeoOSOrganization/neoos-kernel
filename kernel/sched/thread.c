@@ -124,7 +124,8 @@ struct thread *thread_alloc(struct process *p) {
         // Keep proc_next for backward compat during transition
         t->proc_next = p->threads;
         p->threads   = t;
-        p->live_threads++;
+        // Atomic to pair with proc_put_live()'s lock-free decrement.
+        __atomic_add_fetch(&p->live_threads, 1, __ATOMIC_ACQ_REL);
 
         spin_unlock_irqrestore(&p->lock, f);
     }
@@ -259,6 +260,24 @@ void thread_exit_self(int code) {
 // checks on the syscall return path.
 void thread_kill(struct thread *t) {
     if (t->state == THREAD_ZOMBIE) { return; }
+    struct siginfo info;
+    siginfo_user(&info, SIGKILL, 0);
+    signal_send_thread(t, SIGKILL, &info);
+}
+
+// Terminates `t` alone, leaving the rest of the process running.
+//
+// execve() is the only caller, and needs exactly this: POSIX says the
+// new image starts as a single thread, but the process is being
+// re-imaged, not terminated. Plain thread_kill would take the whole
+// process down with it -- SIGKILL's default action is signal_terminate
+// -> process_exit, which is correct for every other caller and fatal
+// here (observed as an exec'ing process dying with status 128+9). The
+// flag is set BEFORE the signal, so the delivery path cannot see the
+// kill without also seeing why.
+void thread_kill_solo(struct thread *t) {
+    if (t->state == THREAD_ZOMBIE) { return; }
+    __atomic_store_n(&t->solo_kill, 1, __ATOMIC_RELEASE);
     struct siginfo info;
     siginfo_user(&info, SIGKILL, 0);
     signal_send_thread(t, SIGKILL, &info);

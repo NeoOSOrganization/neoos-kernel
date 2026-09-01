@@ -23,6 +23,21 @@
 // RAM and has no place in the frame allocator.
 #define PAGE_NOFREE      (1ULL << 10)
 
+// Bit 11: this leaf still owns its frame, but the mapping is PROT_NONE.
+// x86 cannot express "present and completely inaccessible" for a user
+// page, so PROT_NONE is stored the way Linux stores it: PAGE_PRESENT
+// cleared, the frame address kept, and this bit set so the entry is
+// still recognisable as a mapped page by free_address_space(), fork()
+// and a later mprotect() that makes the range accessible again. A touch
+// faults not-present and reaches vma_fault(), which sees the vma's
+// PROT_NONE and turns it into SIGSEGV -- without ever allocating a
+// second frame over the one parked here.
+#define PAGE_PROTNONE    (1ULL << 11)
+
+// The two ways a leaf can own a frame: mapped, or parked PROT_NONE.
+// Anything walking page tables to find frames must test both.
+#define PAGE_HAS_FRAME   (PAGE_PRESENT | PAGE_PROTNONE)
+
 // The physical-frame address field of a page-table entry: bits 12-51.
 // Masking with this (rather than ~0xFFF) also strips the reserved
 // high bits and PAGE_NO_EXECUTE, leaving just the frame address.
@@ -96,6 +111,19 @@ int paging_map_range(uint64_t virt, uint64_t phys, uint64_t len, uint64_t flags)
 // `free_frame` is set. Returns 1 if a mapping was removed, 0 if the
 // address was not mapped.
 int paging_unmap_from(uint64_t *pml4, uint64_t virt, int free_frame);
+
+// Rewrites the ACCESS bits of one leaf entry in an arbitrary address
+// space, keeping the frame and everything in it. `flags` is a leaf flag
+// set of the same shape paging_map_into takes (PAGE_USER, optionally
+// PAGE_WRITABLE / PAGE_NO_EXECUTE) plus PAGE_PRESENT when the page is
+// to stay accessible; pass 0 for PROT_NONE, which parks the entry as
+// PAGE_PROTNONE. Returns 1 if an entry was rewritten, 0 if the address
+// owns no frame.
+//
+// This is what mprotect() uses. Unmapping the range instead -- what it
+// used to do -- threw the page contents away, which mprotect must never
+// do for a range it only makes less permissive.
+int paging_setprot_from(uint64_t *pml4, uint64_t virt, uint64_t flags);
 
 // 1 if every page of [addr, addr+len) is present, user-accessible and
 // safe for the KERNEL to write in the current address space. Copy-on-

@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <signal.h>
 
+#define PROT_NONE  0
 #define PROT_READ  1
 #define PROT_WRITE 2
 #define PROT_EXEC  4
@@ -94,6 +95,112 @@ int main(int argc, char **argv) {
     }
     munmap_raw((unsigned long)rw, 4096);
     printf("[mmaptest] W^X mmap/mprotect rejection passed\n");
+
+    // mprotect must not DESTROY the range it reprotects. Making a
+    // written page read-only used to unmap it and free the frame, so
+    // the data came back as zeroes -- the one thing mprotect may never
+    // do. Both directions are checked: RW -> RO keeps the bytes, and
+    // RO -> RW keeps them and makes the page writable again.
+    unsigned long plen = 4096 * 3;
+    long pa = mmap_raw(0, plen, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS);
+    if (pa < 0) { printf("[mmaptest] FAILED: mmap for mprotect test\n"); return 1; }
+    volatile unsigned char *pm = (volatile unsigned char *)(unsigned long)pa;
+    for (unsigned long i = 0; i < plen; i++) { pm[i] = (unsigned char)(i * 7 + 3); }
+
+    if (mprotect((void *)(unsigned long)pa, plen, PROT_READ) != 0) {
+        printf("[mmaptest] FAILED: mprotect to PROT_READ\n"); return 1;
+    }
+    for (unsigned long i = 0; i < plen; i++) {
+        if (pm[i] != (unsigned char)(i * 7 + 3)) {
+            printf("[mmaptest] FAILED: PROT_READ lost byte %d\n", (int)i);
+            return 1;
+        }
+    }
+    printf("[mmaptest] mprotect PROT_READ preserves contents passed\n");
+
+    // ...and it really is read-only now, not merely still readable.
+    int rochild = fork();
+    if (rochild == 0) {
+        struct sigaction sa;
+        sa.sa_handler = segv_handler; sa.sa_flags = 0; sa.sa_mask = 0;
+        sigaction(SIGSEGV, &sa, 0);
+        pm[0] = 0;          // must fault
+        exit(2);
+    }
+    if (wait(rochild) != 88) {
+        printf("[mmaptest] FAILED: write after mprotect PROT_READ did not fault\n");
+        return 1;
+    }
+
+    if (mprotect((void *)(unsigned long)pa, plen, PROT_READ | PROT_WRITE) != 0) {
+        printf("[mmaptest] FAILED: mprotect back to PROT_WRITE\n"); return 1;
+    }
+    for (unsigned long i = 0; i < plen; i++) {
+        if (pm[i] != (unsigned char)(i * 7 + 3)) {
+            printf("[mmaptest] FAILED: PROT_WRITE restore lost byte %d\n", (int)i);
+            return 1;
+        }
+    }
+    pm[0] = 0x5a;
+    if (pm[0] != 0x5a) {
+        printf("[mmaptest] FAILED: page not writable again after mprotect\n");
+        return 1;
+    }
+    pm[0] = (unsigned char)3;
+    printf("[mmaptest] mprotect RO->RW restores write access passed\n");
+
+    // PROT_NONE parks the frame rather than freeing it: reads fault
+    // while it is in force, and the bytes are still there afterwards.
+    if (mprotect((void *)(unsigned long)pa, plen, PROT_NONE) != 0) {
+        printf("[mmaptest] FAILED: mprotect to PROT_NONE\n"); return 1;
+    }
+    int nchild = fork();
+    if (nchild == 0) {
+        struct sigaction sa;
+        sa.sa_handler = segv_handler; sa.sa_flags = 0; sa.sa_mask = 0;
+        sigaction(SIGSEGV, &sa, 0);
+        volatile unsigned char sink = pm[0];   // must fault: even reading
+        (void)sink;
+        exit(2);
+    }
+    if (wait(nchild) != 88) {
+        printf("[mmaptest] FAILED: read of a PROT_NONE page did not fault\n");
+        return 1;
+    }
+    if (mprotect((void *)(unsigned long)pa, plen, PROT_READ) != 0) {
+        printf("[mmaptest] FAILED: mprotect PROT_NONE -> PROT_READ\n"); return 1;
+    }
+    for (unsigned long i = 0; i < plen; i++) {
+        if (pm[i] != (unsigned char)(i * 7 + 3)) {
+            printf("[mmaptest] FAILED: PROT_NONE lost byte %d\n", (int)i);
+            return 1;
+        }
+    }
+    printf("[mmaptest] mprotect PROT_NONE round trip passed\n");
+    munmap_raw((unsigned long)pa, plen);
+
+    // Frame reclamation. munmap does not hand its frames straight back
+    // to the allocator -- it defers them until a TLB shootdown says
+    // every CPU has dropped the translation -- and for a long time
+    // nothing ever performed that shootdown, so every page ever
+    // unmapped leaked. This maps and touches far more memory in total
+    // than the machine has; without reclamation it runs out.
+    const int rounds = 900;
+    unsigned long rlen = 4096 * 64;      // 900 * 256KiB = 225MiB total
+    for (int r = 0; r < rounds; r++) {
+        long ra = mmap_raw(0, rlen, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS);
+        if (ra < 0) {
+            printf("[mmaptest] FAILED: mmap round %d exhausted memory (%d)\n", r, (int)ra);
+            return 1;
+        }
+        volatile unsigned char *rm = (volatile unsigned char *)(unsigned long)ra;
+        for (unsigned long i = 0; i < rlen; i += 4096) { rm[i] = (unsigned char)r; }
+        if (munmap_raw((unsigned long)ra, rlen) != 0) {
+            printf("[mmaptest] FAILED: munmap round %d\n", r);
+            return 1;
+        }
+    }
+    printf("[mmaptest] unmapped frames are reclaimed passed\n");
 
     printf("[mmaptest] ALL PASSED\n");
     return 0;
