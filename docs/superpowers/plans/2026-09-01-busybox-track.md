@@ -105,9 +105,19 @@ list at all.
 
 ---
 
-## BB0 — `fork` duplicates the address-space bookkeeping
+## BB0 — `fork` duplicates the address-space bookkeeping — **DONE** (`080ce08`)
 
-**Blocker. Nothing else in the track is testable until this lands.**
+Landed with a second half the survey had not predicted: `exec_task` had
+the mirror-image bug, freeing the old address space while leaving
+`p->vmas` describing it, so a fault at a dead address was answered with
+a fresh zero page instead of SIGSEGV. Both are covered by `mmaptest`,
+and both tests were confirmed to fail before the fix.
+
+Two pieces of collateral, each its own commit: `vtswitchtest` became a
+`wait` entry (`3a3b7dd`) because the active VT is global state and
+`/dev/CONSOLE` follows it, which made `ttytest` flaky; and `init` now
+reports how much of `/ETC/INITTAB` it actually parsed (`8982891`), after
+a run booted a silent prefix of the system on a short read.
 
 - Copy the vma list in `fork_task()`: allocate a `struct vma` per
   parent entry, in order, and copy `start`/`end`/`prot`/`flags`. Copy
