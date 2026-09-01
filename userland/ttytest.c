@@ -53,8 +53,10 @@ static void check_isatty(void) {
 static void check_winsize(void) {
     struct winsize ws;
     if (ioctl(1, TIOCGWINSZ, &ws) != 0) { fail("TIOCGWINSZ", -1); return; }
-    if (ws.ws_row != 25 || ws.ws_col != 80) {
-        fail("window size should be 80x25", ws.ws_col);
+    // The console is the active VT; its size is the framebuffer's (or
+    // 80x25 on VGA text). Just require a sane non-zero geometry.
+    if (ws.ws_row < 24 || ws.ws_col < 80) {
+        fail("window size not reported", ws.ws_col);
         return;
     }
     printf("[ttytest] TIOCGWINSZ passed (%dx%d)\n", ws.ws_col, ws.ws_row);

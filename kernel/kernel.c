@@ -6,6 +6,8 @@
 #include "tty/console.h"
 #include "tty/con_driver.h"
 #include "tty/banner.h"
+#include "tty/kvt.h"
+#include "tty/vt.h"
 #include "drivers/char/serial.h"
 #include "arch/tss.h"
 #include "arch/gdt.h"
@@ -109,6 +111,7 @@ void kmain(void *multiboot_info) {
     con_driver_select();
     fbcon_selftest();
     con_driver_selftest();
+    kvt_selftest();
 
     idt_init();
     serial_write_string("[idt] loaded\n");
@@ -134,6 +137,7 @@ void kmain(void *multiboot_info) {
     // zero", so it needs a tick counter that already means something.
     tty_init();
     tty_selftest();
+    vt_selftest();
     pty_init();
     keyboard_decode_selftest();
     rtc_init();

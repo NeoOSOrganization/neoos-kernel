@@ -102,6 +102,8 @@ int keyboard_decode(uint8_t byte, struct key_event *out) {
         out->ascii = -1;
     }
 
+    out->mods = mods;   // modifier state at the moment of this event
+
     return 1;  // Event is complete
 }
 

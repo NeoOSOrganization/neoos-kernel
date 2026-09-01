@@ -1,6 +1,7 @@
 #include "tty/tty.h"
 #include "drivers/char/serial.h"
 #include "tty/console.h"
+#include "tty/vt.h"
 #include "fs/file.h"
 #include "sync/waitq.h"
 #include "sync/lock.h"
@@ -17,24 +18,17 @@
 // struct tty is now an allocatable object (see tty.h); the console is
 // one instance, a pty allocates more.
 
-static struct tty console_tty;
+// The console is now the active virtual terminal (kernel/tty/vt.c).
+struct tty *tty_console(void) { return vt_active_tty(); }
 
-struct tty *tty_console(void) { return &console_tty; }
+// Cooked keyboard input is delivered here (see input.c). NULL means
+// "the active VT"; a pty master points this at its slave (M1c-4).
+static struct tty *active_input_tty;
 
-// Cooked keyboard input is delivered here (see input.c). A pty master
-// points this at its slave while it owns the screen.
-static struct tty *active_input_tty = &console_tty;
-
-void tty_set_active(struct tty *t) { active_input_tty = t ? t : &console_tty; }
-struct tty *tty_active(void)       { return active_input_tty; }
-
-// The console backend: cooked output goes to serial + the framebuffer.
-static void console_output(struct tty *t, const char *s, uint32_t n) {
-    (void)t;
-    serial_write_raw_n(s, n);
-    console_write(s, n);
+void tty_set_active(struct tty *t) { active_input_tty = t; }
+struct tty *tty_active(void) {
+    return active_input_tty ? active_input_tty : vt_active_tty();
 }
-static const struct tty_backend console_backend = { console_output };
 
 static void tty_set_defaults(struct tty *t) {
     struct termios_k *o = &t->tio;
@@ -77,8 +71,8 @@ void tty_obj_init(struct tty *t, const struct tty_backend *b, void *priv) {
 }
 
 void tty_init(void) {
-    tty_obj_init(&console_tty, &console_backend, 0);
-    serial_write_string("[tty] console line discipline ready, 80x25\n");
+    vt_init();
+    serial_write_string("[tty] console line discipline ready\n");
 }
 
 // ---- output ---------------------------------------------------------
@@ -336,7 +330,7 @@ int tty_obj_poll(struct tty *t, int events) {
 // without consuming them (so a reader can still get them).
 
 void tty_selftest_reset(void) {
-    struct tty *t = &console_tty;
+    struct tty *t = tty_console();
     uint64_t f = spin_lock_irqsave(&t->lock);
     t->ready_len = 0;
     t->ready_head = 0;
@@ -345,7 +339,7 @@ void tty_selftest_reset(void) {
 }
 
 int tty_selftest_saw(char c) {
-    struct tty *t = &console_tty;
+    struct tty *t = tty_console();
     uint64_t f = spin_lock_irqsave(&t->lock);
     int found = 0;
 
@@ -373,7 +367,7 @@ int tty_selftest_saw(char c) {
 }
 
 void tty_selftest(void) {
-    struct tty *t = &console_tty;
+    struct tty *t = tty_console();
 
     // The layout TCGETS moves is fixed by Linux and compiled into every
     // caller, so it is asserted rather than assumed.
@@ -389,8 +383,8 @@ void tty_selftest(void) {
         serial_write_string("[tty] selftest FAILED: default line discipline wrong\n");
         return;
     }
-    if (t->win.ws_row != 25 || t->win.ws_col != 80) {
-        serial_write_string("[tty] selftest FAILED: window size wrong\n");
+    if (t->win.ws_row == 0 || t->win.ws_col == 0) {
+        serial_write_string("[tty] selftest FAILED: window size not reported\n");
         return;
     }
 

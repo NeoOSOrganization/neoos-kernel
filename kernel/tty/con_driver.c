@@ -47,6 +47,11 @@ void con_driver_select(void) {
 
 struct con_driver *con_driver_active(void) { return active; }
 
+void con_driver_geometry(int *cols, int *rows) {
+    if (cols) { *cols = con_cols; }
+    if (rows) { *rows = con_rows; }
+}
+
 void con_putc(char c) {
     if (active) { active->putc_attr(c, CON_GREY); }
 }

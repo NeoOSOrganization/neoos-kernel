@@ -37,7 +37,14 @@ struct con_driver {
     int priority;
     int  (*probe)(void);
     void (*init)(int *cols, int *rows);       // set up, report geometry
-    void (*putc_attr)(char c, uint8_t fg);    // fg = CON_* index
+    void (*putc_attr)(char c, uint8_t fg);    // streaming: fg = CON_* index
+
+    // Grid-addressed ops (M1c-3, the VT layer). attr byte = fg | (bg<<4),
+    // both CON_* 0..15. No cursor advance, no scroll -- vt.c addresses
+    // cells directly.
+    void (*putc_at)(int row, int col, char ch, uint8_t attr);
+    void (*cursor)(int row, int col, int visible);
+
     void (*clear)(void);
 };
 
@@ -45,6 +52,7 @@ void               con_driver_register(struct con_driver *d);
 void               con_driver_register_builtin(void);   // fbcon, vgacon, dummycon
 void               con_driver_select(void);   // probe + init the winner
 struct con_driver *con_driver_active(void);
+void               con_driver_geometry(int *cols, int *rows);   // text cells
 void               con_driver_selftest(void); // "[con] ..."
 
 // Free helpers on top of the active driver.

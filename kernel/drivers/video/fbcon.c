@@ -129,10 +129,65 @@ static void fbcon_putc_attr(char c, uint8_t fg) {
     spin_unlock_raw(&fbcon_lock, f);
 }
 
+// --- grid-addressed (M1c-3 VT layer) --------------------------------
+
+// draw one glyph at cell (row,col) with fg/bg from the attr byte.
+static void put_cell(uint32_t gx, uint32_t gy, unsigned char ch,
+                     uint32_t fgrgb, uint32_t bgrgb) {
+    const uint8_t *g = font8x16[ch];
+    for (uint32_t y = 0; y < GLYPH_H; y++) {
+        uint8_t bits = g[y];
+        for (uint32_t x = 0; x < GLYPH_W; x++) {
+            *pixel(gx * GLYPH_W + x, gy * GLYPH_H + y) =
+                (bits >> (7 - x)) & 1 ? fgrgb : bgrgb;
+        }
+    }
+}
+
+static int cur_row = -1, cur_col = -1;   // where the software cursor is drawn
+
+static void fbcon_putc_at(int row, int col, char ch, uint8_t attr) {
+    if (!fb.present) { return; }
+    if (row < 0 || col < 0 || (uint32_t)row >= rows || (uint32_t)col >= cols) { return; }
+    uint32_t fg = con_rgb[attr & 15];
+    uint32_t bg = con_rgb[(attr >> 4) & 15];
+    uint64_t f = spin_lock_raw(&fbcon_lock);
+    put_cell((uint32_t)col, (uint32_t)row, (unsigned char)(ch ? ch : ' '), fg, bg);
+    if (row == cur_row && col == cur_col) { cur_row = cur_col = -1; }  // painted over
+    spin_unlock_raw(&fbcon_lock, f);
+}
+
+static void fbcon_cursor(int row, int col, int visible) {
+    if (!fb.present) { return; }
+    uint64_t f = spin_lock_raw(&fbcon_lock);
+    // erase the old cursor block by filling it solid black (the cell
+    // under it is repainted by vt.c's diff when its content changes).
+    if (cur_row >= 0 && (cur_row != row || cur_col != col || !visible)) {
+        for (uint32_t y = 0; y < GLYPH_H; y++) {
+            for (uint32_t x = 0; x < GLYPH_W; x++) {
+                *pixel((uint32_t)cur_col * GLYPH_W + x, (uint32_t)cur_row * GLYPH_H + y) = BG;
+            }
+        }
+        cur_row = cur_col = -1;
+    }
+    if (visible && row >= 0 && col >= 0 &&
+        (uint32_t)row < rows && (uint32_t)col < cols) {
+        for (uint32_t y = GLYPH_H - 3; y < GLYPH_H; y++) {   // underline-style block
+            for (uint32_t x = 0; x < GLYPH_W; x++) {
+                *pixel((uint32_t)col * GLYPH_W + x, (uint32_t)row * GLYPH_H + y) = FG;
+            }
+        }
+        cur_row = row; cur_col = col;
+    }
+    spin_unlock_raw(&fbcon_lock, f);
+}
+
 struct con_driver fbcon_drv = {
     .name = "fbcon", .priority = 100,
     .probe = fbcon_probe, .init = fbcon_init_cd,
-    .putc_attr = fbcon_putc_attr, .clear = fbcon_clear,
+    .putc_attr = fbcon_putc_attr,
+    .putc_at = fbcon_putc_at, .cursor = fbcon_cursor,
+    .clear = fbcon_clear,
 };
 
 void fbcon_selftest(void) {

@@ -79,7 +79,10 @@ static void check_ioctl(void) {
     struct winsize ws = { 0, 0, 0, 0 };
     int rc = ioctl(1, TIOCGWINSZ, &ws);
     if (rc != 0) { fail("ioctl(TIOCGWINSZ) on the console", rc); return; }
-    if (ws.ws_row != 25 || ws.ws_col != 80) { fail("console window size", ws.ws_col); return; }
+    // The console follows the active virtual terminal, whose size is
+    // the framebuffer's (or 80x25 on VGA text) -- just require a
+    // sensible non-zero geometry.
+    if (ws.ws_row < 24 || ws.ws_col < 80) { fail("console window size", ws.ws_col); return; }
     if (isatty(1) != 1) { fail("isatty(stdout) should be 1", isatty(1)); return; }
 
     // A regular file is not a terminal.

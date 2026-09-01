@@ -21,6 +21,7 @@ struct key_event {
     uint8_t  pressed;   // 1 = make, 0 = break
     uint8_t  raw_scan;  // the Set-1 byte (low 7 bits), for EV_MSC/MSC_SCAN
     int      ascii;     // -1 if none; else the character under current modifiers
+    uint32_t mods;      // MOD_* bitmask active at the moment of this event
 };
 
 // Feed one byte from port 0x60; returns 1 and fills *out when a

@@ -1,6 +1,7 @@
 #include "drivers/video/vgacon.h"
 #include "tty/con_driver.h"
 #include "mm/paging.h"
+#include "arch/io.h"
 
 static volatile unsigned short *VGA_BUFFER;
 #define VGA_CELL_COUNT 2000
@@ -40,6 +41,27 @@ void vgacon_putc(char c, uint8_t fg) {
     }
 }
 
+// ---- grid-addressed (M1c-3 VT layer) ---------------------------
+
+static void vgacon_putc_at(int row, int col, char ch, uint8_t attr) {
+    if (!VGA_BUFFER) { VGA_BUFFER = (volatile unsigned short *)phys_to_virt(0xb8000); }
+    if (row < 0 || col < 0 || row >= VGA_ROWS || col >= VGA_COLUMNS) { return; }
+    VGA_BUFFER[row * VGA_COLUMNS + col] =
+        (unsigned short)(unsigned char)(ch ? ch : ' ') | ((unsigned short)attr << 8);
+}
+
+static void vgacon_cursor(int row, int col, int visible) {
+    if (!visible || row < 0 || col < 0 || row >= VGA_ROWS || col >= VGA_COLUMNS) {
+        // move it off-screen
+        outb(0x3D4, 0x0E); outb(0x3D5, 0xFF);
+        outb(0x3D4, 0x0F); outb(0x3D5, 0xFF);
+        return;
+    }
+    unsigned pos = (unsigned)(row * VGA_COLUMNS + col);
+    outb(0x3D4, 0x0F); outb(0x3D5, (uint8_t)(pos & 0xFF));
+    outb(0x3D4, 0x0E); outb(0x3D5, (uint8_t)((pos >> 8) & 0xFF));
+}
+
 // ---- con_driver --------------------------------------------------
 
 static int  vgacon_probe(void) { return 1; }   // always available
@@ -52,5 +74,7 @@ static void vgacon_init(int *cols, int *rows) {
 struct con_driver vgacon_drv = {
     .name = "vgacon", .priority = 10,
     .probe = vgacon_probe, .init = vgacon_init,
-    .putc_attr = vgacon_putc, .clear = vgacon_clear,
+    .putc_attr = vgacon_putc,
+    .putc_at = vgacon_putc_at, .cursor = vgacon_cursor,
+    .clear = vgacon_clear,
 };

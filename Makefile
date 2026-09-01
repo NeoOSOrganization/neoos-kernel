@@ -487,6 +487,8 @@ REQUIRED_MARKERS := \
 	"[fbdev] selftest passed" \
 	"[fbcon] selftest passed" \
 	"[con] selftest passed" \
+	"[kvt] selftest passed" \
+	"[vt] selftest passed" \
 	"[banner]" \
 	"[rtc] selftest passed" \
 	"[keyboard] decode selftest passed" \
