@@ -17,7 +17,8 @@ struct pollfd {
 // nfds is capped at 16 -- see docs/stdlib.md.
 int poll(struct pollfd *fds, unsigned long nfds, int timeout_ms);
 
-// select: fd_set is 1024 bits; nfds capped at 16 set bits.
+// select: fd_set is 1024 bits. No cap below FD_SETSIZE -- the kernel
+// sizes its descriptor array to the caller's request (CS2).
 typedef struct { unsigned long __bits[16]; } fd_set;
 #define FD_ZERO(s)   do { for (int __i = 0; __i < 16; __i++) (s)->__bits[__i] = 0; } while (0)
 #define FD_SET(fd,s)   ((s)->__bits[(fd)/64] |=  (1UL << ((fd)%64)))

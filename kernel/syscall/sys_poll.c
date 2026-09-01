@@ -4,7 +4,8 @@
 // readiness; if none is ready, sleep on the global poll broadcast
 // (waitq.c) until any system-wide readiness change or the timeout, then
 // re-scan. See docs/stdlib.md for the divergences (flag subset, the
-// nfds cap, the broadcast wake).
+// broadcast wake, and poll()'s remaining nfds cap -- select() sizes its
+// array to the caller's request and has no cap below FD_SETSIZE).
 
 #include "syscall/syscall_internal.h"
 #include "sched/proc.h"
@@ -13,6 +14,7 @@
 #include "sync/waitq.h"
 #include "drivers/char/timer.h"
 #include "mm/paging.h"
+#include "mm/heap.h"
 #include "errno.h"
 
 #define POLL_MAX_FDS 16   // nfds ceiling; the M1a terminal polls two
@@ -103,10 +105,24 @@ int64_t sys_select(struct syscall_args *a) {
     if (uex) { if (!user_range_writable(uex, sizeof ex)) { return -EFAULT; }
                for (int i = 0; i < FD_WORDS; i++) { ex[i] = ((uint64_t *)(uintptr_t)uex)[i]; } }
 
-    // Collect the set bits into a pollfd array (capped like poll).
-    struct pollfd pfd[POLL_MAX_FDS];
+    // Collect the set bits into a pollfd array sized to what the caller
+    // actually described. This used to be a fixed POLL_MAX_FDS array
+    // with `n < POLL_MAX_FDS` in the loop condition, which silently
+    // dropped every interesting fd past the sixteenth -- no error, no
+    // truncation flag, just a wrong answer (CS2.2). nfds is already
+    // bounded by FD_SETSIZE above, so the allocation is bounded too.
+    unsigned interesting = 0;
+    for (int fd = 0; fd < nfds; fd++) {
+        int w = fd / 64, b = fd % 64;
+        if ((rd[w] | wr[w] | ex[w]) & (1ULL << b)) { interesting++; }
+    }
+    if (interesting == 0) { return 0; }
+
+    struct pollfd *pfd = kmalloc(interesting * sizeof(struct pollfd));
+    if (!pfd) { return -ENOMEM; }
+
     unsigned n = 0;
-    for (int fd = 0; fd < nfds && n < POLL_MAX_FDS; fd++) {
+    for (int fd = 0; fd < nfds && n < interesting; fd++) {
         int w = fd / 64, b = fd % 64;
         short ev = 0;
         if (rd[w] & (1ULL << b)) { ev |= POLLIN; }
@@ -119,7 +135,7 @@ int64_t sys_select(struct syscall_args *a) {
 
     int timeout_ms = -1;
     if (utv) {
-        if (!user_range_writable(utv, 16)) { return -EFAULT; }
+        if (!user_range_writable(utv, 16)) { kfree(pfd); return -EFAULT; }
         long sec  = ((long *)(uintptr_t)utv)[0];
         long usec = ((long *)(uintptr_t)utv)[1];
         timeout_ms = (int)(sec * 1000 + usec / 1000);
@@ -127,7 +143,7 @@ int64_t sys_select(struct syscall_args *a) {
     }
 
     int64_t r = poll_core(pfd, n, deadline_from_ms(timeout_ms));
-    if (r < 0) { return r; }
+    if (r < 0) { kfree(pfd); return r; }
 
     // Rebuild the sets from revents.
     for (int i = 0; i < FD_WORDS; i++) { rd[i] = wr[i] = ex[i] = 0; }
@@ -141,5 +157,6 @@ int64_t sys_select(struct syscall_args *a) {
     if (urd) { for (int i = 0; i < FD_WORDS; i++) { ((uint64_t *)(uintptr_t)urd)[i] = rd[i]; } }
     if (uwr) { for (int i = 0; i < FD_WORDS; i++) { ((uint64_t *)(uintptr_t)uwr)[i] = wr[i]; } }
     if (uex) { for (int i = 0; i < FD_WORDS; i++) { ((uint64_t *)(uintptr_t)uex)[i] = ex[i]; } }
+    kfree(pfd);
     return count;
 }

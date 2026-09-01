@@ -1274,9 +1274,16 @@ readiness change.
   No `POLLPRI`, `POLLRDHUP`, `POLLRDNORM`/`POLLWRNORM`.
 - **No `epoll`.** No `ppoll` / `pselect6` signal mask (the arg is
   accepted and ignored).
-- **`nfds` caps:** `poll` at 16; `select` translates at most 16 set
-  bits. `EINVAL` past that. (Enough for the M1b terminal, which polls
-  two.)
+- **`nfds` caps:** `poll` at 16, returning `EINVAL` past that — a
+  **divergence from Linux**, which has no such limit. CS4 removes it.
+  `select` has **no cap below `FD_SETSIZE`** as of CS2: it counts the
+  set bits the caller described, allocates a descriptor array for
+  exactly that many, and reports every ready one, which is Linux's
+  behaviour.
+  Until CS2 it collected into a fixed 16-entry array and *silently
+  dropped* everything past the sixteenth interesting fd — no error, no
+  truncation flag. That was a correctness bug, not a documented limit;
+  `userland/polltrunc.c` is its regression test.
 - **Timeout resolution is one 10 ms tick.**
 - **The wake is a global broadcast:** every `poll`/`select` caller wakes
   on *any* pipe/socket/tty/evdev readiness change and re-scans its own
