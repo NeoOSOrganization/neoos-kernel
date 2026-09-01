@@ -5,6 +5,7 @@
 // user-copy helpers stayed behind in syscall.c.
 
 #include "syscall/syscall_internal.h"
+#include "mm/pmm.h"
 #include "drivers/char/serial.h"
 #include "sched/proc.h"
 #include "sched/fd_table.h"
@@ -135,6 +136,8 @@ int64_t sys_test_hook(struct syscall_args *a) {
         return 0;
     case TESTHOOK_MIG_COUNT:
         return (int64_t)smp_user_migration_count();
+    case TESTHOOK_PMM_FREE:
+        return (int64_t)pmm_free_frame_count();
     case TESTHOOK_PARENT_PID: {
         struct process *p = proc_find((int)a->a2);
         if (!p) { return -ESRCH; }

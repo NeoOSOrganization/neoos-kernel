@@ -79,6 +79,7 @@
 #define TESTHOOK_INJECT_KEY   1
 #define TESTHOOK_MIG_COUNT    2
 #define TESTHOOK_PARENT_PID   3
+#define TESTHOOK_PMM_FREE     4
 
 static inline int64_t syscall0(int64_t num) {
     int64_t ret;
@@ -553,4 +554,8 @@ long neoos_test_migration_count(void) {
 
 int neoos_test_parent_pid(int pid) {
     return (int)syscall3(SYS_TEST_HOOK, TESTHOOK_PARENT_PID, (int64_t)pid, 0);
+}
+
+long neoos_test_pmm_free(void) {
+    return (long)syscall1(SYS_TEST_HOOK, TESTHOOK_PMM_FREE);
 }

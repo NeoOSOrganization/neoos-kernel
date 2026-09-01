@@ -16,4 +16,8 @@ long neoos_test_migration_count(void);
 // (including one already reaped). Returns -ENOSYS in production.
 int neoos_test_parent_pid(int pid);
 
+// Free physical frames, for tests that assert memory comes back after a
+// stress loop. Returns -ENOSYS in production.
+long neoos_test_pmm_free(void);
+
 #endif
