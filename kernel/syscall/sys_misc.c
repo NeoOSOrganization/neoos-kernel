@@ -6,6 +6,7 @@
 
 #include "syscall/syscall_internal.h"
 #include "mm/pmm.h"
+#include "sync/waitq.h"
 #include "drivers/char/serial.h"
 #include "sched/proc.h"
 #include "sched/fd_table.h"
@@ -138,6 +139,12 @@ int64_t sys_test_hook(struct syscall_args *a) {
         return (int64_t)smp_user_migration_count();
     case TESTHOOK_PMM_FREE:
         return (int64_t)pmm_free_frame_count();
+    case TESTHOOK_POLL_STATS: {
+        uint64_t ev = 0, wk = 0;
+        waitq_poll_stats(&ev, &wk);
+        // Both fit in 32 bits at any run length this suite reaches.
+        return (int64_t)((ev << 32) | (wk & 0xFFFFFFFFu));
+    }
     case TESTHOOK_PARENT_PID: {
         struct process *p = proc_find((int)a->a2);
         if (!p) { return -ESRCH; }

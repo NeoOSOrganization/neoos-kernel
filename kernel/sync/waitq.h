@@ -60,7 +60,9 @@ void waitq_wake_all(struct waitq *q);
 // poll_core, so the broadcast in the hot wake paths is skipped when
 // nobody is polling.
 extern volatile int waitq_poll_active;
-void waitq_poll_notify(void);                 // wake every poll_core
+void waitq_poll_notify(void);
+// CS3: broadcast count and total sleepers woken, for the poll thundering-herd baseline.
+void waitq_poll_stats(uint64_t *events, uint64_t *wakeups);                 // wake every poll_core
 int  waitq_poll_wait(uint64_t deadline);      // sleep until notified / deadline / signal
 void waitq_poll_enter(void);
 void waitq_poll_leave(void);

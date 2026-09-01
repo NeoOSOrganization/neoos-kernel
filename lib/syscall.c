@@ -80,6 +80,7 @@
 #define TESTHOOK_MIG_COUNT    2
 #define TESTHOOK_PARENT_PID   3
 #define TESTHOOK_PMM_FREE     4
+#define TESTHOOK_POLL_STATS   5
 
 static inline int64_t syscall0(int64_t num) {
     int64_t ret;
@@ -558,4 +559,8 @@ int neoos_test_parent_pid(int pid) {
 
 long neoos_test_pmm_free(void) {
     return (long)syscall1(SYS_TEST_HOOK, TESTHOOK_PMM_FREE);
+}
+
+long neoos_test_poll_stats(void) {
+    return (long)syscall1(SYS_TEST_HOOK, TESTHOOK_POLL_STATS);
 }

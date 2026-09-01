@@ -10,6 +10,19 @@
 
 static struct waitq poll_broadcast;   // see the poll/select section below
 
+// CS3 baseline for CS5.2. Every readiness change anywhere wakes EVERY
+// poll sleeper, so wakeups grow as O(sleepers x events) where a
+// per-object design would be O(interested). Counting both halves turns
+// "the broadcast is a scaling concern" -- which sys_poll.c's own header
+// has said for a while -- into a ratio a redesign has to move.
+static volatile uint64_t poll_events;    // broadcasts issued
+static volatile uint64_t poll_wakeups;   // sleepers actually woken
+
+void waitq_poll_stats(uint64_t *events, uint64_t *wakeups) {
+    if (events)  { *events  = poll_events; }
+    if (wakeups) { *wakeups = poll_wakeups; }
+}
+
 void waitq_init(struct waitq *q) {
     q->head = 0;
     q->tail = 0;
@@ -258,6 +271,14 @@ void waitq_wake_all(struct waitq *q) {
 volatile int waitq_poll_active;
 
 void waitq_poll_notify(void) {
+    __atomic_add_fetch(&poll_events, 1, __ATOMIC_RELAXED);
+    // Count the sleepers this one broadcast is about to wake. Reading
+    // the queue length without its lock is fine for a statistic: the
+    // number is advisory, and taking the lock here would nest inside
+    // waitq_wake_all's own acquire.
+    for (struct thread *t = poll_broadcast.head; t; t = t->next) {
+        __atomic_add_fetch(&poll_wakeups, 1, __ATOMIC_RELAXED);
+    }
     waitq_wake_all(&poll_broadcast);
 }
 

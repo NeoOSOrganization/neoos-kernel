@@ -20,4 +20,8 @@ int neoos_test_parent_pid(int pid);
 // stress loop. Returns -ENOSYS in production.
 long neoos_test_pmm_free(void);
 
+// Poll-broadcast statistics packed as (events << 32) | wakeups, for the
+// thundering-herd baseline. Returns -ENOSYS in production.
+long neoos_test_poll_stats(void);
+
 #endif
