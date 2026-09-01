@@ -72,7 +72,11 @@ void heap_init(void) {
     for (unsigned i = 0; i < HEAP_NUM_CLASSES; i++) {
         class_pages[i] = 0;
     }
+#ifdef NEOOS_DEBUG_HEAP
+    serial_write_string("[heap] initialized (debug: poison+redzone)\n");
+#else
     serial_write_string("[heap] initialized\n");
+#endif
 }
 
 // Unlocked. Caller must hold heap_lock.
