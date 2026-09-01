@@ -241,7 +241,7 @@ title-setting OSC (`\e]0;…` accepted and discarded).
 |---|---|---|
 | **M1b-1** | Font pipeline: Spleen 12×24 vendored + `LICENSE`, `tools/bdf2c.py` (stdlib only), generated `userland/term/font_term.c/.h` checked in, Makefile regeneration rule. | `tools/bdf2c.py` reproduces the checked-in `font_term.c` byte-for-byte; a tiny host harness renders "Ag" from the table and it matches the BDF. |
 | **M1b-2** | VT engine (`vt.c/.h`) + `VTTEST.ELF`. Pure grid/parser logic, zero framebuffer. | `[vttest] ALL PASSED` in `make test`, gauntlet green. |
-| **M1b-3** | `TERM` process: PTY alloc + child exec + `/dev/fb0` render loop + `NEOOS_TIOCSACTIVE` ioctl + `active_input_tty` + `fb_owned_by_userland` + `console_write` serial-only handoff + `panic()` override + inittab entry. | `[term] render ALL PASSED`, kernel chatter goes serial-only after TERM starts, panic still paints, gauntlet green ×3 (boot-critical). |
+| **M1b-3** ✅ | `TERM` process: PTY alloc + child exec + `/dev/fb0` render loop + `NEOOS_TIOCSACTIVE` ioctl + `active_input_tty` + `fb_owned_by_userland` + `console_write` serial-only handoff + `panic()` override + inittab entry. Also pulled `dup`/`dup2`/`dup3` forward from BB1 (`open()` never returns fds 0/1/2). | DONE. `[term] render ALL PASSED`, gauntlet ×3 = 45/45. `NEOOS_TIOCSACTIVE` released only on the last master fd; TERM trusts XRGB8888. |
 | **M1b-4** | Scrollback ring + `Shift+PageUp/Dn` + evdev raw-key → escape translation + right-edge indicator + `docs/stdlib.md` / `docs/abi-compatibility.md` / `README` refresh. | `[term] scrollback ALL PASSED`, input-translation test green, docs updated. |
 
 M1b-1 and M1b-2 are independent. M1b-3 needs both. M1b-4 needs M1b-3.
