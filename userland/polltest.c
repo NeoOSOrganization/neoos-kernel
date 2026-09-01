@@ -66,6 +66,12 @@ int main(void) {
     int ev = open("/dev/input/event0", O_RDONLY);
     if (ev >= 0) {
         struct pollfd e = { ev, POLLIN, 0 };
+        // Drain any events another test injected before we got here
+        // (activettytest injects KEY_A too). Then the queue is ours.
+        fcntl(ev, F_SETFL, O_NONBLOCK);
+        char drain[128];
+        while (read(ev, drain, sizeof drain) > 0) { }
+        fcntl(ev, F_SETFL, 0);
         if (poll(&e, 1, 30) != 0) {
             printf("[polltest] FAILED: evdev ready with no input\n");
             return 1;

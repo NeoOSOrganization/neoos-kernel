@@ -122,6 +122,13 @@ void tty_obj_init(struct tty *t, const struct tty_backend *b, void *priv);
 // The line discipline, now taking an explicit tty. tty_input_char is
 // called from the keyboard IRQ (console) and from a pty master write().
 void    tty_input_char(struct tty *t, char c);
+
+// The terminal that cooked keyboard input is routed to. Defaults to the
+// console; a pty master claims it via NEOOS_TIOCSACTIVE (see pty.h) so a
+// userland terminal receives keystrokes. tty_set_active(NULL) restores
+// the console.
+void        tty_set_active(struct tty *t);
+struct tty *tty_active(void);
 int64_t tty_obj_read(struct tty *t, void *buf, uint32_t len, int nonblock);
 int64_t tty_obj_write(struct tty *t, const void *buf, uint32_t len);
 int64_t tty_obj_ioctl(struct tty *t, uint64_t request, void *arg);

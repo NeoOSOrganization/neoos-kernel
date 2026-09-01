@@ -21,6 +21,13 @@ static struct tty console_tty;
 
 struct tty *tty_console(void) { return &console_tty; }
 
+// Cooked keyboard input is delivered here (see input.c). A pty master
+// points this at its slave while it owns the screen.
+static struct tty *active_input_tty = &console_tty;
+
+void tty_set_active(struct tty *t) { active_input_tty = t ? t : &console_tty; }
+struct tty *tty_active(void)       { return active_input_tty; }
+
 // The console backend: cooked output goes to serial + the framebuffer.
 static void console_output(struct tty *t, const char *s, uint32_t n) {
     (void)t;

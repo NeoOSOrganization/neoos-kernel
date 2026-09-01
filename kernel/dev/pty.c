@@ -1,5 +1,6 @@
 #include "dev/pty.h"
 #include "dev/tty.h"
+#include "dev/console.h"
 #include "fs/file.h"
 #include "fs/devfs.h"
 #include "sync/lock.h"
@@ -16,6 +17,7 @@ struct pty {
     int  master_refs;       // open master fds; > 0 == master open
     int  slave_refs;        // open slave fds;  > 0 == slave open
     int  index;
+    int  owns_active;       // this master holds the active tty + framebuffer
 };
 
 static struct pty ptys[PTY_MAX];
@@ -126,6 +128,19 @@ static int64_t ptm_ioctl(struct file_descriptor *f, uint64_t req, void *arg) {
           *(struct winsize_k *)arg = pt->slave.win;
           spin_unlock_irqrestore(&pt->slave.lock, fl); }
         return 0;
+    case NEOOS_TIOCSACTIVE:
+        // arg != 0: route cooked keyboard input to this slave and hand
+        // the framebuffer to userland. arg == 0: give both back.
+        if ((int64_t)(intptr_t)arg) {
+            tty_set_active(&pt->slave);
+            console_set_fb_owned(1);
+            pt->owns_active = 1;
+        } else if (pt->owns_active) {
+            tty_set_active(0);
+            console_set_fb_owned(0);
+            pt->owns_active = 0;
+        }
+        return 0;
     default:
         return -ENOTTY;
     }
@@ -150,6 +165,13 @@ static void ptm_dup(struct file_descriptor *f) {
 static void ptm_close(struct file_descriptor *f) {
     struct pty *pt = f->priv;
     if (!pt) { return; }
+    // Give back the active tty + framebuffer BEFORE pty_unref can free
+    // the struct -- active_input_tty must never point at freed memory.
+    if (pt->owns_active) {
+        tty_set_active(0);
+        console_set_fb_owned(0);
+        pt->owns_active = 0;
+    }
     uint64_t fl = spin_lock_irqsave(&pt->slave.lock);
     pt->slave.hung_up = 1;
     spin_unlock_irqrestore(&pt->slave.lock, fl);

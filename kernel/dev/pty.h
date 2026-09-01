@@ -16,4 +16,11 @@ int  ptmx_open(struct file_descriptor *f);
 #define TIOCGPTN   0x80045430
 #define TIOCSPTLCK 0x40045431
 
+// NeoOS extension, no Linux equivalent (deliberately outside the 0x54xx
+// TIOC range): on a pty master, arg != 0 routes cooked keyboard input
+// to this master's slave and hands the framebuffer to userland; arg ==
+// 0 releases both. Released automatically when the master is closed;
+// forcibly reclaimed by a kernel panic. See docs/stdlib.md.
+#define NEOOS_TIOCSACTIVE 0x4E454F01
+
 #endif

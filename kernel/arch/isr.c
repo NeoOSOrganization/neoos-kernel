@@ -1,6 +1,7 @@
 #include "arch/isr.h"
 #include "dev/serial.h"
 #include "dev/console.h"
+#include "dev/tty.h"
 #include "dev/timer.h"
 #include "smp/smp.h"
 #include "smp/tlb.h"
@@ -24,6 +25,10 @@ static const char *exception_names[32] = {
 };
 
 static void exception_dump_and_halt(struct registers *regs) {
+    // Reclaim the screen from any userland terminal so this dump paints.
+    console_set_fb_owned(0);
+    tty_set_active(0);
+
     serial_write_string("\n[exception] ");
     serial_write_string(exception_names[regs->vector_number]);
     serial_write_string(" (vector=");
