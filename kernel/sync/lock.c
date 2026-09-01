@@ -259,6 +259,23 @@ void lock_selftest(void) {
         return;
     }
 
+    // CS0: the leaf ranks must all be distinct. rand_lock shared
+    // LOCK_RANK_SERIAL, which made a genuine serial/rand inversion
+    // invisible -- the checker treats equal ranks as one class.
+    if (LOCK_RANK_RAND == LOCK_RANK_SERIAL ||
+        LOCK_RANK_VT   == LOCK_RANK_FBCON  ||
+        LOCK_RANK_VT   == LOCK_RANK_PTY    ||
+        LOCK_RANK_VT   == LOCK_RANK_DEVFS) {
+        serial_write_string("[lock] selftest FAILED: leaf ranks collide\n");
+        return;
+    }
+    // The VT lock is taken while a tty lock is held and takes fbcon
+    // beneath it; that chain must be strictly ascending.
+    if (!(LOCK_RANK_TTY < LOCK_RANK_VT && LOCK_RANK_VT < LOCK_RANK_FBCON)) {
+        serial_write_string("[lock] selftest FAILED: VT rank not between TTY and FBCON\n");
+        return;
+    }
+
     serial_write_string("[lock] selftest passed\n");
 }
 

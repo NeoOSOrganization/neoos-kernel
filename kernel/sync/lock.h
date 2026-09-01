@@ -91,6 +91,22 @@
 // IRQ (so it must be a leaf-ish rank), but held only during ring-buffer
 // append -- never across tty_input_char or waitq_wake calls.
 #define LOCK_RANK_INPUT     21
+// The kernel virtual terminals: vt_active, each VT's diff cache
+// (vc->shown / shown_valid) and kd_mode. Sits ABOVE TTY because the
+// write path is tty_obj_write -> t->lock -> vt_backend_output ->
+// render_diff, so the VT state is touched while a tty lock is held.
+// Sits BELOW FBCON because rendering calls into the con_driver
+// underneath it. vt_switch and vt_scroll take t->lock then this, from
+// the keyboard IRQ holding nothing else, so the order is the same on
+// every path. The panic path (vt_panic_reset) takes NEITHER -- see
+// vt.c's panic-mode comment.
+#define LOCK_RANK_VT        251
+// The CSPRNG pool. A leaf: rand_bytes holds it across arithmetic only,
+// and takes nothing under it. It had LOCK_RANK_SERIAL, which is not the
+// deliberate TTY==DRIVER sharing -- two unrelated leaves sharing a rank
+// makes a real inversion between them invisible, since the checker
+// treats equal ranks as one class.
+#define LOCK_RANK_RAND      250
 // Leaf lock: rank above every other, so it is always legal to take and
 // can be acquired from anywhere -- including while holding any other
 // lock. Whatever holds it must never acquire another lock.

@@ -38,7 +38,7 @@ void rand_init(void) {
     }
 
     // Initialize the spinlock (will be used later by rand_u64).
-    spin_init(&rand_lock, LOCK_RANK_SERIAL, "rand");
+    spin_init(&rand_lock, LOCK_RANK_RAND, "rand");
 
     // Expand seed into the four state values using splitmix64.
     uint64_t sm = seed;
@@ -49,7 +49,7 @@ void rand_init(void) {
 
 uint64_t rand_u64(void) {
     // Take the lock since this is called from spawn on any CPU.
-    uint64_t flags = spin_lock_raw(&rand_lock);
+    uint64_t flags = spin_lock_irqsave(&rand_lock);
 
     // xoshiro256**: output and state update.
     uint64_t result = rotl(s[1] * 5, 7) * 9;
@@ -57,7 +57,7 @@ uint64_t rand_u64(void) {
     s[2] ^= s[0]; s[3] ^= s[1]; s[1] ^= s[2]; s[0] ^= s[3];
     s[2] ^= t; s[3] = rotl(s[3], 45);
 
-    spin_unlock_raw(&rand_lock, flags);
+    spin_unlock_irqrestore(&rand_lock, flags);
     return result;
 }
 
