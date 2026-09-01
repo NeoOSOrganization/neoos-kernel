@@ -22,6 +22,25 @@ static const uint32_t con_rgb[16] = {
 static uint32_t cols, rows, cx, cy;
 static struct spinlock fbcon_lock;
 
+// One-way switch, set by the exception path before it repaints. The
+// panicking CPU may hold any lock, so a rank-checked acquire here would
+// call lock_panic() from inside a panic and recurse. lock.c solves the
+// same problem for serial output with panic_puts(), which skips the
+// lock entirely; this keeps the lock (another CPU may be mid-paint) but
+// drops the rank check. Never cleared: a panic is terminal.
+static volatile int fbcon_panicking;
+
+void fbcon_enter_panic(void) { fbcon_panicking = 1; }
+
+static uint64_t fbcon_acquire(void) {
+    return fbcon_panicking ? spin_lock_raw(&fbcon_lock)
+                           : spin_lock_irqsave(&fbcon_lock);
+}
+static void fbcon_release(uint64_t f) {
+    if (fbcon_panicking) { spin_unlock_raw(&fbcon_lock, f); }
+    else                 { spin_unlock_irqrestore(&fbcon_lock, f); }
+}
+
 static inline volatile uint32_t *pixel(uint32_t px, uint32_t py) {
     return (volatile uint32_t *)(fb.virt + (uint64_t)py * fb.pitch + (uint64_t)px * 4);
 }
@@ -76,9 +95,9 @@ static void putc_locked(char c) { putc_locked_fg(c, FG); }
 
 void fbcon_clear(void) {
     if (!fb.present) { return; }
-    uint64_t f = spin_lock_raw(&fbcon_lock);
+    uint64_t f = fbcon_acquire();
     clear_locked();
-    spin_unlock_raw(&fbcon_lock, f);
+    fbcon_release(f);
 }
 
 void fbcon_init(void) {
@@ -96,16 +115,16 @@ void fbcon_init(void) {
 
 void fbcon_putc(char c) {
     if (!fb.present) { return; }
-    uint64_t f = spin_lock_raw(&fbcon_lock);
+    uint64_t f = fbcon_acquire();
     putc_locked(c);
-    spin_unlock_raw(&fbcon_lock, f);
+    fbcon_release(f);
 }
 
 void fbcon_write(const char *s, uint64_t n) {
     if (!fb.present) { return; }
-    uint64_t f = spin_lock_raw(&fbcon_lock);
+    uint64_t f = fbcon_acquire();
     for (uint64_t i = 0; i < n; i++) { putc_locked(s[i]); }
-    spin_unlock_raw(&fbcon_lock, f);
+    fbcon_release(f);
 }
 
 // ---- con_driver ----------------------------------------------------
@@ -124,9 +143,9 @@ static void fbcon_init_cd(int *c, int *r) {
 static void fbcon_putc_attr(char c, uint8_t fg) {
     if (!fb.present) { return; }
     uint32_t rgb = con_rgb[fg & 15];
-    uint64_t f = spin_lock_raw(&fbcon_lock);
+    uint64_t f = fbcon_acquire();
     putc_locked_fg(c, rgb);
-    spin_unlock_raw(&fbcon_lock, f);
+    fbcon_release(f);
 }
 
 // --- grid-addressed (M1c-3 VT layer) --------------------------------
@@ -151,15 +170,15 @@ static void fbcon_putc_at(int row, int col, char ch, uint8_t attr) {
     if (row < 0 || col < 0 || (uint32_t)row >= rows || (uint32_t)col >= cols) { return; }
     uint32_t fg = con_rgb[attr & 15];
     uint32_t bg = con_rgb[(attr >> 4) & 15];
-    uint64_t f = spin_lock_raw(&fbcon_lock);
+    uint64_t f = fbcon_acquire();
     put_cell((uint32_t)col, (uint32_t)row, (unsigned char)(ch ? ch : ' '), fg, bg);
     if (row == cur_row && col == cur_col) { cur_row = cur_col = -1; }  // painted over
-    spin_unlock_raw(&fbcon_lock, f);
+    fbcon_release(f);
 }
 
 static void fbcon_cursor(int row, int col, int visible) {
     if (!fb.present) { return; }
-    uint64_t f = spin_lock_raw(&fbcon_lock);
+    uint64_t f = fbcon_acquire();
     // erase the old cursor block by filling it solid black (the cell
     // under it is repainted by vt.c's diff when its content changes).
     if (cur_row >= 0 && (cur_row != row || cur_col != col || !visible)) {
@@ -179,7 +198,7 @@ static void fbcon_cursor(int row, int col, int visible) {
         }
         cur_row = row; cur_col = col;
     }
-    spin_unlock_raw(&fbcon_lock, f);
+    fbcon_release(f);
 }
 
 struct con_driver fbcon_drv = {
@@ -195,12 +214,12 @@ void fbcon_selftest(void) {
         serial_write_string("[fbcon] selftest skipped (no framebuffer)\n");
         return;
     }
-    uint64_t f = spin_lock_raw(&fbcon_lock);
+    uint64_t f = fbcon_acquire();
     put_glyph(0, 0, 'A');
     volatile uint32_t *p = pixel(1, 9);   // a set bit of the 'A' crossbar
     uint32_t got = *p;
     clear_locked();
-    spin_unlock_raw(&fbcon_lock, f);
+    fbcon_release(f);
 
     if (got != FG) {
         serial_write_string("[fbcon] selftest FAILED: glyph readback ");
