@@ -216,13 +216,13 @@ static int dyn_open(struct file_descriptor *f) {
 int devfs_register(const char *path, const struct file_ops *ops, void *priv,
                    int (*open)(struct file_descriptor *f)) {
     if (!dyn_lock_ready) { spin_init(&dyn_lock, LOCK_RANK_DEVFS, "devfs-dyn"); dyn_lock_ready = 1; }
-    uint64_t fl = spin_lock_raw(&dyn_lock);
+    uint64_t fl = spin_lock_irqsave(&dyn_lock);
     int free_slot = -1;
     for (int i = 0; i < DEVFS_DYN_MAX; i++) {
-        if (dyn[i].used && name_eq(dyn[i].path, path)) { spin_unlock_raw(&dyn_lock, fl); return -EEXIST; }
+        if (dyn[i].used && name_eq(dyn[i].path, path)) { spin_unlock_irqrestore(&dyn_lock, fl); return -EEXIST; }
         if (!dyn[i].used && free_slot < 0) { free_slot = i; }
     }
-    if (free_slot < 0) { spin_unlock_raw(&dyn_lock, fl); return -ENOSPC; }
+    if (free_slot < 0) { spin_unlock_irqrestore(&dyn_lock, fl); return -ENOSPC; }
     int j = 0;
     while (path[j] && j < (int)sizeof(dyn[free_slot].path) - 1) { dyn[free_slot].path[j] = path[j]; j++; }
     dyn[free_slot].path[j] = 0;
@@ -231,17 +231,17 @@ int devfs_register(const char *path, const struct file_ops *ops, void *priv,
     dyn[free_slot].open = open;
     dyn[free_slot].dev  = (struct devfs_dev){ dyn[free_slot].path, VNODE_DEVICE, ops, dyn_open };
     dyn[free_slot].used = 1;
-    spin_unlock_raw(&dyn_lock, fl);
+    spin_unlock_irqrestore(&dyn_lock, fl);
     return 0;
 }
 
 void devfs_unregister(const char *path) {
     if (!dyn_lock_ready) { return; }
-    uint64_t fl = spin_lock_raw(&dyn_lock);
+    uint64_t fl = spin_lock_irqsave(&dyn_lock);
     for (int i = 0; i < DEVFS_DYN_MAX; i++) {
         if (dyn[i].used && name_eq(dyn[i].path, path)) { dyn[i].used = 0; break; }
     }
-    spin_unlock_raw(&dyn_lock, fl);
+    spin_unlock_irqrestore(&dyn_lock, fl);
 }
 
 // name is the leaf under /dev/pts. Returns the synthetic inode id or 0.
@@ -252,11 +252,11 @@ static uint64_t dyn_lookup_pts(const char *leaf) {
     while (leaf[k - 4] && k < (int)sizeof(want) - 1) { want[k] = leaf[k - 4]; k++; }
     want[k] = 0;
     uint64_t id = 0;
-    uint64_t fl = spin_lock_raw(&dyn_lock);
+    uint64_t fl = spin_lock_irqsave(&dyn_lock);
     for (int i = 0; i < DEVFS_DYN_MAX; i++) {
         if (dyn[i].used && name_eq(dyn[i].path, want)) { id = DEVFS_DYN_BASE + i; break; }
     }
-    spin_unlock_raw(&dyn_lock, fl);
+    spin_unlock_irqrestore(&dyn_lock, fl);
     return id;
 }
 
