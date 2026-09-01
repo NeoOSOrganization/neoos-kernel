@@ -31,6 +31,14 @@ is independently shippable.
       ├─ M1b. Framebuffer terminal          ← NEXT: xterm-ish VT + scrollback +
       │      NokiaPure-as-PSF; the kernel out of the printing business.
       │
+      ├─ DL.  Dynamic linking               ← after M1b. file-backed mmap,
+      │      PT_INTERP + full auxv, dynamic TLS + dlopen. Highest leverage
+      │      on "run real Linux apps unpatched".
+      ├─ BB.  BusyBox (static)              ← after DL. execve+argv/envp,
+      │      job control, minimal /proc, Tier-2 fs syscalls, then an
+      │      interactive ash in the M1b terminal.
+      │      Both tracks: spec 2026-09-01-busybox-and-dynamic-linking-roadmap.md.
+      │
       ├─ D. x2APIC                             ← isolated; unblocks >255 CPUs later
       ├─ E. FDC (floppy) driver                ← isolated; smallest new driver
       │
