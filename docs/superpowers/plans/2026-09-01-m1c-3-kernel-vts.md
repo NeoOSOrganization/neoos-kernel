@@ -119,7 +119,7 @@ parallel gauntlet.
   int  kvt_view(const struct kvt *v);
   ```
 
-- [ ] **Step 1: `key_event.mods`**
+- [x] **Step 1: `key_event.mods`**
 
 `keyboard.h`: add `uint32_t mods;` to `struct key_event` (after
 `ascii`). `keyboard.c` `keyboard_decode`: `out->mods = mods;` right
@@ -127,7 +127,7 @@ before it returns 1. The decoder's static `mods` is already maintained
 (`MOD_LALT`, `MOD_LSHIFT`, …). No behaviour change — a new field on an
 event nobody reads yet.
 
-- [ ] **Step 2: failing selftest — `kvt_selftest()` in `kvt.c`**
+- [x] **Step 2: failing selftest — `kvt_selftest()` in `kvt.c`**
 
 ```c
 void kvt_selftest(void) {
@@ -158,7 +158,7 @@ void kvt_selftest(void) {
 Call it from `kmain` right after `con_driver_select()`. `make test` →
 `[kvt] selftest FAILED` (or a link error — `kvt.c` is a stub).
 
-- [ ] **Step 3: implement `kvt.c`**
+- [x] **Step 3: implement `kvt.c`**
 
 A compact port of the userland `userland/term/vt.c` structure —
 **same ring/scroll model** (screen row `r` = `ring[(top + r - view) %
@@ -175,7 +175,7 @@ control set in the Global Constraints. ~180 lines. Key points:
 - `\e[?25h` / `?25l` → `cursor_visible`.
 - Any `\e` sequence not recognised: consume to the final byte, drop.
 
-- [ ] **Step 4: selftest passes; commit**
+- [x] **Step 4: selftest passes; commit**
 
 `make test` → `[kvt] selftest passed`. Add to `REQUIRED_MARKERS`.
 Gauntlet 15/15. Commit
@@ -211,7 +211,7 @@ Gauntlet 15/15. Commit
   void  vt_selftest(void);
   ```
 
-- [ ] **Step 1: `con_driver` grid ops**
+- [x] **Step 1: `con_driver` grid ops**
 
 `fbcon_putc_at(row, col, ch, attr)`: draw `font8x16[ch]` into the
 8×16 cell at `(col*8, row*16)`, `fg = con_rgb[attr & 15]`,
@@ -224,7 +224,7 @@ invert the cell block (remember the previous cursor cell to restore).
 via ports 0x3D4/0x3D5), or invert a cell. `dummycon`: no-ops. Add all
 three to the driver structs.
 
-- [ ] **Step 2: `vt.c` — the layer**
+- [x] **Step 2: `vt.c` — the layer**
 
 ```c
 struct vt_console {
@@ -278,7 +278,7 @@ static int vt_active;
   `VT_SETMODE 0x5602`, `VT_RELDISP 0x5605`, `KDSETMODE 0x4B3A`,
   `KDGETMODE 0x4B3B`, `KD_TEXT 0`, `KD_GRAPHICS 1`.
 
-- [ ] **Step 3: rewire `tty.c` / `console.c` / `isr.c`**
+- [x] **Step 3: rewire `tty.c` / `console.c` / `isr.c`**
 
 - `tty.c`: delete `console_tty`, `console_output`, `console_backend`.
   `struct tty *tty_console(void) { return vt_active_tty(); }`.
@@ -302,7 +302,7 @@ static int vt_active;
   VT 1 is blank underneath; the boot-log lines that follow are
   serial-only so the banner survives).
 
-- [ ] **Step 4: `[vt] selftest`**
+- [x] **Step 4: `[vt] selftest`**
 
 `vt_selftest()`: `VT_COUNT` consoles exist; write `"probe\n"` to
 `vts[2].tty` (VT 3) — assert `kvt_cell(&vts[2].scr, 0, 0)->ch == 'p'`
@@ -311,7 +311,7 @@ paint counter, or just that `vts[2].shown` stayed zero). `vt_switch(2)`
 then `vt_switch(0)` do not fault. `vt_panic_reset()` forces index 0.
 Print `[vt] selftest passed`. Call from `kmain` after `tty_init()`.
 
-- [ ] **Step 5: build, test, gauntlet, commit**
+- [x] **Step 5: build, test, gauntlet, commit**
 
 `REQUIRED_MARKERS += "[vt] selftest passed"`. `make test` green,
 serial output unchanged (kernel log still serial; the VT grid is only
@@ -326,7 +326,7 @@ the framebuffer). Gauntlet 15/15. Commit
 `vt_file_ops`), `kernel/drivers/input/input.c`; create
 `userland/vtswitchtest.c`; modify `Makefile`.
 
-- [ ] **Step 1: `/dev/tty1..6` + `/dev/tty0` devices**
+- [x] **Step 1: `/dev/tty1..6` + `/dev/tty0` devices**
 
 `devfs.c`: add seven entries **before `pts`** (which must stay last —
 `DEVFS_PTS_INODE == DEVFS_COUNT`):
@@ -344,7 +344,7 @@ maps the devfs name suffix digit to the index in `vt_dev_open`.
 `/dev/CONSOLE` (`tty_file_ops`) is unchanged in code but now follows
 the active VT because `tty_console()` does.
 
-- [ ] **Step 2: input intercepts**
+- [x] **Step 2: input intercepts**
 
 `input.c`, in `input_key_event`, **before** the cooked-delivery block,
 using the new `e->mods`:
@@ -365,7 +365,7 @@ VT hotkey is not an input event. Or fan it out to evdev but skip the
 tty; match Linux, which consumes it entirely. Consume entirely.)
 `rows` = `vt_active_console()`'s row count — expose a getter.
 
-- [ ] **Step 3: `userland/vtswitchtest.c`**
+- [x] **Step 3: `userland/vtswitchtest.c`**
 
 ```c
 #include <unistd.h>
@@ -413,7 +413,7 @@ int main(void) {
 Makefile: `VTSWITCHTEST.ELF` rule, disk copy, `spawn /BIN/VTSWITCHTEST.ELF`
 in the INITTAB, `"[vtswitchtest] ALL PASSED"` in `REQUIRED_MARKERS`.
 
-- [ ] **Step 4: `make test`, panic hand-check, gauntlet ×3**
+- [x] **Step 4: `make test`, panic hand-check, gauntlet ×3**
 
 `make test` → `[vtswitchtest] ALL PASSED`, every prior marker present,
 powers off. Hand-check the panic path: temporarily `*(volatile int*)0
@@ -426,7 +426,7 @@ Commit `"M1c-3: /dev/tty1..6, VT_*/KD* ioctls, Alt+Fn / Shift+PageUp intercepts"
 
 ## Task 4: docs
 
-- [ ] **Step 1: `docs/stdlib.md`** — a "Virtual terminals" section:
+- [x] **Step 1: `docs/stdlib.md`** — a "Virtual terminals" section:
   `/dev/tty1..6`, `/dev/tty0` = active, `Alt+F1..F6`,
   `Shift+PageUp/Down`. The `VT_*` / `KD*` ioctls with their Linux
   numbers and the divergences: **6 VTs not 63**, `VT_SETMODE` /
@@ -434,14 +434,14 @@ Commit `"M1c-3: /dev/tty1..6, VT_*/KD* ioctls, Alt+Fn / Shift+PageUp intercepts"
   (no "free VT" pool), no `KD_MEDIUMRAW` / raw-keyboard modes,
   `v_signal` always 0.
 
-- [ ] **Step 2: `docs/abi-compatibility.md`** — VT/KD ioctls in the
+- [x] **Step 2: `docs/abi-compatibility.md`** — VT/KD ioctls in the
   ioctl table; "what a ported console app hits": the `VT_PROCESS`
   handshake is M1c-4, so a display server can't yet cooperate with
   console switching.
 
-- [ ] **Step 3: `README.md`** — "six virtual terminals, `Alt+F1..F6`".
+- [x] **Step 3: `README.md`** — "six virtual terminals, `Alt+F1..F6`".
 
-- [ ] **Step 4: commit** `"M1c-3: docs -- virtual terminals, VT/KD ioctls"`.
+- [x] **Step 4: commit** `"M1c-3: docs -- virtual terminals, VT/KD ioctls"`.
 
 ---
 
