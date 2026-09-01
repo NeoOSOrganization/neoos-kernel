@@ -160,6 +160,7 @@ that is fine -- musl's mallocng falls back to `mmap`. See
 | `O_*` (open) | **Match** (`O_RDONLY` 0, `O_WRONLY` 1, `O_RDWR` 2, `O_CREAT` 0x40, `O_EXCL` 0x80, `O_TRUNC` 0x200, `O_APPEND` 0x400, `O_NONBLOCK` 0x800, `O_DIRECTORY` 0x10000, `O_CLOEXEC` 0x80000). |
 | `CLOCK_*` | **Match** (`CLOCK_REALTIME` 0, `CLOCK_MONOTONIC` 1, ...). All ids resolve; `CLOCK_REALTIME` is wall time anchored to the CMOS RTC, the rest count from boot. Resolution is one 10ms tick (§8a). |
 | `TCGETS`/`TCSETS`/`TIOCGWINSZ` etc. | **Match** — Linux's ioctl numbers (§8b). |
+| `VT_*` / `KD*` ioctl numbers | **Match** — `VT_OPENQRY` 0x5600, `VT_GETMODE` 0x5601, `VT_SETMODE` 0x5602, `VT_GETSTATE` 0x5603, `VT_RELDISP` 0x5605, `VT_ACTIVATE` 0x5606, `VT_WAITACTIVE` 0x5607, `KDSETMODE` 0x4B3A, `KDGETMODE` 0x4B3B; `KD_TEXT` 0, `KD_GRAPHICS` 1. `struct vt_stat` is Linux's three `unsigned short`s. **Diverges:** 6 VTs not 63, and `VT_SETMODE`/`VT_RELDISP` are inert — see §8e. |
 | `EV_*` (input event types) | **Match** (`EV_SYN` 0, `EV_KEY` 1, `EV_MSC` 4, etc.). `EV_VERSION` is 0x010001. |
 | `KEY_*` (keyboard codes) | **Match** Linux x86-64 values for the US keyboard subset (Set-1 AT scancode mapping). |
 | `MSC_*` (miscellaneous codes) | **Match** (`MSC_SCAN` 4). |
@@ -292,6 +293,29 @@ loop until `-ECHILD`, then calls `reboot(LINUX_REBOOT_CMD_POWER_OFF)`.
   not woken (no orphaned-process-group `SIGHUP`+`SIGCONT`), so PID 1's
   `wait4` would block on it forever.
 - If PID 1 exits, the kernel panics.
+
+### 8e. Virtual terminals (M1c-3)
+
+`/dev/tty1`..`/dev/tty6` are six independent kernel VTs, each a full
+line-discipline terminal with its own grid and scrollback; `/dev/tty0`
+(and `/dev/CONSOLE`) resolve to whichever is active. `Alt+F1`..`Alt+F6`
+switch, `Shift+PageUp`/`PageDown` scroll, and both are consumed by the
+kernel before evdev or any tty sees them. The `VT_*`/`KD*` ioctls are
+Linux's numbers with Linux's meanings (table in §5).
+
+**What a ported console app hits.** `chvt`, `openvt -s`, `deallocvt` and
+`fgconsole` work as far as `VT_ACTIVATE`/`VT_GETSTATE` take them. What
+does not work is the **`VT_PROCESS` handshake**: `VT_SETMODE` is accepted
+and ignored, so a process cannot ask to be signalled before a switch and
+cannot acknowledge one with `VT_RELDISP`. Every switch is `VT_AUTO` and
+happens immediately, whatever is on screen. An X server, a Wayland
+compositor or `svgalib` — anything that must save and restore the video
+state around a switch — therefore cannot cooperate with console
+switching yet. `KDSETMODE(KD_GRAPHICS)` does work, so such a program can
+at least stop the kernel drawing over it. Raw keyboard modes
+(`KDSKBMODE`, `K_RAW`, `K_MEDIUMRAW`), the keymap ioctls (`KDGKBENT`
+&c.) and `/dev/vcs*` are absent; a program wanting scancodes uses
+`/dev/input/event0` (§8c).
 
 ## 9. What a real ported application hits, in order
 

@@ -1335,6 +1335,68 @@ Released automatically when the **last** master fd is closed (a
 the console before its dump, so a fault always paints over the
 terminal's grid.
 
-**DIVERGENCE:** there is exactly one active terminal at a time and no
-virtual-console switching (`chvt`, `VT_ACTIVATE`). A second claim while
-another master holds it simply moves the claim.
+**DIVERGENCE:** there is exactly one active *userland* terminal at a
+time. A second claim while another master holds it simply moves the
+claim. This is independent of the kernel virtual terminals below: a
+claim suppresses the kernel's own painting, and `Alt+Fn` still switches
+VTs underneath it.
+
+## Virtual terminals: `/dev/tty1` … `/dev/tty6` (M1c-3)
+
+Six kernel virtual terminals, one visible at a time. Each is a full
+terminal — its own text grid, scrollback, line discipline and
+`termios` — so `TCGETS`, `TIOCGWINSZ`, canonical editing and the signal
+characters all work on any of them, foreground or background.
+
+| Path | What it is |
+|---|---|
+| `/dev/tty1` … `/dev/tty6` | the six VTs, addressed individually |
+| `/dev/tty0` | whichever VT is active *right now*, re-resolved per call |
+| `/dev/CONSOLE`, `/dev/TTY` | also follow the active VT |
+
+Writing to a background VT is legal and silent: the text lands in that
+VT's grid and appears when it is switched to. The kernel log and the
+panic dump land on VT 1, and a fault forcibly switches to it.
+
+**Keys** (consumed by the kernel — they never reach an evdev client or a
+line discipline, even one holding an `EVIOCGRAB`):
+
+- `Alt+F1` … `Alt+F6` — switch to that VT.
+- `Shift+PageUp` / `Shift+PageDown` — scroll the active VT's scrollback
+  by half a screen.
+
+### `VT_*` / `KD*` ioctls
+
+Linux's numbers and semantics, on any `/dev/ttyN` fd (`/dev/tty0` is the
+usual one). Anything outside this set falls through to the ordinary
+terminal ioctls on the same fd.
+
+| ioctl | Number | Behaviour |
+|---|---|---|
+| `VT_ACTIVATE` | `0x5606` | arg 1..6; switches immediately |
+| `VT_WAITACTIVE` | `0x5607` | blocks until that VT is active |
+| `VT_GETSTATE` | `0x5603` | fills `struct vt_stat` |
+| `VT_OPENQRY` | `0x5600` | writes an `int` |
+| `VT_GETMODE` / `VT_SETMODE` / `VT_RELDISP` | `0x5601`/`0x5602`/`0x5605` | accepted, inert |
+| `KDSETMODE` / `KDGETMODE` | `0x4B3A`/`0x4B3B` | `KD_TEXT` (0) / `KD_GRAPHICS` (1) |
+
+`KD_GRAPHICS` stops the kernel painting that VT; its grid still updates,
+and `KD_TEXT` repaints it. That is how a userland display server will
+take the screen without the kernel drawing over it.
+
+**DIVERGENCE.**
+- **6 VTs, not Linux's 63.** `VT_ACTIVATE` outside 1..6 is `-EINVAL`.
+- **`VT_SETMODE` / `VT_RELDISP` are accepted and do nothing.** Every
+  switch is `VT_AUTO` and instant; the `VT_PROCESS` handshake (a process
+  that asks to be signalled before a switch and acknowledges it) is not
+  implemented, so `SIGUSR1`/`SIGUSR2` are never sent on a switch and
+  `v_signal` in `struct vt_stat` is always 0. A display server therefore
+  cannot yet veto or defer a console switch.
+- **`VT_OPENQRY` never fails.** There is no pool of free VTs to allocate
+  from: all six exist from boot, so it reports the active one rather
+  than "the first unused".
+- **`v_state`** reports all six as allocated, always.
+- **No raw or medium-raw keyboard modes.** `KDSKBMODE`, `K_RAW`,
+  `K_MEDIUMRAW` and the `KDGKBENT` keymap ioctls do not exist; a program
+  wanting scancodes reads `/dev/input/event0`.
+- **No `/dev/vcs*` / `/dev/vcsa*`** screen-content devices.
