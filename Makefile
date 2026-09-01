@@ -335,7 +335,13 @@ SMP_CPUS ?= 4
 QEMU_COMMON := -cpu Nehalem -smp $(SMP_CPUS) -boot order=d \
 	-cdrom $(BUILD_DIR)/neoos.iso \
 	-drive file=$(DISK_IMG),format=raw -drive file=$(DISK2_IMG),format=raw \
+	-vga std \
 	-no-reboot
+
+# -vga std: the plain Bochs-VBE standard VGA -- a dumb linear
+# framebuffer, no acceleration, no guest driver. It is QEMU's current
+# default on `pc`, but naming it keeps GRUB's Multiboot2 framebuffer
+# request (and so /dev/fb0) working if that default ever changes.
 
 run: iso disk-image
 	qemu-system-x86_64 $(QEMU_COMMON)
