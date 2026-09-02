@@ -86,7 +86,7 @@ BB2.  The measured syscall set (was BB1 + BB4)             <- DONE
 BB3.  execve(path, argv, envp)                            <- DONE
 BB4.  Job control                                     (was BB2)
 BB5.  Minimal /proc                                   (was BB3)
-BB6.  Interactive shell bring-up
+BB6.  Interactive shell bring-up                          <- DONE
 ```
 
 **The one real change of method: BB1 comes before the syscall work.**
@@ -342,21 +342,44 @@ was correct before this and is now wrong. It asserts the vector is
 well-formed instead (present, every entry `NAME=...`, NULL-terminated);
 *which* variables exist is init's business, not the entry contract's.
 
-**Open, and BusyBox's rather than the kernel's:** a command that `ash`
-launches sees NO environment at all — not `PATH` alone. Four tagged
-probes in `bbspike` separate the hops:
+**A wrong conclusion, corrected in BB6.** BB3 originally recorded that a
+command launched by `ash` saw no environment at all, and concluded the
+loss was "inside ash's own launching of a child" because four tagged
+probes showed both kernel paths carrying it correctly.
+
+That was wrong, and the reasoning was the trap: the probes proved the
+kernel's `spawnve` and `execve` paths were fine, and I read that as
+proof the kernel was fine. What they did not cover was the path ash
+actually uses — fork WITHOUT exec — and fork was zeroing the child's
+thread pointer (see BB6). Every one of those children was dying or
+running with broken thread-local storage.
+
+With the fork bug fixed, the same probes read:
 
 | probe | result |
 |---|---|
-| `spawnve` → `sh -c 'echo $PATH'` | `PATH=/BIN` ✓ |
-| `execve` → `sh -c 'echo $PATH'` | `PATH=/BIN` ✓ |
-| `ash` → `busybox sh -c 'echo $PATH'` | ash's built-in default ✗ |
-| `ash` → `export FOO=bar; busybox sh -c ...` | `FOO=`, `HOME=`, default `PATH` ✗ |
+| `ash` → `busybox sh -c 'echo $PATH'` | `PATH=/BIN` ✓ |
+| `ash` → `export FOO=bar; busybox sh -c ...` | `FOO=bar HOME=/ PATH=/BIN` ✓ |
 
-So both kernel paths carry the environment and the loss is inside ash's
-own launching of a child — the whole environment, including a variable
-just exported, which rules out `PATH`'s special handling as the cause.
-The probes are tagged because untagged ones were unreadable: `env`
-prints the same lines whoever ran it and several processes interleave on
-the serial port. Chase this in BB6, where an interactive shell makes it
-directly observable.
+The lesson worth keeping: proving the two paths you thought of are
+correct says nothing about the third.
+
+## BB6 result — **DONE** (2026-09-02)
+
+`userland/bbsh.c` runs BusyBox `sh -i` on a pty: the shell on the slave
+in its own session, commands written into the master, output read back.
+It answers variable expansion, arithmetic, `pwd`, a pipeline, and a
+redirection round trip through a file. That is the milestone's goal —
+an interactive `ash` on a terminal — reached over a pty rather than the
+framebuffer, which `/BIN/TERM` already renders.
+
+Two kernel bugs stood in the way, both invisible to every existing test:
+fork left the child with no thread pointer, and a pty hung up when a
+forked child closed its inherited master fd. Both are described in the
+commit and in the code at the point of the fix.
+
+**Still open:** `sh: can't access tty; job control turned off` at
+startup — BB4's subject, and the reason it was left until the shell
+existed to demonstrate it. The shell is fully usable without it; what is
+missing is `SIGTTIN`/`SIGTTOU` generation and the foreground-pgid
+handshake, which `struct tty` already has a field for.
