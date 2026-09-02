@@ -128,12 +128,11 @@ static void parse_inittab(void) {
 // the only place it can come from: there is nothing above PID 1 to
 // inherit one from, so if init does not supply it, nothing has one.
 //
-// PATH names /BIN because that is where the disk image puts programs,
-// and the names there are FAT 8.3 uppercase. HOME is / because NeoOS
-// has no users and therefore no home directories -- a shell still wants
-// somewhere to go when asked for one.
+// PATH names /bin, where programs live, and /usr/tests so the suite's
+// binaries can be run by name from a shell. HOME is / until N5 gives
+// users real home directories.
 static char *const base_env[] = {
-    (char *)"PATH=/BIN",
+    (char *)"PATH=/bin:/usr/tests",
     (char *)"HOME=/",
     (char *)"TERM=linux",
     (char *)"PS1=neoos$ ",

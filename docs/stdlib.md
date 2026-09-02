@@ -1246,6 +1246,20 @@ with none gets `-ENXIO` from `open("/dev/tty")`, as on Linux.
 root holds directories only. `/tmp` is a ramfs, so tests that must write
 to a real filesystem use `/var/tmp`.
 
+**`nsh` is the NeoOS shell** (`/bin/nsh.nex`): a prompt, one line at a
+time split on whitespace, the builtins `cd` `pwd` `echo` `env` `help`
+`exit`, and `PATH` lookup for everything else. It reports a non-zero
+exit status and survives an unknown command.
+
+It deliberately has **no quoting, pipes, redirection, variables,
+globbing or job control** — an argument containing a space cannot be
+written. `busybox sh` is one word away when a session needs a real
+shell, and a bad imitation of `ash` would be worse than none.
+
+`PATH` lookup tries the bare name first and then the name with **`.nex`
+appended**, so `busybox` finds `/bin/busybox.nex`. The bare name wins,
+which is what `./prog` requires.
+
 **Processes carry a `uid` and `gid`, and the superuser is `god`, uid 0.**
 The name is NeoOS's; the number is Unix's, because every `uid == 0` test
 in ported software depends on it. `getuid`/`geteuid`/`getgid`/`getegid`
