@@ -56,6 +56,11 @@ int getegid(void);
 int setuid(int uid);
 int setgid(int gid);
 
+// Random bytes from the kernel CSPRNG -- the same source /dev/urandom
+// reads. Never blocks and always fills the buffer, so a short return is
+// an error rather than something to loop on.
+long getrandom(void *buf, unsigned long len, unsigned int flags);
+
 // 1 on /dev/console and /dev/TTY, 0 on a file, pipe or socket.
 int isatty(int fd);
 int ioctl(int fd, unsigned long request, void *arg);

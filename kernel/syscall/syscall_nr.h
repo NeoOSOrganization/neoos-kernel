@@ -158,7 +158,13 @@
 #define SYS_SETUID          80
 #define SYS_SETGID          81
 
+// Random bytes. The same CSPRNG /dev/urandom reads from, reachable
+// without a file descriptor -- which is what musl's getentropy() and
+// arc4random() use, and what a program needs before it can open
+// anything.
+#define SYS_GETRANDOM       82
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX             82
+#define SYS_MAX             83
 
 #endif

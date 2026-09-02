@@ -5,6 +5,7 @@
 // user-copy helpers stayed behind in syscall.c.
 
 #include "syscall/syscall_internal.h"
+#include "lib/rand.h"
 #include "drivers/char/serial.h"
 #include "sched/proc.h"
 #include "sched/fd_table.h"
@@ -91,4 +92,31 @@ int64_t sys_arch_prctl(struct syscall_args *a) {
     // thread on the CPU. No libc uses it on x86-64. Recorded in
     // docs/stdlib.md.
     return -EINVAL;
+}
+
+// getrandom(buf, len, flags) -- Linux's shape exactly.
+//
+// Always fills the whole buffer and never blocks: NeoOS's CSPRNG is
+// seeded once at boot and is always ready, so GRND_RANDOM and
+// GRND_NONBLOCK have nothing to select between. Unknown flags are
+// REJECTED rather than ignored, because a caller passing a flag this
+// kernel does not implement is asking for a guarantee it would not be
+// getting.
+#define GRND_NONBLOCK 0x0001
+#define GRND_RANDOM   0x0002
+#define GRND_INSECURE 0x0004
+
+int64_t sys_getrandom(struct syscall_args *a) {
+    uint64_t uptr  = a->a1;
+    uint64_t len   = a->a2;
+    unsigned flags = (unsigned)a->a3;
+
+    if (flags & ~(unsigned)(GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE)) {
+        return -EINVAL;
+    }
+    if (len == 0) { return 0; }
+    if (!user_range_writable(uptr, len)) { return -EFAULT; }
+
+    rand_bytes((void *)(uintptr_t)uptr, len);
+    return (int64_t)len;
 }

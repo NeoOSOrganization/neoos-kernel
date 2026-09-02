@@ -1284,6 +1284,25 @@ together. Because the logo is ordinary shell output rather than
 something painted outside the terminal, `clear` removes it like any
 other output.
 
+**`/dev/urandom`, `/dev/random` and `getrandom(2)`** all draw from the
+same kernel CSPRNG (`kernel/lib/rand.c`), and none of them ever block.
+The two devices are identical, as they are on Linux since 5.6 — once the
+pool is seeded `/dev/random` no longer blocks and returns what
+`/dev/urandom` returns, so making them differ would invent a distinction
+Linux has removed. Writes to either are accepted and discarded: there is
+no pool to mix into, and failing the common `> /dev/urandom` idiom would
+buy nothing.
+
+`getrandom` **rejects unknown flags** rather than ignoring them — a
+caller passing a flag this kernel does not implement is asking for a
+guarantee it would not be getting. `GRND_NONBLOCK`, `GRND_RANDOM` and
+`GRND_INSECURE` are accepted and have nothing to select between.
+
+**Divergence worth knowing:** this is a CSPRNG seeded **once** at boot
+(RTC, TSC, a stack address, and `RDRAND` where available), not an
+entropy pool that reseeds. It is suitable for salts, cookies, stack
+guards and ASLR offsets; it is not a source for long-term key material.
+
 **Processes carry a `uid` and `gid`, and the superuser is `god`, uid 0.**
 The name is NeoOS's; the number is Unix's, because every `uid == 0` test
 in ported software depends on it. `getuid`/`geteuid`/`getgid`/`getegid`

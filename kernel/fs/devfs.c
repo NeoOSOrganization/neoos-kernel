@@ -1,5 +1,6 @@
 #include "fs/devfs.h"
 #include "fs/file.h"
+#include "lib/rand.h"
 #include "sync/poll_head.h"
 #include "sched/proc.h"
 #include "errno.h"
@@ -123,6 +124,52 @@ static const struct file_ops kmsg_file_ops = {
     .dup      = null_fop_dup,
     .close    = null_fop_close,
 };
+// /dev/urandom and /dev/random -- both the same CSPRNG (kernel/lib/rand.c),
+// both non-blocking.
+//
+// Linux stopped distinguishing them in 5.6: once the pool is seeded,
+// /dev/random no longer blocks and returns the same bytes /dev/urandom
+// does. NeoOS seeds once at boot from the RTC, the TSC, a stack address
+// and RDRAND where available, and never blocks -- so making the two
+// devices differ would be inventing a distinction Linux has removed.
+//
+// Recorded in docs/stdlib.md: this is a CSPRNG seeded once, not an
+// entropy pool with reseeding, so it is suitable for salts, cookies and
+// stack guards rather than for long-term key material.
+static int64_t random_fop_read(struct file_descriptor *f, void *buf, uint64_t len) {
+    (void)f;
+    if (len == 0) { return 0; }
+    rand_bytes(buf, len);
+    return (int64_t)len;
+}
+
+// Writing is accepted and DISCARDED. On Linux a write mixes into the
+// pool; here there is no pool to mix into, and reporting an error would
+// break the common `cat something > /dev/urandom` idiom for no gain.
+static int64_t random_fop_write(struct file_descriptor *f, const void *buf, uint64_t len) {
+    (void)f; (void)buf;
+    return (int64_t)len;
+}
+
+static const struct file_ops random_file_ops = {
+    .name     = "random",
+    .read     = random_fop_read,
+    .write    = random_fop_write,
+    .lseek    = null_fop_lseek,
+    .getdents = null_fop_getdents,
+    .ioctl    = null_fop_ioctl,
+    .poll     = null_fop_poll,
+    .poll_head = null_poll_head,
+    .dup      = null_fop_dup,
+    .close    = null_fop_close,
+};
+
+static int random_open(struct file_descriptor *f) {
+    f->priv = NULL;
+    f->ops = &random_file_ops;
+    return 0;
+}
+
 static int kmsg_open(struct file_descriptor *f) {
     f->priv = NULL;
     f->ops = &kmsg_file_ops;
@@ -182,6 +229,8 @@ static const struct devfs_dev devices[] = {
     { "fb0",     VNODE_DEVICE, &fb_file_ops,  fb_open },
     { "ptmx",    VNODE_DEVICE, NULL,          ptmx_open },
     { "kmsg",    VNODE_DEVICE, &kmsg_file_ops, kmsg_open },
+    { "urandom", VNODE_DEVICE, &random_file_ops, random_open },
+    { "random",  VNODE_DEVICE, &random_file_ops, random_open },
     // The six kernel virtual terminals, plus tty0 = whichever is
     // active. Appended here rather than next to CONSOLE for the same
     // reason fb0/ptmx/kmsg were: inode ids are positional and the

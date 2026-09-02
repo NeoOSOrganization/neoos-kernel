@@ -116,6 +116,7 @@ int64_t sys_getuid(struct syscall_args *a);
 int64_t sys_getgid(struct syscall_args *a);
 int64_t sys_setuid(struct syscall_args *a);
 int64_t sys_setgid(struct syscall_args *a);
+int64_t sys_getrandom(struct syscall_args *a);
 int64_t sys_getsid(struct syscall_args *a);
 int64_t sys_getsockname(struct syscall_args *a);
 int64_t sys_kill(struct syscall_args *a);

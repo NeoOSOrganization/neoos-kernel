@@ -278,6 +278,7 @@ static const struct syscall_desc syscall_table[SYS_MAX] = {
     [SYS_GETEGID]         = { sys_getgid,          "getegid" },
     [SYS_SETUID]          = { sys_setuid,          "setuid" },
     [SYS_SETGID]          = { sys_setgid,          "setgid" },
+    [SYS_GETRANDOM]       = { sys_getrandom,       "getrandom" },
 };
 
 // Asserts what the table's shape is supposed to guarantee. Cheap, and

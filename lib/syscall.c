@@ -66,6 +66,7 @@
 #define SYS_GETGID        78
 #define SYS_SETUID        80
 #define SYS_SETGID        81
+#define SYS_GETRANDOM     82
 
 #define SYS_CHDIR         53
 #define SYS_GETCWD        54
@@ -267,6 +268,11 @@ int getgid(void)  { return (int)syscall0(SYS_GETGID); }
 int getegid(void) { return (int)syscall0(SYS_GETGID); }
 int setuid(int uid) { return (int)syscall1(SYS_SETUID, uid); }
 int setgid(int gid) { return (int)syscall1(SYS_SETGID, gid); }
+
+long getrandom(void *buf, unsigned long len, unsigned int flags) {
+    return (long)syscall3(SYS_GETRANDOM, (int64_t)(uintptr_t)buf,
+                          (int64_t)len, (int64_t)flags);
+}
 
 int getppid(void) {
     return (int)syscall0(SYS_GETPPID);
