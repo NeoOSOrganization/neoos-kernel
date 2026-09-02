@@ -300,6 +300,18 @@ static void apply_sgr(struct vt *v) {
 
 // --- CSI / ESC dispatch -------------------------------------------
 
+// Writes `v` as decimal into `out`, returning the length. No stdio here:
+// vt.c is the renderer and deliberately has no dependencies beyond the
+// grid it draws.
+static int put_uint(char *out, unsigned v) {
+    char d[10];
+    int n = 0;
+    do { d[n++] = (char)('0' + (v % 10)); v /= 10; } while (v && n < 10);
+    int k = 0;
+    while (n > 0) { out[k++] = d[--n]; }
+    return k;
+}
+
 static int clamp_row(struct vt *v, int r) { return clampi(r, 0, v->rows - 1); }
 static int clamp_col(struct vt *v, int c) { return clampi(c, 0, v->cols - 1); }
 
@@ -359,7 +371,33 @@ static void dispatch_csi(struct vt *v, uint8_t final) {
         if (v->sc_valid) { v->cx = clamp_col(v, v->sc_cx); v->cy = clamp_row(v, v->sc_cy); v->pen = v->sc_pen; }
         break;
     case 'm': apply_sgr(v); break;
-    case 'n': /* DSR: no reply channel inside vt */ break;
+    case 'n': {
+        // DSR -- Device Status Report. CSI 6 n asks "where is the
+        // cursor?" and the terminal must answer CSI row ; col R on the
+        // program's INPUT.
+        //
+        // This used to be ignored, with the note "no reply channel
+        // inside vt". The consequence was not cosmetic: BusyBox's line
+        // editor asks this at startup, and with no answer it assumes
+        // the cursor is at the top-left and draws the shell's prompt
+        // there -- over whatever was already on the screen. Starting
+        // `busybox sh` from nsh painted its banner across the logo.
+        //
+        // The VT still has no fd. It stages the answer here and the
+        // owner of the pty master sends it.
+        if (v->nparam >= 1 && v->params[0] == 6) {
+            int row = v->cy + 1, col = v->cx + 1;
+            int k = 0;
+            v->reply[k++] = 0x1B;
+            v->reply[k++] = '[';
+            k += put_uint(v->reply + k, (unsigned)row);
+            v->reply[k++] = ';';
+            k += put_uint(v->reply + k, (unsigned)col);
+            v->reply[k++] = 'R';
+            v->reply_len = k;
+        }
+        break;
+    }
     default:  break;
     }
 }

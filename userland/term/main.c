@@ -247,6 +247,14 @@ int main(int argc, char **argv) {
             int r = read(m, buf, sizeof buf);
             if (r <= 0) { break; }
             vt_feed(&V, buf, (size_t)r);
+            // A query the VT answered but cannot send: write it back as
+            // input, which is where the program expects to read it.
+            // BusyBox's line editor asks for the cursor position at
+            // startup and positions its prompt from the answer.
+            if (V.reply_len > 0) {
+                write(m, V.reply, (unsigned long)V.reply_len);
+                V.reply_len = 0;
+            }
             struct vt_span sp[VT_MAX_ROWS];
             int nd = vt_take_dirty(&V, sp, VT_MAX_ROWS);
             for (int i = 0; i < nd; i++) {

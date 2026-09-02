@@ -56,6 +56,14 @@ struct vt {
     int wrap_pending;
     int cursor_visible;
 
+    // A reply the terminal owes the program, produced by a query the VT
+    // cannot answer alone. The VT is a pure renderer with no fd; the
+    // process that owns the pty master takes what is here and writes it
+    // back as input. See VT_DSR handling in vt.c and the drain in
+    // userland/term/main.c.
+    char reply[24];
+    int  reply_len;
+
     // Current SGR, carried as a template cell (ch unused).
     struct vt_cell pen;
 
