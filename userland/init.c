@@ -5,11 +5,22 @@
 // every orphan reparented to us has exited -- it powers the machine
 // off with reboot(2).
 //
-// INITTAB grammar: one entry per line, "<mode> <path>". Blank lines and
-// lines beginning with '#' are ignored.
+// INITTAB grammar: one entry per line, "<mode> <path> [args...]".
+// Blank lines and lines beginning with '#' are ignored.
 //   spawn    launch and do not wait
 //   wait     launch and block until it exits before the next entry
 //   respawn  launch, and relaunch whenever it exits
+//
+// Arguments after the path are passed to the program as argv[1..].
+// Without them an entry can only ever run a program that needs no
+// configuration, which is why `make shell` needs them: it launches the
+// framebuffer terminal with the shell to run inside it.
+//
+// Splitting is on whitespace ONLY -- there is no quoting. An argument
+// containing a space cannot be written here, and a line using quotes
+// gets them as literal characters (a `sh -c "a; b"` entry reaches the
+// shell as three broken arguments and it exits 2). A program needing
+// that should be given a script to run instead.
 
 #include <unistd.h>
 #include <stdio.h>
@@ -23,7 +34,18 @@
 #define MODE_WAIT    1
 #define MODE_RESPAWN 2
 
-static struct { char path[64]; int mode; } ents[MAX_ENTRIES];
+#define MAX_ARGS 8
+#define LINE_MAX 192
+
+static struct {
+    // The whole "<path> [args...]" remainder, split IN PLACE: each
+    // separator becomes a NUL and argv points into this buffer. One
+    // allocation-free split per entry, and argv[0] is the path.
+    char  line[LINE_MAX];
+    char *argv[MAX_ARGS + 1];
+    int   argc;
+    int   mode;
+} ents[MAX_ENTRIES];
 static int nents;
 
 // pid -> entry, so a respawn entry's exit can be matched and relaunched.
@@ -78,12 +100,25 @@ static void parse_inittab(void) {
         int m = mode_of(buf + ws, ls - ws);
         while (ls < le && (buf[ls] == ' ' || buf[ls] == '\t')) { ls++; }
 
-        if (m < 0 || le <= ls || (le - ls) >= (int)sizeof ents[0].path) {
+        if (m < 0 || le <= ls || (le - ls) >= LINE_MAX) {
             printf("[init] bad inittab line skipped\n");
             continue;
         }
-        memcpy(ents[nents].path, buf + ls, le - ls);
-        ents[nents].path[le - ls] = 0;
+        memcpy(ents[nents].line, buf + ls, le - ls);
+        ents[nents].line[le - ls] = 0;
+
+        // Split on runs of spaces and tabs.
+        int argc = 0;
+        char *p = ents[nents].line;
+        while (*p && argc < MAX_ARGS) {
+            while (*p == ' ' || *p == '\t') { *p++ = 0; }
+            if (!*p) { break; }
+            ents[nents].argv[argc++] = p;
+            while (*p && *p != ' ' && *p != '\t') { p++; }
+        }
+        ents[nents].argv[argc] = 0;
+        if (argc == 0) { printf("[init] bad inittab line skipped\n"); continue; }
+        ents[nents].argc = argc;
         ents[nents].mode = m;
         nents++;
     }
@@ -106,10 +141,9 @@ static char *const base_env[] = {
 };
 
 static int launch(int e) {
-    char *argv[2] = { ents[e].path, 0 };
-    int pid = spawnve(ents[e].path, argv, base_env);
+    int pid = spawnve(ents[e].argv[0], ents[e].argv, base_env);
     if (pid < 0) {
-        printf("[init] spawn %s failed (%d)\n", ents[e].path, pid);
+        printf("[init] spawn %s failed (%d)\n", ents[e].argv[0], pid);
         return -1;
     }
     if (ents[e].mode == MODE_RESPAWN && nrp < MAX_ENTRIES) {

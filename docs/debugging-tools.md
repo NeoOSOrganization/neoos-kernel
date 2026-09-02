@@ -300,3 +300,29 @@ recurse. Anything else fails the check, and needs an argument in
 
 Both checks were verified by making them fire and then reverting the
 change that did it.
+
+## `make shell` — boot straight to a BusyBox shell
+
+Builds BusyBox if needed, writes an INITTAB with a single entry, and
+boots QEMU with the framebuffer window. Type in the window; `exit` ends
+the shell, and because it is the only entry the machine then powers off.
+
+    make shell
+
+The INITTAB it writes is:
+
+    wait /BIN/TERM.ELF /BIN/BUSYBOX.ELF busybox sh
+
+which reads as: run the framebuffer terminal, and inside it run the
+program at `/BIN/BUSYBOX.ELF` with `argv = {"busybox", "sh"}`. The path
+and `argv[0]` are separate on purpose — BusyBox picks its applet from
+`argv[0]`, and the FAT path's basename (`BUSYBOX.ELF`) is not an applet
+name, so passing the path as `argv[0]` gets "applet not found" and exit
+127. That was the first version of this target.
+
+`make shell-serial` is the same thing with QEMU's serial on stdio, for
+when there is no window to type into — note that the *shell* is still on
+the framebuffer; serial carries the kernel log.
+
+Nothing else runs: the whole test suite would otherwise print over the
+session. `make run` still boots the normal INITTAB with every test.

@@ -11,6 +11,7 @@
 #include <string.h>
 #include <poll.h>
 #include <sys/wait.h>
+#include <auxv.h>
 
 #include "vt.h"
 #include "render.h"
@@ -25,6 +26,7 @@
 #define FBIOGET_VSCREENINFO 0x4600
 #define FBIOGET_FSCREENINFO 0x4602
 #define NEOOS_TIOCSACTIVE  0x4E454F01
+#define TIOCSCTTY          0x540E
 
 extern long mmap_fd_raw(unsigned long addr, unsigned long len, int prot,
                         int flags, int fd, long offset);
@@ -66,7 +68,44 @@ static unsigned fb_px(const struct term_fb *fb, int x, int y) {
     return *p;
 }
 
-int main(void) {
+// With no arguments TERM runs /BIN/TERMCHILD.ELF and finishes with the
+// render self-check that makes it a test. Given arguments it runs those
+// instead and skips the self-check, because the check looks for
+// TERMCHILD's red 'R' at cell (0,0) and any other program would rightly
+// fail it.
+//
+// The shape is execve's, deliberately: argv[1] is the PATH and argv[2..]
+// is the child's whole argv, argv[0] included.
+//
+//   wait /BIN/TERM.ELF /BIN/BUSYBOX.ELF busybox sh
+//                      ^path            ^argv[0] ^argv[1]
+//
+// Separating them is not ceremony. BusyBox chooses its applet from
+// argv[0], and the path on a FAT volume is `/BIN/BUSYBOX.ELF`, whose
+// basename is not an applet name -- given the path as argv[0] it prints
+// "applet not found" and exits 127, which is exactly what the first
+// version of `make shell` did. With argv[2..] supplied, argv[0] can be
+// `busybox` while the kernel still loads the file it can actually find.
+//
+// Omitting argv[2..] falls back to argv[0] = path, which is right for
+// any program that does not care.
+int main(int argc, char **argv) {
+    char *default_child[] = { (char *)"/BIN/TERMCHILD.ELF", 0 };
+    char *path_only[]     = { 0, 0 };
+    const char *child_path;
+    char **child_argv;
+    if (argc > 2) {
+        child_path = argv[1];
+        child_argv = &argv[2];
+    } else if (argc > 1) {
+        child_path = argv[1];
+        path_only[0] = argv[1];
+        child_argv = path_only;
+    } else {
+        child_path = default_child[0];
+        child_argv = default_child;
+    }
+    int is_selftest = (argc <= 1);
     // --- PTY ---------------------------------------------------------
     int m = open("/dev/ptmx", O_RDWR);
     if (m < 0) { fail("ptmx open"); }
@@ -146,8 +185,32 @@ int main(void) {
         dup2(slave, 1);
         dup2(slave, 2);
         if (slave > 2) { close(slave); }
-        setsid();
-        exec("/BIN/TERMCHILD.ELF");
+        setsid();                    // the child leads its own session
+        // ...and takes this pty as its controlling terminal. Without
+        // it a shell finds a foreground process group that is not its
+        // own and turns job control off (see docs/stdlib.md).
+        ioctl(0, TIOCSCTTY, 0);
+        int rc = execve(child_path, child_argv, environ);
+        // Reported to /dev/kmsg, not stdout: stdout is the pty slave by
+        // now, so anything printed here would be rendered to the screen
+        // by a terminal that is about to find out its child died -- and
+        // would never reach the serial log where a failure is read.
+        int k = open("/dev/kmsg", O_WRONLY);
+        if (k >= 0) {
+            char msg[96];
+            int n = 0;
+            const char *pre = "[term] execve failed: ";
+            while (pre[n]) { msg[n] = pre[n]; n++; }
+            int v = rc < 0 ? -rc : rc;
+            if (rc < 0) { msg[n++] = '-'; }
+            char d[8]; int dn = 0;
+            do { d[dn++] = (char)('0' + (v % 10)); v /= 10; } while (v && dn < 8);
+            while (dn) { msg[n++] = d[--dn]; }
+            msg[n++] = ' ';
+            for (int i = 0; child_path[i] && n < 90; i++) { msg[n++] = child_path[i]; }
+            msg[n++] = '\n';
+            write(k, msg, (unsigned long)n);
+        }
         exit(127);
     }
 
@@ -174,6 +237,14 @@ int main(void) {
 
     int st;
     wait4(child, &st, 0, 0);
+
+    // Running someone else's program: there is no render self-check to
+    // do, and the exit status that matters is the child's.
+    if (!is_selftest) {
+        ioctl(m, NEOOS_TIOCSACTIVE, (void *)0);
+        printf("[term] child exited, status %d\n", st);
+        return 0;
+    }
 
     // --- self-check: TERMCHILD's red 'R' at cell (0,0), blank at (0,20)
     unsigned want_red = fb_pack(&FB, vt_palette[1]);
