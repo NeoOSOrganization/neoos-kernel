@@ -315,6 +315,11 @@ static int64_t vt_fop_ioctl(struct file_descriptor *f, uint64_t request, void *a
     return tty_obj_ioctl(t, request, arg);
 }
 
+static struct poll_head *vt_fop_poll_head(struct file_descriptor *f) {
+    struct tty *t = vt_of(f);
+    return t ? &t->poll : 0;
+}
+
 static int vt_fop_poll(struct file_descriptor *f, int events) {
     struct tty *t = vt_of(f);
     if (!t) { return 0; }
@@ -332,6 +337,7 @@ const struct file_ops vt_file_ops = {
     .getdents = vt_fop_getdents,
     .ioctl    = vt_fop_ioctl,
     .poll     = vt_fop_poll,
+    .poll_head = vt_fop_poll_head,
     .dup      = vt_fop_dup,
     .close    = vt_fop_close,
 };

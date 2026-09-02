@@ -1,5 +1,6 @@
 #include "drivers/input/evdev.h"
 #include "drivers/input/input.h"
+#include "sync/poll_head.h"
 #include "fs/file.h"
 #include "sched/proc.h"
 #include "errno.h"
@@ -224,6 +225,11 @@ static int evdev_fop_poll(struct file_descriptor *f, int events) {
     return evdev_client_poll(c);
 }
 
+static struct poll_head *evdev_fop_poll_head(struct file_descriptor *f) {
+    if (!f || !f->priv) { return 0; }
+    return evdev_client_poll_head((struct evdev_client *)f->priv);
+}
+
 static void evdev_fop_dup(struct file_descriptor *f) {
     // Called when an fd is duplicated (e.g., via fork)
     // We maintain a refcount on the client
@@ -256,6 +262,7 @@ const struct file_ops evdev_file_ops = {
     .getdents = evdev_fop_getdents,
     .ioctl    = evdev_fop_ioctl,
     .poll     = evdev_fop_poll,
+    .poll_head = evdev_fop_poll_head,
     .dup      = evdev_fop_dup,
     .close    = evdev_fop_close,
 };

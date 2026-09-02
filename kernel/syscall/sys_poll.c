@@ -12,6 +12,7 @@
 #include "sched/fd_table.h"
 #include "fs/file.h"
 #include "sync/waitq.h"
+#include "sync/poll_head.h"
 #include "drivers/char/timer.h"
 #include "mm/paging.h"
 #include "mm/heap.h"
@@ -30,11 +31,43 @@ struct pollfd { int fd; short events; short revents; };
 
 static int64_t poll_core(struct pollfd *pfd, unsigned n, int64_t deadline) {
     struct process *p = current_proc();
+    struct thread  *self = current_thread();
+
+    // CS5.2: register on each polled object's own poll head, so only a
+    // readiness change on something this call actually asked about wakes
+    // it. Registrations live here, on this frame, for exactly the length
+    // of the call -- which is why every exit path below unregisters.
+    struct poll_reg  small_regs[POLL_SMALL_FDS];
+    struct poll_reg *regs = small_regs;
+    if (n > POLL_SMALL_FDS) {
+        regs = kmalloc((uint64_t)n * sizeof(*regs));
+        if (!regs) { return -ENOMEM; }
+    }
+    for (unsigned i = 0; i < n; i++) { regs[i].head = 0; regs[i].next = 0; regs[i].t = 0; }
+
+    // Any fd whose object has no poll head yet leaves this poller on the
+    // global broadcast. Objects are converted one at a time, so a mixed
+    // set is the normal case during the transition and must be correct,
+    // not merely tolerated.
+    int wants_broadcast = 0;
+    for (unsigned i = 0; i < n; i++) {
+        if (pfd[i].fd < 0) { continue; }
+        struct file_descriptor *f = fd_get(p, pfd[i].fd);
+        struct poll_head *h = (f && f->ops && f->ops->poll_head) ? f->ops->poll_head(f) : 0;
+        if (h) { poll_head_register(h, &regs[i], self); }
+        else   { wants_broadcast = 1; }
+    }
+    __atomic_store_n(&self->poll_wants_broadcast, wants_broadcast, __ATOMIC_RELEASE);
 
     waitq_poll_enter();
     int64_t ready = 0;
-    int woken_by_broadcast = 0;
+    int woken = 0;
     for (;;) {
+        // Cleared BEFORE the scan, not after: a notify that lands during
+        // the scan must survive it, or this thread sleeps through the
+        // very event it was told about.
+        __atomic_store_n(&self->poll_notified, 0, __ATOMIC_RELEASE);
+
         ready = 0;
         for (unsigned i = 0; i < n; i++) {
             if (pfd[i].fd < 0) { pfd[i].revents = 0; continue; }
@@ -44,23 +77,31 @@ static int64_t poll_core(struct pollfd *pfd, unsigned n, int64_t deadline) {
             pfd[i].revents = got & (pfd[i].events | POLLERR | POLLHUP | POLLNVAL);
             if (pfd[i].revents) { ready++; }
         }
-        if (woken_by_broadcast) {
+        if (woken) {
+            // A wake that found nothing. Under the old broadcast this
+            // was nearly every wake (266 of 276 over a boot); with poll
+            // heads it should be close to none, and the number is how
+            // that claim is checked rather than asserted.
             if (!ready) { waitq_poll_count_wasted(); }
-            woken_by_broadcast = 0;
+            woken = 0;
         }
         if (ready) { break; }
         if (deadline == 0) { break; }                 // timeout 0 = non-blocking scan
-        int rc = waitq_poll_wait((uint64_t)deadline);
-        if (rc == -EINTR) { waitq_poll_leave(); return -EINTR; }
+        int rc = waitq_poll_wait((uint64_t)deadline, &self->poll_notified);
+        if (rc == -EINTR) {
+            waitq_poll_leave();
+            for (unsigned i = 0; i < n; i++) { poll_head_unregister(&regs[i]); }
+            __atomic_store_n(&self->poll_wants_broadcast, 0, __ATOMIC_RELEASE);
+            if (regs != small_regs) { kfree(regs); }
+            return -EINTR;
+        }
         if (rc == -ETIMEDOUT) { break; }
-        // Woken by a broadcast. Re-scan at the top; if that scan finds
-        // nothing, this wake was pure waste -- the readiness change was
-        // somebody else's, and the global broadcast delivered it here
-        // anyway. Count it, because that count is the whole case for
-        // CS5.2's per-object poll table.
-        woken_by_broadcast = 1;
+        woken = 1;
     }
     waitq_poll_leave();
+    for (unsigned i = 0; i < n; i++) { poll_head_unregister(&regs[i]); }
+    __atomic_store_n(&self->poll_wants_broadcast, 0, __ATOMIC_RELEASE);
+    if (regs != small_regs) { kfree(regs); }
     return ready;
 }
 

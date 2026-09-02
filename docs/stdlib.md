@@ -1182,6 +1182,23 @@ its number to the next one), and after ~1M process creations they begin
 to repeat. The old allocator did neither — it reused the most recently
 freed pid *first*, and stopped allocating entirely at 2^20.
 
+`poll()` and `select()` register on **each polled object** rather than
+on one global queue, so a readiness change wakes only the callers that
+asked about the object it happened to. This used to be a broadcast:
+every poller in the system woke on any readiness change anywhere and
+re-scanned. Measured over one boot, before and after, same suite:
+
+| | broadcasts | poll wakeups | wakeups that found nothing |
+|---|---|---|---|
+| before | 5894 | 507 | 496 (96%) |
+| after | 5998 | 8 | **0** |
+
+Pipes, sockets, ttys, ptys, VTs and evdev clients each carry their own
+poll head. Objects whose readiness never changes — regular files,
+`/dev/null`, the framebuffer — share one head that is never notified.
+An object with no head at all still works: its poller stays on the
+global broadcast, which is now woken only for those callers.
+
 `poll()` accepts up to `FD_TABLE_MAX` (16,384) descriptors — the size
 of the process's descriptor table, since polling more than it can hold
 open is meaningless. It previously refused anything over **16** with

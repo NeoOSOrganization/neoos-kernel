@@ -34,6 +34,12 @@ void waitq_global_init(void);      // inits the poll broadcast queue; call once 
 // replaces these internals with a lock handoff WITHOUT changing this
 // signature, so no caller has to change.
 int  waitq_sleep(struct waitq *q, struct spinlock *release);
+// Variants that refuse to sleep if *abort is set when the queue lock is
+// taken. Passing 0 for `abort` makes them identical to the above.
+int  waitq_sleep_unless(struct waitq *q, struct spinlock *release,
+                        volatile int *abort);
+int  waitq_sleep_timeout_unless(struct waitq *q, struct spinlock *release,
+                                uint64_t deadline, volatile int *abort);
 
 // Like waitq_sleep, but also returns -ETIMEDOUT once timer_ticks()
 // reaches `deadline`. nanosleep and futex(FUTEX_WAIT) with a timeout
@@ -68,7 +74,13 @@ uint64_t waitq_poll_depth(void);   // threads blocked on the broadcast now
 // tell a useful wake from a wasted one.
 uint64_t waitq_poll_wasted(void);
 void     waitq_poll_count_wasted(void);                 // wake every poll_core
-int  waitq_poll_wait(uint64_t deadline);      // sleep until notified / deadline / signal
+// Sleeps until notified, the deadline, or a signal -- unless *abort is
+// already set when the queue lock is taken, in which case it returns
+// immediately without sleeping. CS5.2's lost-wakeup guard; see waitq.c.
+int  waitq_poll_wait(uint64_t deadline, volatile int *abort);
+// Wakes one NAMED poll sleeper: what a per-object poll head calls
+// instead of broadcasting to every poller in the system.
+void waitq_poll_wake_thread(struct thread *t);
 void waitq_poll_enter(void);
 void waitq_poll_leave(void);
 

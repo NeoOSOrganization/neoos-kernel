@@ -14,9 +14,15 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <poll.h>
+#include <time.h>
+#include <sys/wait.h>
 #include <neoos_test.h>
 
 #define NPIPES 20
+
+// Rounds of the infinite-timeout race below. A lost wakeup hangs the
+// process, so one hit is all it takes -- but it has to be hit.
+#define ROUNDS_BLOCKING 200
 
 int main(void) {
     int rfd[NPIPES];
@@ -76,6 +82,59 @@ int main(void) {
         }
     }
     printf("[polltrunc] poll accepted %d fds and reported them all\n", NPIPES);
+
+    // An INFINITE-timeout poll racing the notify that must wake it
+    // (CS5.2).
+    //
+    // This is the case that catches a LOST WAKEUP, and it only catches
+    // it by racing. With a timeout the poller escapes on its own and the
+    // bug reads as latency; with -1 there is nothing to fall back on,
+    // and a notify landing between the readiness scan and the enqueue
+    // hangs the process for good. The old global broadcast hid that,
+    // because some unrelated event along soon after woke everybody.
+    //
+    // The window is microseconds wide, so the child does NOT sleep
+    // before writing -- it writes immediately, so the write lands while
+    // the parent is somewhere inside poll's entry path -- and the whole
+    // thing runs many times. A first version had the child sleep 60 ms
+    // first, which is a fine test of "poll(-1) wakes at all" and no test
+    // whatever of the race: with the guard removed on purpose, it passed.
+    for (int round = 0; round < ROUNDS_BLOCKING; round++) {
+        int fds[2];
+        if (pipe(fds) != 0) { printf("[polltrunc] FAILED: blocking pipe\n"); return 1; }
+        int kid = fork();
+        if (kid < 0) { printf("[polltrunc] FAILED: fork\n"); return 1; }
+        if (kid == 0) {
+            close(fds[0]);
+            // Vary the offset a little so the write sweeps across the
+            // parent's entry path rather than always landing at the
+            // same point in it.
+            for (volatile int d = 0; d < (round * 37) % 512; d++) { }
+            write(fds[1], "w", 1);
+            close(fds[1]);
+            exit(0);
+        }
+        close(fds[1]);
+        struct pollfd bp = { fds[0], POLLIN, 0 };
+        int br = poll(&bp, 1, -1);          // no timeout to escape through
+        if (br != 1 || !(bp.revents & POLLIN)) {
+            printf("[polltrunc] FAILED: round %d blocking poll returned %d revents %d\n",
+                   round, br, bp.revents);
+            return 1;
+        }
+        char c = 0;
+        read(fds[0], &c, 1);
+        close(fds[0]);
+        int st = 0;
+        waitpid(kid, &st, 0);
+        if (c != 'w') {
+            printf("[polltrunc] FAILED: round %d blocking poll read '%c'\n",
+                   round, c ? c : '?');
+            return 1;
+        }
+    }
+    printf("[polltrunc] %d rounds of poll(-1) racing the notify, none lost\n",
+           ROUNDS_BLOCKING);
 
     printf("[polltrunc] ALL PASSED\n");
     return 0;

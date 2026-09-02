@@ -71,26 +71,32 @@
 // mutex passes its own guard in as `release`, carrying the mutex's
 // rank), and below RUNQUEUE, since the sleep path reaches schedule()
 // after the queue is updated.
-#define LOCK_RANK_WAITQ      14
-#define LOCK_RANK_RUNQUEUE   15
-#define LOCK_RANK_FDTABLE    16  // file descriptor table (per-bucket locks, after VFS)
-#define LOCK_RANK_HEAP       17
-#define LOCK_RANK_PMM        18
+// A pollable object's poll head: the list of poll/select callers
+// registered on THAT object (CS5.2). Ranked below the waitq it wakes
+// through, because poll_head_notify holds it across the wake -- and
+// above every object lock (pipe 10, socket 12, tty 8) so a driver can
+// notify with its own lock held.
+#define LOCK_RANK_POLLHEAD   14
+#define LOCK_RANK_WAITQ      15
+#define LOCK_RANK_RUNQUEUE   16
+#define LOCK_RANK_FDTABLE    17  // file descriptor table (per-bucket locks, after VFS)
+#define LOCK_RANK_HEAP       18
+#define LOCK_RANK_PMM        19
 // The signal-queue pool: a leaf allocator taken while a process's
 // p->lock (rank 1, LOCK_RANK_PROCESS) is held, and holding nothing
 // itself. It sits innermost rather than beside LOCK_RANK_PROCESS
 // because equal ranks are an inversion -- acquisition must be strictly
 // ascending.
-#define LOCK_RANK_SIGQUEUE   19
+#define LOCK_RANK_SIGQUEUE   20
 // TLB shootdown bookkeeping: the deferred-free queue is filled from
 // paging_unmap_from, which runs UNDER a process's mm_lock (rank 3), so
 // it must rank strictly below it. It is a leaf -- tlb_flush_deferred
 // releases it before calling pmm_free.
-#define LOCK_RANK_TLB        20
+#define LOCK_RANK_TLB        21
 // Input subsystem: key event fan-out and grab. Taken from the keyboard
 // IRQ (so it must be a leaf-ish rank), but held only during ring-buffer
 // append -- never across tty_input_char or waitq_wake calls.
-#define LOCK_RANK_INPUT     21
+#define LOCK_RANK_INPUT     22
 // The kernel virtual terminals: vt_active, each VT's diff cache
 // (vc->shown / shown_valid) and kd_mode. Sits ABOVE TTY because the
 // write path is tty_obj_write -> t->lock -> vt_backend_output ->

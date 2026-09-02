@@ -65,9 +65,23 @@ void tty_obj_init(struct tty *t, const struct tty_backend *b, void *priv) {
     spin_init(&t->lock, LOCK_RANK_TTY, priv ? "tty-pts" : "tty-con");
     waitq_init(&t->readers);
     waitq_init(&t->out_readers);
+    poll_head_init(&t->poll, "tty-poll");
     t->backend = b;
     t->backend_priv = priv;
     tty_set_defaults(t);
+}
+
+// CS5.2. Every readiness change on a tty goes through one of these two,
+// so the poll head is notified everywhere the waitq is -- and only this
+// tty's pollers are woken, rather than every poller in the system.
+void tty_wake_readers(struct tty *t) {
+    waitq_wake_all(&t->readers);
+    poll_head_notify(&t->poll);
+}
+
+void tty_wake_out_readers(struct tty *t) {
+    waitq_wake_all(&t->out_readers);
+    poll_head_notify(&t->poll);
 }
 
 void tty_init(void) {
@@ -103,7 +117,7 @@ int64_t tty_obj_write(struct tty *t, const void *buf, uint32_t len) {
     // A pty backend just appended to outq under the lock; wake the
     // master reader now that it is dropped. Harmless for the console
     // (out_readers is always empty there).
-    (t->backend_priv ? waitq_wake_all(&t->out_readers) : (void)0);
+    (t->backend_priv ? tty_wake_out_readers(t) : (void)0);
     return (int64_t)len;
 }
 
@@ -128,7 +142,7 @@ void tty_input_char(struct tty *t, char c) {
     struct termios_k *o = &t->tio;
 
     if (o->c_iflag & ICRNL) { if (c == '\r') { c = '\n'; } }
-    else if (o->c_iflag & IGNCR) { if (c == '\r') { spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? waitq_wake_all(&t->out_readers) : (void)0); return; } }
+    else if (o->c_iflag & IGNCR) { if (c == '\r') { spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? tty_wake_out_readers(t) : (void)0); return; } }
     if (o->c_iflag & INLCR) { if (c == '\n') { c = '\r'; } }
 
     // Signal characters are checked BEFORE the canonical/raw split:
@@ -145,13 +159,13 @@ void tty_input_char(struct tty *t, char c) {
             // being typed was for the program just interrupted.
             t->edit_len = 0;
             if (o->c_lflag & ECHO) { tty_echo(t, '^'); tty_echo(t, (char)('@' + c)); tty_echo(t, '\n'); }
-            spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? waitq_wake_all(&t->out_readers) : (void)0);
+            spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? tty_wake_out_readers(t) : (void)0);
             // Signalling is done with the tty lock DROPPED: delivery
             // takes the proc_table bucket lock and per-process p->lock,
             // both of which rank above this one, and a wake can spin
             // waiting for a thread to leave its CPU.
             if (pgid > 0) { signal_kill(-pgid, sig, 0); }
-            waitq_wake_all(&t->readers);
+            tty_wake_readers(t);
             return;
         }
     }
@@ -160,8 +174,8 @@ void tty_input_char(struct tty *t, char c) {
         // Raw mode: every byte is immediately readable, no editing.
         ready_push(t, c);
         if (o->c_lflag & ECHO) { tty_echo(t, c); }
-        spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? waitq_wake_all(&t->out_readers) : (void)0);
-        waitq_wake_all(&t->readers);
+        spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? tty_wake_out_readers(t) : (void)0);
+        tty_wake_readers(t);
         return;
     }
 
@@ -173,7 +187,7 @@ void tty_input_char(struct tty *t, char c) {
             // leaving it there with the cursor sitting on top.
             if (o->c_lflag & ECHOE) { tty_echo(t, '\b'); tty_echo(t, ' '); tty_echo(t, '\b'); }
         }
-        spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? waitq_wake_all(&t->out_readers) : (void)0);
+        spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? tty_wake_out_readers(t) : (void)0);
         return;
     }
 
@@ -182,7 +196,7 @@ void tty_input_char(struct tty *t, char c) {
             while (t->edit_len > 0) { tty_echo(t, '\b'); tty_echo(t, ' '); tty_echo(t, '\b'); t->edit_len--; }
         }
         t->edit_len = 0;
-        spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? waitq_wake_all(&t->out_readers) : (void)0);
+        spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? tty_wake_out_readers(t) : (void)0);
         return;
     }
 
@@ -192,8 +206,8 @@ void tty_input_char(struct tty *t, char c) {
         // a reader.
         if (t->edit_len == 0) { t->saw_eof = 1; }
         else { line_commit(t); }
-        spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? waitq_wake_all(&t->out_readers) : (void)0);
-        waitq_wake_all(&t->readers);
+        spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? tty_wake_out_readers(t) : (void)0);
+        tty_wake_readers(t);
         return;
     }
 
@@ -201,8 +215,8 @@ void tty_input_char(struct tty *t, char c) {
         if (t->edit_len < TTY_BUF) { t->edit[t->edit_len++] = c; }
         if (o->c_lflag & ECHO) { tty_echo(t, '\n'); }
         line_commit(t);
-        spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? waitq_wake_all(&t->out_readers) : (void)0);
-        waitq_wake_all(&t->readers);
+        spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? tty_wake_out_readers(t) : (void)0);
+        tty_wake_readers(t);
         return;
     }
 
@@ -210,7 +224,7 @@ void tty_input_char(struct tty *t, char c) {
         t->edit[t->edit_len++] = c;
         if (o->c_lflag & ECHO) { tty_echo(t, c); }
     }
-    spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? waitq_wake_all(&t->out_readers) : (void)0);
+    spin_unlock_irqrestore(&t->lock, f); (t->backend_priv ? tty_wake_out_readers(t) : (void)0);
 }
 
 int64_t tty_obj_read(struct tty *t, void *buf, uint32_t len, int nonblock) {
@@ -447,6 +461,14 @@ static int64_t tty_fop_ioctl(struct file_descriptor *f, uint64_t request, void *
     return tty_obj_ioctl(tty_console(), request, arg);
 }
 
+// This file_ops is the CONSOLE's, and every fd on it refers to the one
+// console tty -- tty_fop_poll ignores `f` for the same reason.
+static struct poll_head *tty_fop_poll_head(struct file_descriptor *f) {
+    (void)f;
+    struct tty *t = tty_console();
+    return t ? &t->poll : 0;
+}
+
 static int tty_fop_poll(struct file_descriptor *f, int events) {
     (void)f;
     return tty_obj_poll(tty_console(), events);
@@ -470,6 +492,7 @@ const struct file_ops tty_file_ops = {
     .getdents = tty_fop_getdents,
     .ioctl    = tty_fop_ioctl,
     .poll     = tty_fop_poll,
+    .poll_head = tty_fop_poll_head,
     .dup      = tty_fop_dup,
     .close    = tty_fop_close,
 };

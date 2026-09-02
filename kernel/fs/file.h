@@ -46,6 +46,8 @@ struct mmap_req {
     uint64_t out_addr;  // result
 };
 
+struct poll_head;
+
 struct file_ops {
     const char *name;   // for diagnostics and the selftest
 
@@ -55,6 +57,13 @@ struct file_ops {
     int64_t (*getdents)(struct file_descriptor *f, void *buf, int bytes);
     int64_t (*ioctl)(struct file_descriptor *f, uint64_t request, void *arg);
     int     (*poll)(struct file_descriptor *f, int events);
+
+    // Optional (nullable). CS5.2: the object's poll head, so poll_core
+    // can register on THIS object rather than on the global broadcast.
+    // Returning 0 -- or not setting this at all -- is not a bug, only an
+    // unconverted object: poll_core falls back to the broadcast for that
+    // fd. The broadcast therefore shrinks as objects are converted.
+    struct poll_head *(*poll_head)(struct file_descriptor *f);
 
     // Optional (nullable). Only device fds that support mmap set it --
     // /dev/fb0 in M1a. file_mmap() returns -ENODEV when it is null.

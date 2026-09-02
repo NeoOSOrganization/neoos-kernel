@@ -79,6 +79,7 @@ struct winsize_k {
 
 #include "sync/spinlock_types.h"
 #include "sync/waitq.h"
+#include "sync/poll_head.h"
 
 #define TTY_BUF 1024
 
@@ -110,6 +111,10 @@ struct tty {
     // pty master side: what the slave wrote, waiting for the master read.
     char     outq[TTY_BUF]; uint32_t out_head, out_len;
     struct waitq out_readers;
+    // CS5.2: pollers registered on THIS tty. One head for both
+    // directions -- poll_core re-scans on any wake, so a second list
+    // would only save a scan it does anyway.
+    struct poll_head poll;
 };
 
 void tty_init(void);
@@ -117,6 +122,12 @@ struct tty *tty_console(void);
 
 // Bring a freshly allocated struct tty up with default (canonical,
 // echoing) termios and the given backend.
+// CS5.2. Wake the blocking readers AND the registered pollers of one
+// tty. Every readiness change goes through these, so a poller on a pty
+// hears about that pty rather than about every event in the system.
+void tty_wake_readers(struct tty *t);
+void tty_wake_out_readers(struct tty *t);
+
 void tty_obj_init(struct tty *t, const struct tty_backend *b, void *priv);
 
 // The line discipline, now taking an explicit tty. tty_input_char is

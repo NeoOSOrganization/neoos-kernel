@@ -8,6 +8,7 @@
 #include "drivers/char/serial.h"
 #include "sync/lock.h"
 #include "sync/waitq.h"
+#include "sync/poll_head.h"
 #include "mm/heap.h"
 #include "sched/proc.h"
 #include <errno.h>
@@ -29,6 +30,7 @@ struct evdev_client {
     uint32_t tail;                     // Oldest unread event
     int dropped;                       // Count of dropped events (overflow)
     struct waitq readers;              // Waiters blocked on this client's queue
+    struct poll_head poll;             // CS5.2: pollers registered on THIS client
     uint8_t keystate[KEY_CNT / 8];    // Bitmap of key states
     int refcount;                      // Number of file descriptors referencing this
 };
@@ -166,6 +168,7 @@ void input_key_event(const struct key_event *e) {
     // Phase 2: Wake all clients' reader waitqueues (after releasing the lock)
     for (struct evdev_client *c = input.clients; c; c = c->next) {
         waitq_wake_all(&c->readers);
+        poll_head_notify(&c->poll);   // CS5.2: only this client's pollers
     }
 
     // Phase 3: If no grab and ascii is valid, deliver to TTY
@@ -184,6 +187,7 @@ struct evdev_client *evdev_client_open(void) {
     memset_local(c, 0, sizeof(*c));
     c->refcount = 1;
     waitq_init(&c->readers);
+    poll_head_init(&c->poll, "evdev-poll");
 
     uint64_t flags = spin_lock_irqsave(&input.lock);
     c->next = input.clients;
@@ -479,4 +483,8 @@ void input_selftest(void) {
     evdev_client_close(c2);
 
     serial_write_string("[input] selftest passed\n");
+}
+
+struct poll_head *evdev_client_poll_head(struct evdev_client *c) {
+    return c ? &c->poll : 0;
 }

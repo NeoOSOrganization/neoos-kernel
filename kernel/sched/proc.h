@@ -196,6 +196,16 @@ struct thread {
     int stack_slot;                 // -1 for kernel-only threads
     int exit_code;
     struct waitq *blocked_on;
+    // CS5.2. Set by poll_head_notify for every poller registered on an
+    // object that just became ready, cleared by poll_core before each
+    // readiness scan. It is what lets a poller tell "nothing has
+    // happened, sleep" from "something happened while I was scanning,
+    // scan again" without a lost wakeup.
+    volatile int  poll_notified;
+    // Nonzero while this poller has at least one fd whose object has no
+    // poll head yet, and so still needs the global broadcast. Pollers
+    // fully covered by poll heads are skipped by it.
+    volatile int  poll_wants_broadcast;
     uint64_t      sleep_deadline;   // 0 = none; else a timer_ticks() value
     struct thread *timeout_next;    // list of threads with a deadline
 

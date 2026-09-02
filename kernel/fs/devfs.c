@@ -1,5 +1,6 @@
 #include "fs/devfs.h"
 #include "fs/file.h"
+#include "sync/poll_head.h"
 #include "sched/proc.h"
 #include "errno.h"
 #include "drivers/char/serial.h"
@@ -50,6 +51,15 @@ static int null_fop_poll(struct file_descriptor *f, int events) {
 static void null_fop_dup(struct file_descriptor *f) { (void)f; }
 static void null_fop_close(struct file_descriptor *f) { (void)f; }
 
+// CS5.2. /dev/null and its neighbours are always ready, so its readiness never
+// changes and there is nothing to be woken about. The shared
+// never-notified head says so, which is what keeps a poller holding only
+// such fds off the global broadcast entirely.
+static struct poll_head *null_poll_head(struct file_descriptor *f) {
+    (void)f;
+    return poll_head_always_ready();
+}
+
 static const struct file_ops null_file_ops = {
     .name     = "null",
     .read     = null_fop_read,
@@ -58,6 +68,7 @@ static const struct file_ops null_file_ops = {
     .getdents = null_fop_getdents,
     .ioctl    = null_fop_ioctl,
     .poll     = null_fop_poll,
+    .poll_head = null_poll_head,
     .dup      = null_fop_dup,
     .close    = null_fop_close,
 };
@@ -82,6 +93,7 @@ static const struct file_ops zero_file_ops = {
     .getdents = null_fop_getdents,
     .ioctl    = null_fop_ioctl,
     .poll     = null_fop_poll,
+    .poll_head = null_poll_head,
     .dup      = null_fop_dup,
     .close    = null_fop_close,
 };
@@ -107,6 +119,7 @@ static const struct file_ops kmsg_file_ops = {
     .getdents = null_fop_getdents,
     .ioctl    = null_fop_ioctl,
     .poll     = null_fop_poll,
+    .poll_head = null_poll_head,
     .dup      = null_fop_dup,
     .close    = null_fop_close,
 };

@@ -31,6 +31,7 @@ _Static_assert(sizeof(struct input_event) == 24, "input_event ABI");
 
 // Forward declaration of opaque client struct
 struct evdev_client;
+struct poll_head;
 
 // Initialize the input subsystem. Must be called before keyboard IRQ is unmasked.
 void input_init(void);
@@ -44,6 +45,9 @@ struct evdev_client *evdev_client_open(void);
 void  evdev_client_close(struct evdev_client *c);
 int64_t evdev_client_read(struct evdev_client *c, void *buf, uint64_t len, int nonblock);
 int   evdev_client_poll(struct evdev_client *c);          // returns POLLIN or 0
+// CS5.2: this client's poll head, so poll_core registers on the client
+// that will actually receive the events rather than on the broadcast.
+struct poll_head *evdev_client_poll_head(struct evdev_client *c);
 int   evdev_client_grab(struct evdev_client *c, int on);  // on: 1 = grab, 0 = release; returns 0 or -EBUSY
 void  evdev_client_key_bitmap(uint8_t *out, uint64_t len);
 void  evdev_client_state_bitmap(uint8_t *out, uint64_t len);

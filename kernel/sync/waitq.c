@@ -132,6 +132,11 @@ void waitq_remove(struct thread *t) {
 }
 
 int waitq_sleep(struct waitq *q, struct spinlock *release) {
+    return waitq_sleep_unless(q, release, 0);
+}
+
+int waitq_sleep_unless(struct waitq *q, struct spinlock *release,
+                       volatile int *abort) {
     struct thread *t = current_thread();
 
     // If the caller holds `release`, spin_lock_irqsave already cleared
@@ -151,6 +156,16 @@ int waitq_sleep(struct waitq *q, struct spinlock *release) {
     // schedule(), which must be entered holding no spinlock at all --
     // schedule() panics otherwise.
     uint64_t qf = spin_lock_irqsave(&q->lock);
+    // The abort check belongs HERE, under the queue lock, not before it:
+    // that is what makes it race-free against a notifier which sets the
+    // flag and then takes this lock to wake us. See waitq_poll_wait.
+    if (abort && *abort) {
+        spin_unlock_irqrestore(&q->lock, qf);
+        if (release) { spin_unlock_irqrestore(release, 0); }
+        else if (own_flags & (1ULL << 9)) { __asm__ volatile ("sti"); }
+        if (release) { (void)spin_lock_irqsave(release); }
+        return 0;                 // "woken" without ever sleeping
+    }
     waitq_enqueue(q, t);
     t->blocked_on = q;
     t->state      = THREAD_BLOCKED;
@@ -237,10 +252,15 @@ void waitq_timeout_tick(void) {
 
 int waitq_sleep_timeout(struct waitq *q, struct spinlock *release,
                         uint64_t deadline) {
+    return waitq_sleep_timeout_unless(q, release, deadline, 0);
+}
+
+int waitq_sleep_timeout_unless(struct waitq *q, struct spinlock *release,
+                               uint64_t deadline, volatile int *abort) {
     struct thread *t = current_thread();
     if (timer_ticks() >= deadline) { return -ETIMEDOUT; }
     timeout_add(t, deadline);
-    int rc = waitq_sleep(q, release);
+    int rc = waitq_sleep_unless(q, release, abort);
     int expired = (t->sleep_deadline == 0 && rc == 0);
     timeout_remove(t);
     if (rc != 0) { return rc; }
@@ -278,7 +298,10 @@ void waitq_wake_all(struct waitq *q) {
         // CS3: count poll sleepers where they are ACTUALLY woken, under
         // the queue lock. The first version walked poll_broadcast.head
         // inside waitq_poll_notify() instead, which samples a queue that
-        // is moving underneath it and reported zero.
+        // is moving underneath it and reported zero. CS5.2 moved the
+        // broadcast's own accounting into waitq_poll_notify, which no
+        // longer routes through here -- this covers the remaining paths
+        // that wake the queue wholesale, such as teardown.
         if (q == &poll_broadcast) {
             __atomic_add_fetch(&poll_wakeups, 1, __ATOMIC_RELAXED);
         }
@@ -302,17 +325,97 @@ void waitq_wake_all(struct waitq *q) {
 
 volatile int waitq_poll_active;
 
+// The global broadcast: readiness happened SOMEWHERE, so re-scan.
+//
+// CS5.2 made this selective. It used to wake every poller in the system,
+// which is the thundering herd itself -- 266 of 276 wakeups over a boot
+// found nothing. Now it wakes only pollers that still NEED it: those
+// holding at least one fd whose object has no poll head yet. A poller
+// fully covered by poll heads hears about its own objects directly and
+// is left asleep here.
 void waitq_poll_notify(void) {
     __atomic_add_fetch(&poll_events, 1, __ATOMIC_RELAXED);
-    waitq_wake_all(&poll_broadcast);   // counts the sleepers it dequeues
+
+    // Drain the ones to wake under the queue lock, as waitq_wake_all
+    // does, then make them ready with the lock dropped. Pollers that do
+    // not want the broadcast are re-queued unchanged.
+    uint64_t f = spin_lock_irqsave(&poll_broadcast.lock);
+    struct thread *woken = 0, *keep_head = 0, *keep_tail = 0;
+    struct thread *t;
+    while ((t = waitq_dequeue(&poll_broadcast)) != 0) {
+        if (__atomic_load_n(&t->poll_wants_broadcast, __ATOMIC_ACQUIRE)) {
+            __atomic_add_fetch(&poll_wakeups, 1, __ATOMIC_RELAXED);
+            t->blocked_on = 0;
+            t->next = woken;
+            woken = t;
+        } else {
+            // Not interested: put it back, preserving FIFO order.
+            t->next = 0;
+            if (keep_tail) { keep_tail->next = t; } else { keep_head = t; }
+            keep_tail = t;
+        }
+    }
+    poll_broadcast.head = keep_head;
+    poll_broadcast.tail = keep_tail;
+    spin_unlock_irqrestore(&poll_broadcast.lock, f);
+
+    while (woken) {
+        struct thread *next = woken->next;
+        woken->next = 0;
+        // The flag matters here too: a poller woken by the broadcast may
+        // not yet have queued itself the next time round, and would
+        // otherwise miss this event.
+        __atomic_store_n(&woken->poll_notified, 1, __ATOMIC_RELEASE);
+        waitq_make_ready(woken);
+        woken = next;
+    }
 }
 
 void waitq_poll_enter(void) { __atomic_add_fetch(&waitq_poll_active, 1, __ATOMIC_ACQ_REL); }
 void waitq_poll_leave(void) { __atomic_sub_fetch(&waitq_poll_active, 1, __ATOMIC_ACQ_REL); }
 
-int waitq_poll_wait(uint64_t deadline) {
+// Sleeps on the broadcast queue, but ONLY if `abort` is still zero when
+// the queue lock is held.
+//
+// CS5.2. Without that check the per-object wakeups have a lost-wakeup
+// window: a notify that lands after poll_core's readiness scan but
+// before this thread is on the queue sets the flag, tries to wake a
+// thread that is not queued yet, and achieves nothing -- and with an
+// infinite timeout the poller then sleeps for good. The broadcast
+// design hid this, because some other event along soon after would wake
+// everybody anyway.
+//
+// The check is inside the queue lock, which is what makes it airtight:
+// a notifier sets the flag BEFORE taking that lock, so either this
+// thread sees the flag, or the notifier's wake happens after the
+// enqueue and finds the thread there.
+int waitq_poll_wait(uint64_t deadline, volatile int *abort) {
     // Poll waiters never hold a lock across this, so pass none.
-    return waitq_sleep_timeout(&poll_broadcast, 0, deadline);
+    return waitq_sleep_timeout_unless(&poll_broadcast, 0, deadline, abort);
+}
+
+// Wakes ONE poll sleeper, named. This is what a per-object poll head
+// calls instead of broadcasting: only the pollers registered on the
+// object that became ready are woken.
+void waitq_poll_wake_thread(struct thread *t) {
+    if (!t) { return; }
+    uint64_t f = spin_lock_irqsave(&poll_broadcast.lock);
+    int queued = 0;
+    if (t->blocked_on == &poll_broadcast) {
+        struct thread **pp = &poll_broadcast.head;
+        struct thread *prev = 0;
+        while (*pp && *pp != t) { prev = *pp; pp = &(*pp)->next; }
+        if (*pp) {
+            *pp = t->next;
+            if (poll_broadcast.tail == t) { poll_broadcast.tail = prev; }
+            t->next = 0;
+            t->blocked_on = 0;
+            queued = 1;
+            __atomic_add_fetch(&poll_wakeups, 1, __ATOMIC_RELAXED);
+        }
+    }
+    spin_unlock_irqrestore(&poll_broadcast.lock, f);
+    if (queued) { waitq_make_ready(t); }
 }
 
 // ---------------------------------------------------------------- selftest

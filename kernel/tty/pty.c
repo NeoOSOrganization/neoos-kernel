@@ -168,6 +168,13 @@ static int64_t ptm_ioctl(struct file_descriptor *f, uint64_t req, void *arg) {
     }
 }
 
+// Both ends report the SAME head: a poller on the master must be woken
+// by the slave's output and vice versa, and they are one object.
+static struct poll_head *pty_poll_head(struct file_descriptor *f) {
+    struct pty *pt = f->priv;
+    return pt ? &pt->slave.poll : 0;
+}
+
 static int ptm_poll(struct file_descriptor *f, int events) {
     struct pty *pt = f->priv;
     if (!pt) { return 0; }
@@ -203,7 +210,7 @@ static void ptm_close(struct file_descriptor *f) {
     // No SIGHUP: close() runs from process teardown, an unsafe place to
     // take the proc-table locks signal delivery needs. The EOF is enough
     // for M1a; M2's init hangs sessions up properly. See docs/stdlib.md.
-    waitq_wake_all(&pt->slave.readers);
+    tty_wake_readers(&pt->slave);
     f->priv = 0;
     pty_unref(pt, &pt->master_refs);
 }
@@ -213,7 +220,7 @@ static int64_t ptm_getdents(struct file_descriptor *f, void *b, int n) { (void)f
 
 static const struct file_ops ptm_file_ops = {
     .name = "ptm", .read = ptm_read, .write = ptm_write, .lseek = ptm_lseek,
-    .getdents = ptm_getdents, .ioctl = ptm_ioctl, .poll = ptm_poll,
+    .getdents = ptm_getdents, .ioctl = ptm_ioctl, .poll = ptm_poll, .poll_head = pty_poll_head,
     .dup = ptm_dup, .close = ptm_close,
 };
 
@@ -248,14 +255,14 @@ static void pts_close(struct file_descriptor *f) {
     if (!pt) { return; }
     f->priv = 0;
     pty_unref(pt, &pt->slave_refs);
-    waitq_wake_all(&pt->slave.out_readers);   // last slave gone -> master EOF
+    tty_wake_out_readers(&pt->slave);   // last slave gone -> master EOF
 }
 static int64_t pts_lseek(struct file_descriptor *f, int64_t o, int w) { (void)f;(void)o;(void)w; return -ESPIPE; }
 static int64_t pts_getdents(struct file_descriptor *f, void *b, int n) { (void)f;(void)b;(void)n; return -ENOTDIR; }
 
 static const struct file_ops pts_file_ops = {
     .name = "pts", .read = pts_read, .write = pts_write, .lseek = pts_lseek,
-    .getdents = pts_getdents, .ioctl = pts_ioctl, .poll = pts_poll,
+    .getdents = pts_getdents, .ioctl = pts_ioctl, .poll = pts_poll, .poll_head = pty_poll_head,
     .dup = pts_dup, .close = pts_close,
 };
 

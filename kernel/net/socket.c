@@ -16,6 +16,7 @@
 #include "fs/file.h"
 #include "sync/lock.h"
 #include "sync/waitq.h"
+#include "sync/poll_head.h"
 #include "errno.h"
 #include "drivers/char/serial.h"
 #include "mm/heap.h"
@@ -45,6 +46,7 @@ struct dgram {
 struct socket {
     struct spinlock lock;        // LOCK_RANK_SOCKET
     struct waitq    readers;
+    struct poll_head poll;       // CS5.2: pollers registered on THIS socket
 
     int      type;
     int      refs;
@@ -141,6 +143,7 @@ static struct socket *sock_alloc(int type) {
     for (unsigned i = 0; i < sizeof(*s); i++) { ((uint8_t *)s)[i] = 0; }
     spin_init(&s->lock, LOCK_RANK_SOCKET, "socket");
     waitq_init(&s->readers);
+    poll_head_init(&s->poll, "socket-poll");
     s->type = type;
     s->refs = 1;
     return s;
@@ -222,6 +225,7 @@ void net_udp_deliver(uint32_t src_n, uint16_t sport_n,
     spin_unlock_irqrestore(&s->lock, sf);
 
     waitq_wake_all(&s->readers);
+    poll_head_notify(&s->poll);   // CS5.2: only this socket's pollers
 }
 
 // --------------------------------------------------------------- syscalls
@@ -582,6 +586,11 @@ static int64_t sock_ioctl(struct file_descriptor *f, uint64_t request, void *arg
     return -ENOTTY;
 }
 
+static struct poll_head *sock_poll_head(struct file_descriptor *f) {
+    struct socket *s = (struct socket *)f->priv;
+    return s ? &s->poll : 0;
+}
+
 static int sock_poll(struct file_descriptor *f, int events) {
     struct socket *s = (struct socket *)f->priv;
     if (!s) { return POLLERR; }
@@ -601,6 +610,7 @@ static const struct file_ops sock_ops = {
     .getdents = sock_getdents,
     .ioctl    = sock_ioctl,
     .poll     = sock_poll,
+    .poll_head = sock_poll_head,
     .dup      = sock_dup,
     .close    = sock_close,
 };

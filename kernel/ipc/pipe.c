@@ -20,6 +20,7 @@
 #include "fs/file.h"
 #include "sync/lock.h"
 #include "sync/waitq.h"
+#include "sync/poll_head.h"
 #include "errno.h"
 #include "drivers/char/serial.h"
 #include "ipc/signal.h"
@@ -36,6 +37,11 @@ struct pipe {
     struct spinlock lock;
     struct waitq    readers;    // blocked waiting for data
     struct waitq    writers;    // blocked waiting for space
+    // CS5.2: pollers registered on THIS pipe. One head covers both
+    // directions -- poll_core re-scans readiness on any wake, so
+    // splitting readable from writable would only save it a scan it
+    // does anyway, at the cost of a second list to keep right.
+    struct poll_head poll;
 
     uint8_t *buf;               // PIPE_CAPACITY bytes
     uint32_t head;              // next byte to read
@@ -61,6 +67,7 @@ static struct pipe *pipe_alloc(void) {
     spin_init(&p->lock, LOCK_RANK_PIPE, "pipe");
     waitq_init(&p->readers);
     waitq_init(&p->writers);
+    poll_head_init(&p->poll, "pipe-poll");
     return p;
 }
 
@@ -129,6 +136,7 @@ static int64_t pipe_read(struct file_descriptor *f, void *buf, uint64_t len) {
     // no reason to contend for a lock this thread is about to drop
     // anyway.
     waitq_wake_all(&p->writers);
+    poll_head_notify(&p->poll);   // CS5.2: only this pipe's pollers
     return (int64_t)n;
 }
 
@@ -168,6 +176,7 @@ static int64_t pipe_write(struct file_descriptor *f, const void *buf, uint64_t l
         if (f->nonblock) {
             spin_unlock_irqrestore(&p->lock, flags);
             waitq_wake_all(&p->readers);
+            poll_head_notify(&p->poll);   // CS5.2: only this pipe's pollers
             return written ? (int64_t)written : -EAGAIN;
         }
 
@@ -175,6 +184,7 @@ static int64_t pipe_write(struct file_descriptor *f, const void *buf, uint64_t l
         // will let one of them make room.
         spin_unlock_irqrestore(&p->lock, flags);
         waitq_wake_all(&p->readers);
+        poll_head_notify(&p->poll);   // CS5.2: only this pipe's pollers
         flags = spin_lock_irqsave(&p->lock);
 
         if (p->count == PIPE_CAPACITY) {
@@ -188,6 +198,7 @@ static int64_t pipe_write(struct file_descriptor *f, const void *buf, uint64_t l
     spin_unlock_irqrestore(&p->lock, flags);
 
     waitq_wake_all(&p->readers);
+    poll_head_notify(&p->poll);   // CS5.2: only this pipe's pollers
     return (int64_t)written;
 }
 
@@ -250,6 +261,7 @@ static void pipe_close(struct file_descriptor *f) {
     // pipe whose last reader just went away -- it has to wake to
     // discover it should take SIGPIPE.
     if (no_writers) { waitq_wake_all(&p->readers); }
+    if (no_writers || no_readers) { poll_head_notify(&p->poll); }
     if (no_readers) { waitq_wake_all(&p->writers); }
 }
 
@@ -274,6 +286,14 @@ static int pipe_poll(struct file_descriptor *f, int events) {
     return mask & events;
 }
 
+// CS5.2. Every fd on a pipe -- both ends -- reports the same head, so a
+// poller waiting on the read end is registered on the object the writer
+// will notify.
+static struct poll_head *pipe_poll_head(struct file_descriptor *f) {
+    struct pipe *p = f->priv;
+    return p ? &p->poll : 0;
+}
+
 static const struct file_ops pipe_ops = {
     .name     = "pipe",
     .read     = pipe_read,
@@ -282,6 +302,7 @@ static const struct file_ops pipe_ops = {
     .getdents = pipe_getdents,
     .ioctl    = pipe_ioctl,
     .poll     = pipe_poll,
+    .poll_head = pipe_poll_head,
     .dup      = pipe_dup,
     .close    = pipe_close,
 };

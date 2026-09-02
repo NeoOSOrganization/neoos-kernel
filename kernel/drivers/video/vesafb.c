@@ -5,6 +5,7 @@
 #include "mm/paging.h"
 #include "mm/vma.h"
 #include "fs/file.h"
+#include "sync/poll_head.h"
 #include "sched/proc.h"
 #include "errno.h"
 
@@ -279,9 +280,18 @@ static int     fb_poll(struct file_descriptor *f, int e) { (void)f; return e & (
 static void    fb_dup(struct file_descriptor *f) { (void)f; }
 static void    fb_close(struct file_descriptor *f) { (void)f; }
 
+// CS5.2. The framebuffer is always ready, so its readiness never
+// changes and there is nothing to be woken about. The shared
+// never-notified head says so, which is what keeps a poller holding only
+// such fds off the global broadcast entirely.
+static struct poll_head *fb_poll_head(struct file_descriptor *f) {
+    (void)f;
+    return poll_head_always_ready();
+}
+
 const struct file_ops fb_file_ops = {
     .name = "fb", .read = fb_read, .write = fb_write, .lseek = fb_lseek,
-    .getdents = fb_getdents, .ioctl = fb_ioctl, .poll = fb_poll,
+    .getdents = fb_getdents, .ioctl = fb_ioctl, .poll = fb_poll, .poll_head = fb_poll_head,
     .mmap = fb_mmap, .dup = fb_dup, .close = fb_close,
 };
 

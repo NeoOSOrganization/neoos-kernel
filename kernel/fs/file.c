@@ -7,6 +7,7 @@
 // same four syscalls without any of them learning what it is holding.
 
 #include "fs/file.h"
+#include "sync/poll_head.h"
 #include "fs/devfs.h"
 #include "ipc/pipe.h"
 #include "net/socket.h"
@@ -139,6 +140,15 @@ static void vnode_close(struct file_descriptor *f) {
     if (f->vn) { vnode_put(f->vn); f->vn = 0; }
 }
 
+// CS5.2. A vnode-backed file is always readable and writable, so its readiness never
+// changes and there is nothing to be woken about. The shared
+// never-notified head says so, which is what keeps a poller holding only
+// such fds off the global broadcast entirely.
+static struct poll_head *vnode_poll_head(struct file_descriptor *f) {
+    (void)f;
+    return poll_head_always_ready();
+}
+
 const struct file_ops vnode_file_ops = {
     .name     = "vnode",
     .read     = vnode_read,
@@ -147,6 +157,7 @@ const struct file_ops vnode_file_ops = {
     .getdents = vnode_getdents,
     .ioctl    = vnode_ioctl,
     .poll     = vnode_poll,
+    .poll_head = vnode_poll_head,
     .dup      = vnode_dup,
     .close    = vnode_close,
 };
