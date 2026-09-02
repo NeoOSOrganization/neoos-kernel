@@ -330,26 +330,60 @@ void lock_selftest(void) {
         return;
     }
 
-    // CS0: prove the checker rejects a descending acquire at each rank
-    // converted from spin_lock_raw. Holding a high leaf rank, every
-    // lower rank must be refused -- otherwise the conversions made those
-    // locks *look* checked without the checking actually working there.
+    // CS3: the checker itself, over EVERY defined rank rather than the
+    // four CS0 happened to convert. Holding a lock of rank R, every
+    // strictly lower rank must be refused, R itself must be refused
+    // (equal ranks are an inversion), and every strictly higher rank
+    // must be allowed. lock_rank_ok reports legality without entering
+    // the panic path, which is what makes looping over this possible.
+    //
+    // The count assertion below is the point of the table: a new
+    // LOCK_RANK_* that nobody adds here is caught at the next boot
+    // instead of quietly going unchecked forever.
     {
-        struct spinlock probe;
-        spin_init(&probe, LOCK_RANK_FBCON, "rank-probe");
-        uint64_t f = spin_lock_irqsave(&probe);
-        int bad = 0;
-        if (lock_rank_ok(LOCK_RANK_VT))    { bad = 1; }   // 251 under 254
-        if (lock_rank_ok(LOCK_RANK_PTY))   { bad = 1; }   // 252 under 254
-        if (lock_rank_ok(LOCK_RANK_DEVFS)) { bad = 1; }   // 253 under 254
-        if (lock_rank_ok(LOCK_RANK_RAND))  { bad = 1; }   // 250 under 254
-        if (lock_rank_ok(LOCK_RANK_FBCON)) { bad = 1; }   // equal rank is an inversion
-        // and the legal direction is still legal
-        if (!lock_rank_ok(LOCK_RANK_SERIAL)) { bad = 1; } // 255 above 254
-        spin_unlock_irqrestore(&probe, f);
-        if (bad) {
-            serial_write_string("[lock] selftest FAILED: rank check wrong at a CS0 rank\n");
+        static const uint8_t all_ranks[] = {
+            LOCK_RANK_PROCTABLE, LOCK_RANK_PROCESS, LOCK_RANK_THREAD,
+            LOCK_RANK_MM, LOCK_RANK_MOUNTTABLE, LOCK_RANK_VNODEHASH,
+            LOCK_RANK_VNODE, LOCK_RANK_BLOCKDEV, LOCK_RANK_DRIVER,
+            LOCK_RANK_FUTEX, LOCK_RANK_PIPE, LOCK_RANK_SOCKTABLE,
+            LOCK_RANK_SOCKET, LOCK_RANK_TIMEOUT, LOCK_RANK_WAITQ,
+            LOCK_RANK_RUNQUEUE, LOCK_RANK_FDTABLE, LOCK_RANK_HEAP,
+            LOCK_RANK_PMM, LOCK_RANK_SIGQUEUE, LOCK_RANK_TLB,
+            LOCK_RANK_INPUT, LOCK_RANK_RAND, LOCK_RANK_VT,
+            LOCK_RANK_PTY, LOCK_RANK_DEVFS, LOCK_RANK_FBCON,
+            LOCK_RANK_SERIAL,
+        };
+        const unsigned nranks = sizeof(all_ranks) / sizeof(all_ranks[0]);
+
+        // lock.h has 29 LOCK_RANK_* defines but 28 distinct values:
+        // LOCK_RANK_TTY is deliberately LOCK_RANK_DRIVER, and the
+        // equal-rank case below covers it. Bump this when adding a rank,
+        // and add the rank to the table above.
+        if (nranks != 28) {
+            serial_write_string("[lock] selftest FAILED: rank table out of date\n");
             return;
+        }
+
+        for (unsigned i = 0; i < nranks; i++) {
+            struct spinlock probe;
+            spin_init(&probe, all_ranks[i], "rank-probe");
+            uint64_t f = spin_lock_irqsave(&probe);
+            int bad = 0;
+            for (unsigned j = 0; j < nranks; j++) {
+                int legal = lock_rank_ok(all_ranks[j]);
+                if (all_ranks[j] > all_ranks[i]) {
+                    if (!legal) { bad = 1; }        // ascending must be allowed
+                } else {
+                    if (legal)  { bad = 1; }        // equal or descending must not
+                }
+            }
+            spin_unlock_irqrestore(&probe, f);
+            if (bad) {
+                serial_write_string("[lock] selftest FAILED: rank check wrong while holding rank ");
+                serial_write_hex64((uint64_t)all_ranks[i]);
+                serial_write_string("\n");
+                return;
+            }
         }
     }
 
