@@ -627,11 +627,10 @@ $(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_B
 	    ./tools/nexify.sh $(AV_BIN) $(DISK_SRC)/nex/av.nex && \
 	    mcopy -o -i $(DISK_IMG) $(DISK_SRC)/nex/av.nex ::bin/av.nex && \
 	    mmd -i $(DISK_IMG) ::usr/share/models 2>/dev/null; \
-	    for m in box-in-box fox linux-mascot-tux; do \
-	      mcopy -o -i $(DISK_IMG) $(AV_DIR)/upstream/models/$$m.obj ::usr/share/models/$$m.obj; \
-	      mcopy -o -i $(DISK_IMG) $(AV_DIR)/upstream/models/$$m.mtl ::usr/share/models/$$m.mtl; \
+	    for f in $(AV_DIR)/upstream/models/*.obj $(AV_DIR)/upstream/models/*.mtl; do \
+	      mcopy -o -i $(DISK_IMG) $$f ::usr/share/models/$$(basename $$f); \
 	    done; \
-	    echo "disk: 3d-ascii-viewer included as /bin/av.nex, 3 models"; \
+	    echo "disk: 3d-ascii-viewer as /bin/av.nex, $$(ls $(AV_DIR)/upstream/models/*.obj | wc -l) models in /usr/share/models"; \
 	else \
 	    echo "disk: no ports (run 'make ports')"; \
 	fi
