@@ -103,6 +103,14 @@ int fork(void);
 // unchanged and still running its original code.
 int exec(const char *path);
 
+// exec with an argument vector. `argv` is NULL-terminated and becomes
+// the new image's argv; argv[0] is conventionally the path but nothing
+// enforces that. Ceilings: 1024 arguments, 4096 bytes each, 256 KiB
+// overall -- exceeding any of them fails with -E2BIG rather than
+// truncating. execve accepts envp and ignores it (see docs/stdlib.md).
+int execv(const char *path, char *const argv[]);
+int execve(const char *path, char *const argv[], char *const envp[]);
+
 // Mounts the filesystem `fstype` ("fat", "ramfs", or "devfs") at
 // `target`. `source` is "hd0" or "hd1" for "fat" and ignored
 // otherwise; FAT16 versus FAT32 is auto-detected. Returns 0, or

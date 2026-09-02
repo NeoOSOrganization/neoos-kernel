@@ -7,6 +7,7 @@
 // binary compatibility with anything).
 
 #define EPERM   1
+#define E2BIG   7
 #define EINTR  4
 #define ESRCH   3
 #define EAGAIN  11

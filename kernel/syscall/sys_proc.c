@@ -48,42 +48,97 @@ int64_t sys_spawn(struct syscall_args *a) {
     return child ? child->pid : -1;
 }
 
-// spawn with an argument vector. `argv` is a NULL-terminated array of
-// user pointers, copied into the kernel before the new address space is
-// built -- because building it is what stops the caller's pointers from
-// being meaningful.
+// Copies a user argument vector into kernel memory.
+//
+// `uargv` is a NULL-terminated array of user pointers. Both spawn and
+// exec must do this BEFORE the new address space is built, because
+// building it is what stops the caller's pointers from meaning anything
+// -- for exec, the pages holding these very strings are freed partway
+// through.
+//
+// Returns 0, or a negative errno. On success the caller owns the result
+// and must spawn_args_free() it. argc == 0 (a null or empty vector) is
+// success with nothing allocated; the caller substitutes argv[0] = path.
+//
+// Three ceilings, all of them Linux-shaped, all of them present so an
+// untrusted vector cannot drive an unbounded kernel allocation:
+// SPAWN_MAX_ARGS entries, SPAWN_ARG_MAX per string, SPAWN_ARG_TOTAL
+// overall. Exceeding any of them is -E2BIG. It is NOT silent truncation:
+// a shell handed back a command with its arguments quietly dropped would
+// run the wrong thing, which is worse than failing.
+static int copy_user_argv(uint64_t uargv_addr, struct spawn_args *out) {
+    out->argc = 0; out->argv = 0; out->blob = 0;
+
+    const char *const *uargv = (const char *const *)(uintptr_t)uargv_addr;
+    if (!uargv) { return 0; }
+
+    // Count first, validating each slot of the vector as it is reached.
+    // The old code checked only the FIRST pointer and then walked the
+    // array unbounded -- a vector spanning into an unmapped page faulted
+    // in the kernel.
+    int argc = 0;
+    for (;;) {
+        uint64_t slot = (uint64_t)(uintptr_t)&uargv[argc];
+        if (!user_range_readable(slot, sizeof(void *))) { return -EFAULT; }
+        if (!uargv[argc]) { break; }
+        if (++argc > SPAWN_MAX_ARGS) { return -E2BIG; }
+    }
+    if (argc == 0) { return 0; }
+
+    // Measure before allocating: one blob holds every string, so its
+    // size has to be known up front, and the total budget has to be
+    // enforced before any of it is committed.
+    uint64_t total = 0;
+    for (int i = 0; i < argc; i++) {
+        uint64_t p = (uint64_t)(uintptr_t)uargv[i];
+        uint64_t len = 0;
+        while (len < SPAWN_ARG_MAX) {
+            if (!user_range_readable(p + len, 1)) { return -EFAULT; }
+            if (!((const char *)(uintptr_t)p)[len]) { break; }
+            len++;
+        }
+        if (len >= SPAWN_ARG_MAX) { return -E2BIG; }
+        total += len + 1;
+        if (total > SPAWN_ARG_TOTAL) { return -E2BIG; }
+    }
+
+    out->blob = kmalloc(total);
+    out->argv = kmalloc((uint64_t)argc * sizeof(char *));
+    if (!out->blob || !out->argv) { spawn_args_free(out); return -ENOMEM; }
+    out->argc = argc;
+
+    char *w = out->blob;
+    for (int i = 0; i < argc; i++) {
+        const char *src = (const char *)(uintptr_t)uargv[i];
+        out->argv[i] = w;
+        // Bounded by `total`, which was measured from these same
+        // strings a moment ago. A concurrent thread lengthening one
+        // cannot push past the blob: the copy stops at SPAWN_ARG_MAX
+        // and at the end of the space this string was measured to need.
+        uint64_t room = (uint64_t)(out->blob + total - w);
+        uint64_t n = 0;
+        while (n + 1 < room && src[n]) { *w++ = src[n]; n++; }
+        *w++ = '\0';
+    }
+    return 0;
+}
+
+// spawn with an argument vector.
 int64_t sys_spawnv(struct syscall_args *a) {
     char path_buf[VFS_MAX_PATH];
     int prc = copy_user_path_at(a->a1, a->a2, path_buf);
     if (prc != 0) { return prc; }
 
-    struct spawn_args *args = (struct spawn_args *)kmalloc(sizeof(*args));
-    if (!args) { return -ENOMEM; }
-    args->argc = 0;
+    struct spawn_args args;
+    int rc = copy_user_argv(a->a3, &args);
+    if (rc != 0) { return rc; }
 
-    const char *const *uargv = (const char *const *)(uintptr_t)a->a3;
-    if (uargv) {
-        if (!user_range_writable((uint64_t)(uintptr_t)uargv, sizeof(void *))) {
-            kfree(args);
-            return -EFAULT;
-        }
-        while (args->argc < SPAWN_MAX_ARGS && uargv[args->argc]) {
-            copy_user_string((int64_t)(uintptr_t)uargv[args->argc],
-                             args->argv[args->argc], SPAWN_ARG_MAX);
-            args->argc++;
-        }
-    }
     // No vector, or an empty one, means the same as spawn(): argv[0] is
     // the path. A program with no argv[0] at all is a shape nothing
     // expects.
-    if (args->argc == 0) {
-        kfree(args);
-        struct process *child = spawn(path_buf);
-        return child ? child->pid : -1;
-    }
-
-    struct process *child = spawn_argv(path_buf, args);
-    kfree(args);
+    struct process *child = args.argc ? spawn_argv(path_buf, &args)
+                                      : spawn(path_buf);
+    spawn_args_free(&args);
     return child ? child->pid : -1;
 }
 
@@ -96,11 +151,24 @@ int64_t sys_fork(struct syscall_args *a) {
     return child ? child->proc->pid : -1;
 }
 
+// execve. a3 is the user argv, NULL-terminated; 0 means "just the path",
+// which is what the older one-argument exec() wrapper passes.
+//
+// The vector is copied into the kernel HERE, before exec_task runs, and
+// deliberately so: exec_task frees the calling image's address space
+// partway through, and these strings live in it.
 int64_t sys_exec(struct syscall_args *a) {
     char path_buf[VFS_MAX_PATH];
     int prc = copy_user_path_at(a->a1, a->a2, path_buf);
     if (prc != 0) { return prc; }
-    return exec_task(path_buf, a->frame) ? 0 : -1;
+
+    struct spawn_args args;
+    int rc = copy_user_argv(a->a3, &args);
+    if (rc != 0) { return rc; }
+
+    int ok = exec_task(path_buf, a->frame, args.argc ? &args : 0);
+    spawn_args_free(&args);
+    return ok ? 0 : -1;
 }
 
 int64_t sys_wait4(struct syscall_args *a) {

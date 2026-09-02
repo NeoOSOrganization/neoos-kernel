@@ -92,7 +92,7 @@ builds; it is not part of the stable ABI.)
 | 5 | wait | *(NeoOS wait-by-pid)* | implemented |
 | 7 | open | `open` | implemented, **`O_CREAT` value diverges** (§5) |
 | 8–11 | close/mkdir/unlink/lseek | same names | implemented |
-| 12/13 | fork/exec | `fork`/`execve` | implemented (COW); **exec takes no argv**. Like `execve`, it terminates every other thread of the process first (and waits for them) before releasing the old address space |
+| 12/13 | fork/exec | `fork`/`execve` | implemented (COW); argv crosses exec (a3), `envp` does not. Like `execve`, it terminates every other thread of the process first (and waits for them) before releasing the old address space |
 | 14/15 | mount/umount | `mount`/`umount2` | implemented, NeoOS-shaped |
 | 16 | getdents | `getdents64` | implemented, **struct now MATCHES** (§4) |
 | 17–20 | thread create/exit/join/self | `clone`/`exit`/`futex`/`gettid` | NeoOS-shaped, **not `clone`** |
@@ -106,7 +106,7 @@ builds; it is not part of the stable ABI.)
 | **43** | **pipe2** | `pipe2` | **NEW.** `pipe()` is library code over it |
 | **44** | **arch_prctl** | `arch_prctl` | **NEW.** SET_FS/GET_FS; GS codes refused |
 | **45–50** | **socket/bind/connect/sendto/recvfrom/getsockname** | same names | **NEW.** AF_INET SOCK_DGRAM only (§7) |
-| **51** | **spawnv** | *(what `execve`'s argv will become)* | **NEW** |
+| **51** | **spawnv** | *(no Linux analogue: spawn with argv)* | **NEW** |
 | **52** | **fcntl** | `fcntl` | **NEW.** F_GETFL/F_SETFL; F_GETFD/F_SETFD are no-ops; F_DUPFD refused |
 | **53–54** | **chdir / getcwd** | same names | **NEW.** Per-process cwd; `..` resolved textually (§5) |
 | **55–58** | **stat / lstat / fstat / newfstatat** | same names | **NEW.** Linux's 144-byte `struct stat`; most fields synthesized (§4) |
@@ -341,8 +341,11 @@ at least stop the kernel drawing over it. Raw keyboard modes
 7. **No `getuid`/`uname`/`umask`/`chmod`/`rename`/`rmdir`/`ftruncate`**
    — Tier 2 of `docs/porting-coreutils.md`: makes the tools honest
    rather than merely running.
-8. **`exec` takes no argv** — `spawnv` (51) is a separate call with
-   different semantics; a real `execve(argv, envp)` is still owed.
+8. **`execve` ignores `envp`** — argv now crosses `exec` intact
+   (CS4: 1024 arguments, 4096 bytes each, 256 KiB total, `-E2BIG` past
+   any of them), and musl's `execve` reaches it through the shim. The
+   environment does not: the kernel pushes an empty `envp`, so `getenv`
+   in the new image sees nothing the caller passed.
 9. **No shutdown signal** (M2): PID 1 powers off once nothing is left to
    reap, without first `SIGTERM`ing anyone; no sessions, no `/proc`, no
    orphaned-process-group handling.

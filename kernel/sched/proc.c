@@ -290,9 +290,14 @@ static uint64_t build_initial_stack(uint64_t pml4_phys, uint64_t stack_top,
     // The argument STRINGS, then AT_RANDOM's sixteen bytes. All of it
     // lives ABOVE the vector that points at it, since the vector is
     // built downward from here.
-    uint64_t argv_ptr[SPAWN_MAX_ARGS];
     int argc = args->argc;
     if (argc > SPAWN_MAX_ARGS) { argc = SPAWN_MAX_ARGS; }
+
+    // Heap, not stack. This array used to be `uint64_t[SPAWN_MAX_ARGS]`
+    // with SPAWN_MAX_ARGS == 8. At the ceiling a shell actually needs it
+    // would be 8 KiB of a 16 KiB kernel stack.
+    uint64_t *argv_ptr = kmalloc((uint64_t)argc * sizeof(uint64_t));
+    if (!argv_ptr) { return 0; }
 
     for (int i = argc - 1; i >= 0; i--) {
         const char *s = args->argv[i];
@@ -301,7 +306,7 @@ static uint64_t build_initial_stack(uint64_t pml4_phys, uint64_t stack_top,
         len++;                        // the NUL
         sp -= len;
         argv_ptr[i] = sp;
-        if (!poke_user_bytes(pml4_phys, sp, (const uint8_t *)s, len)) { return 0; }
+        if (!poke_user_bytes(pml4_phys, sp, (const uint8_t *)s, len)) { kfree(argv_ptr); return 0; }
     }
 
     // AT_RANDOM: sixteen bytes musl uses to seed its stack guard and
@@ -313,7 +318,7 @@ static uint64_t build_initial_stack(uint64_t pml4_phys, uint64_t stack_top,
     uint64_t at_random = sp;
     uint8_t at_random_bytes[16];
     rand_bytes(at_random_bytes, 16);
-    if (!poke_user_bytes(pml4_phys, at_random, at_random_bytes, 16)) { return 0; }
+    if (!poke_user_bytes(pml4_phys, at_random, at_random_bytes, 16)) { kfree(argv_ptr); return 0; }
 
     // The vector itself: argc(1) + argv(argc) + NULL(1) + envp NULL(1)
     // + 7 auxv pairs, in qwords.
@@ -326,7 +331,7 @@ static uint64_t build_initial_stack(uint64_t pml4_phys, uint64_t stack_top,
     sp &= ~0xFULL;
 
     uint64_t at = sp;
-    #define PUSH(v) do { if (!poke_user_u64(pml4_phys, at, (v))) { return 0; } at += 8; } while (0)
+    #define PUSH(v) do { if (!poke_user_u64(pml4_phys, at, (v))) { kfree(argv_ptr); return 0; } at += 8; } while (0)
     PUSH((uint64_t)argc);
     for (int i = 0; i < argc; i++) { PUSH(argv_ptr[i]); }
     PUSH(0);            // argv terminator
@@ -340,37 +345,56 @@ static uint64_t build_initial_stack(uint64_t pml4_phys, uint64_t stack_top,
     PUSH(AT_NULL);   PUSH(0);
     #undef PUSH
 
+    kfree(argv_ptr);
     return sp;
 }
 
-// Fills `out` with a single argument, the path -- what a spawn with no
-// argument vector gets, and what execve(path, {path, NULL}, ...) would
-// build.
-static void args_from_path(struct spawn_args *out, const char *path) {
+// Builds a single-argument vector (argv[0] = path) -- what a spawn with
+// no argument vector gets, and what execve(path, {path, NULL}, ...)
+// would build.
+int spawn_args_single(struct spawn_args *out, const char *path) {
+    uint64_t len = 0;
+    while (path[len] && len < SPAWN_ARG_MAX - 1) { len++; }
+
     out->argc = 1;
-    int i = 0;
-    while (path[i] && i < SPAWN_ARG_MAX - 1) { out->argv[0][i] = path[i]; i++; }
-    out->argv[0][i] = '\0';
+    out->blob = kmalloc(len + 1);
+    out->argv = kmalloc(sizeof(char *));
+    if (!out->blob || !out->argv) { spawn_args_free(out); return 0; }
+
+    for (uint64_t i = 0; i < len; i++) { out->blob[i] = path[i]; }
+    out->blob[len] = '\0';
+    out->argv[0] = out->blob;
+    return 1;
+}
+
+void spawn_args_free(struct spawn_args *args) {
+    if (!args) { return; }
+    if (args->argv) { kfree(args->argv); args->argv = 0; }
+    if (args->blob) { kfree(args->blob); args->blob = 0; }
+    args->argc = 0;
 }
 
 struct process *spawn(const char *path) { return spawn_argv(path, 0); }
 
 struct process *spawn_argv(const char *path, const struct spawn_args *args) {
-    struct spawn_args local;
-    if (!args) { args_from_path(&local, path); args = &local; }
-    if (args->argc < 1) { return 0; }
+    struct spawn_args local = { 0, 0, 0 };
+    if (!args) {
+        if (!spawn_args_single(&local, path)) { return 0; }
+        args = &local;
+    }
+    if (args->argc < 1) { spawn_args_free(&local); return 0; }
 
     uint64_t pml4_phys;
     struct elf_info info;
     if (!build_user_address_space(path, &pml4_phys, &info)) {
-        return 0;
+        spawn_args_free(&local); return 0;
     }
 
     struct process *p = proc_alloc();
     if (!p) {
         serial_write_string("[process] spawn FAILED: out of memory for process\n");
         free_address_space(pml4_phys);
-        return 0;
+        spawn_args_free(&local); return 0;
     }
     p->pml4_phys   = pml4_phys;
     p->elf          = info;   // the auxv and every thread's TLS come from here
@@ -385,14 +409,14 @@ struct process *spawn_argv(const char *path, const struct spawn_args *args) {
     if (thread_stack_alloc(p, &user_stack_top) != 0) {
         serial_write_string("[process] spawn FAILED: user stack\n");
         free_address_space(pml4_phys);
-        return 0;
+        spawn_args_free(&local); return 0;
     }
 
     struct thread *t = thread_alloc(p);
     if (!t) {
         serial_write_string("[process] spawn FAILED: out of memory for thread\n");
         free_address_space(pml4_phys);
-        return 0;
+        spawn_args_free(&local); return 0;
     }
     t->stack_slot = 0;
 
@@ -404,7 +428,7 @@ struct process *spawn_argv(const char *path, const struct spawn_args *args) {
     if (!entry_sp) {
         serial_write_string("[process] spawn FAILED: could not build the entry stack\n");
         free_address_space(pml4_phys);
-        return 0;
+        spawn_args_free(&local); return 0;
     }
 
     uint64_t *sp = (uint64_t *)kstack_top;
@@ -432,6 +456,7 @@ struct process *spawn_argv(const char *path, const struct spawn_args *args) {
     vfs_open_into("/dev/CONSOLE", p, 2, 1);
 
     enqueue_ready(t);
+    spawn_args_free(&local);
     return p;
 }
 
@@ -495,7 +520,8 @@ static void exec_reduce_to_one_thread(struct process *p) {
 // calling task completely unchanged and still runnable -- the new
 // address space is built and validated to completion before the old
 // one is freed, so a bad path or OOM never destroys the caller.
-int exec_task(const char *path, struct syscall_frame *frame) {
+int exec_task(const char *path, struct syscall_frame *frame,
+              const struct spawn_args *args) {
     uint64_t new_pml4_phys;
     struct elf_info info;
     if (!build_user_address_space(path, &new_pml4_phys, &info)) {
@@ -550,13 +576,18 @@ int exec_task(const char *path, struct syscall_frame *frame) {
 
     p->elf = info;
 
-    // exec has no argument vector of its own yet, so the new image gets
-    // argv[0] = path and nothing else. execve's argv is the obvious
-    // next step and is recorded as a gap in docs/abi-compatibility.md.
-    struct spawn_args exec_args;
-    args_from_path(&exec_args, path);
+    // The caller's argument vector, already copied into kernel memory by
+    // the syscall layer -- it HAD to be: the user pages it lived in were
+    // freed a few lines above, along with the rest of the old image.
+    // A caller with no vector (the kernel's own exec) gets argv[0] = path.
+    struct spawn_args local = { 0, 0, 0 };
+    if (!args) {
+        if (!spawn_args_single(&local, path)) { return 0; }
+        args = &local;
+    }
     uint64_t entry_sp = build_initial_stack(new_pml4_phys, user_stack_top,
-                                            &exec_args, &info);
+                                            args, &info);
+    spawn_args_free(&local);
     if (!entry_sp) { return 0; }
 
     // The new program starts with no thread pointer. Not resetting it

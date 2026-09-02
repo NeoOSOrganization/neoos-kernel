@@ -54,7 +54,9 @@ alongside the library code that exposes it.
   longer share a position between parent and child (unlike POSIX,
   which shares one underlying open-file description).
   NeoOS-specific simplification.
-- `int exec(const char *path)` — replaces the calling process's
+- `int exec(const char *path)`, `int execv(const char *path, char *const argv[])`,
+  `int execve(const char *path, char *const argv[], char *const envp[])`
+  — replace the calling process's
   address space with the ELF executable at `path`. Open file
   descriptors, PID, and parent are preserved. On success, never
   returns. Returns `-1` on failure (bad path, out of memory), leaving
@@ -1157,11 +1159,36 @@ powers off once nothing is left to reap. A ported daemon that expects a
 shutdown signal will not get one. If PID 1 itself exits, the kernel
 panics (there is nothing to reap the machine or power it off).
 
-`spawnv` is `spawn` with an argument vector: at most **8 arguments of
-128 bytes each**, copied into the kernel before the new address space
-is built. `spawn(path)` is the same thing with `argv = {path, NULL}`.
-`exec` still has no argument vector — a program `exec`s into
-`argv[0] = path` and nothing else.
+`spawnv` is `spawn` with an argument vector, and `execv`/`execve` are
+`exec` with one. Both copy the vector into the kernel before the new
+address space is built — they must, because building it is what stops
+the caller's pointers meaning anything, and in `exec`'s case the pages
+holding those very strings are freed partway through.
+
+The ceilings are shared by both, and are **refusals, not truncations**:
+
+| limit | value | Linux analogue |
+|---|---|---|
+| arguments | 1024 | `MAX_ARG_STRINGS` (Linux: 2^31) |
+| one argument | 4096 bytes | `MAX_ARG_STRLEN` (Linux: 32 pages) |
+| whole vector | 256 KiB | `ARG_MAX` (Linux: typically 2 MiB) |
+
+Exceeding any of them fails with `-E2BIG`, leaving the caller running.
+This is a deliberate change from the earlier behaviour, which capped the
+vector at 8 arguments of 128 bytes and silently DROPPED the rest: a
+shell handed back a command line with its arguments quietly removed runs
+the wrong command, which is worse than a failure it can report.
+
+`spawn(path)` and `exec(path)` are the same calls with
+`argv = {path, NULL}`.
+
+**Divergence: `execve` ignores `envp`.** NeoOS has no environment yet;
+the kernel pushes an empty `envp` onto every new stack, and the auxv
+that follows it is complete. `execve(path, argv, envp)` therefore
+behaves exactly as `execv(path, argv)` rather than failing, so that a
+ported program calling `execve` with an environment it does not depend
+on still runs. A program that expects `getenv` in the new image to see
+what it passed will not find it.
 
 `fcntl` implements `F_GETFL` and `F_SETFL`, which is enough to turn
 `O_NONBLOCK` on and off. `F_GETFD`/`F_SETFD` are accepted and ignored,

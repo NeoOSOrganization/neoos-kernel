@@ -227,8 +227,25 @@ int umount(const char *target) {
 }
 
 int exec(const char *path) {
+    // The third argument is passed EXPLICITLY as 0, not left off. exec
+    // now reads a3 as the argument vector, and syscall2 leaves that
+    // register holding whatever was in it -- which the kernel duly tried
+    // to walk as a char**, and exec started failing with EFAULT.
+    return execv(path, 0);
+}
+
+int execv(const char *path, char *const argv[]) {
     uint64_t len = strlen(path);
-    return (int)syscall2(SYS_EXEC, (int64_t)(uint64_t)path, (int64_t)len);
+    return (int)__neoos_syscall3(SYS_EXEC, (long)(uintptr_t)path, (long)len,
+                                 (long)(uintptr_t)argv);
+}
+
+int execve(const char *path, char *const argv[], char *const envp[]) {
+    // envp is accepted and ignored: NeoOS has no environment yet, and
+    // the kernel pushes an empty envp onto every new stack. Recorded as
+    // a divergence in docs/stdlib.md.
+    (void)envp;
+    return execv(path, argv);
 }
 
 int wait(int pid) {

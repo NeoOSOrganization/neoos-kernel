@@ -30,6 +30,7 @@
 #define NEO_UNLINK          10
 #define NEO_LSEEK           11
 #define NEO_FORK            12
+#define NEO_EXEC            13
 #define NEO_GETDENTS        16
 #define NEO_RT_SIGACTION    21
 #define NEO_RT_SIGPROCMASK  22
@@ -79,6 +80,7 @@
 #define LX_READ              0
 #define LX_WRITE             1
 #define LX_OPEN              2
+#define LX_EXECVE           59
 #define LX_CLOSE             3
 #define LX_STAT              4
 #define LX_FSTAT             5
@@ -225,6 +227,11 @@ long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a
         return neo(NEO_UNLINK, a1, neo_strlen((const char *)a1), 0, 0, 0, 0);
     case LX_CHDIR:
         return neo(NEO_CHDIR, a1, neo_strlen((const char *)a1), 0, 0, 0, 0);
+    case LX_EXECVE:
+        // (path, argv, envp) -> (ptr, len, argv). envp is dropped: NeoOS
+        // has no environment yet, and the auxv the kernel builds pushes
+        // an empty envp. Recorded as a divergence in docs/stdlib.md.
+        return neo(NEO_EXEC, a1, neo_strlen((const char *)a1), a2, 0, 0, 0);
     case LX_NEWFSTATAT:
         // (dirfd, path, buf, flags) -> (dirfd, ptr, len, buf, flags)
         return neo(NEO_NEWFSTATAT, a1, a2, neo_strlen((const char *)a2), a3, a4, 0);

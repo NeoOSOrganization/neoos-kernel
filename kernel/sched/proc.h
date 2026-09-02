@@ -259,18 +259,35 @@ static inline uint64_t thread_stack_top_for(int slot) {
 int  thread_stack_alloc(struct process *p, uint64_t *out_top);
 void thread_stack_free(struct process *p, int slot);
 
-// Arguments for a new process. Bounded and copied by value rather than
-// pointed at: they come from a user address space that spawn is about
-// to stop looking at, and a fixed ceiling is simpler to reason about
-// than a growable buffer the caller could use to exhaust the heap.
-// The ceilings are recorded in docs/stdlib.md.
-#define SPAWN_MAX_ARGS 8
-#define SPAWN_ARG_MAX  128
+// Arguments for a new process. Copied out of the caller's address space
+// -- which spawn is about to stop looking at -- into one heap block, and
+// pointed at from a vector.
+//
+// This used to be `char argv[8][128]` by value: 8 arguments of 128 bytes,
+// a 1 KiB struct on the kernel stack. A shell cannot live inside that.
+// `ls -la`, a compiler invocation, or `find . -exec` all exceed it, and
+// the excess was silently TRUNCATED rather than reported.
+//
+// The ceilings are now Linux-shaped: a per-argument length and a total
+// byte budget, rather than a slot count. They exist so an untrusted
+// syscall argument cannot drive an unbounded kernel allocation, which
+// was the real point of the old fixed array.
+#define SPAWN_MAX_ARGS   1024            // argc ceiling
+#define SPAWN_ARG_MAX    4096            // one argument, Linux MAX_ARG_STRLEN-ish
+#define SPAWN_ARG_TOTAL  (256 * 1024)    // all of argv together, ARG_MAX-ish
 
 struct spawn_args {
-    int  argc;
-    char argv[SPAWN_MAX_ARGS][SPAWN_ARG_MAX];
+    int    argc;
+    char **argv;   // argc entries, each pointing into `blob`
+    char  *blob;   // every string, NUL-separated; freed with the args
 };
+
+// Builds a one-argument vector (argv[0] = path), which is what a spawn
+// with no vector gets. Returns 0 on allocation failure.
+int  spawn_args_single(struct spawn_args *out, const char *path);
+// Frees what spawn_args_single or the syscall layer allocated. Safe on a
+// zeroed struct.
+void spawn_args_free(struct spawn_args *args);
 
 struct process *spawn(const char *path);
 
@@ -284,7 +301,9 @@ struct process *spawn_argv(const char *path, const struct spawn_args *args);
 // on failure (parent unaffected).
 struct thread *fork_task(struct syscall_frame *frame);
 
-int exec_task(const char *path, struct syscall_frame *frame);
+// `args` may be null, in which case the new image gets argv[0] = path.
+int exec_task(const char *path, struct syscall_frame *frame,
+              const struct spawn_args *args);
 
 // Ends the calling thread only. When it is the last live thread of its
 // process, the address space is freed and waiters are woken.
