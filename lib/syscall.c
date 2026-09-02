@@ -62,6 +62,10 @@
 #define SYS_DUP3          72
 #define SYS_GETPPID       73
 #define SYS_UNAME         74
+#define SYS_GETUID        76
+#define SYS_GETGID        78
+#define SYS_SETUID        80
+#define SYS_SETGID        81
 
 #define SYS_CHDIR         53
 #define SYS_GETCWD        54
@@ -256,6 +260,13 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
     return (int)__neoos_syscall4(SYS_EXEC, (long)(uintptr_t)path, (long)len,
                                  (long)(uintptr_t)argv, (long)(uintptr_t)envp);
 }
+
+int getuid(void)  { return (int)syscall0(SYS_GETUID); }
+int geteuid(void) { return (int)syscall0(SYS_GETUID); }
+int getgid(void)  { return (int)syscall0(SYS_GETGID); }
+int getegid(void) { return (int)syscall0(SYS_GETGID); }
+int setuid(int uid) { return (int)syscall1(SYS_SETUID, uid); }
+int setgid(int gid) { return (int)syscall1(SYS_SETGID, gid); }
 
 int getppid(void) {
     return (int)syscall0(SYS_GETPPID);

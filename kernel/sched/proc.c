@@ -440,7 +440,15 @@ struct process *spawn_argv(const char *path, const struct spawn_args *args) {
     // A spawn from a running process inherits its cwd, as a fork does.
     // The FIRST process has no caller and keeps proc_alloc's "/".
     struct process *spawner = current_proc();
-    if (spawner) { cwd_copy(p->cwd, spawner->cwd); p->ctty = spawner->ctty; }
+    if (spawner) {
+        cwd_copy(p->cwd, spawner->cwd);
+        p->ctty = spawner->ctty;
+        p->uid  = spawner->uid;
+        p->gid  = spawner->gid;
+    }
+    // A process with no spawner is the FIRST one -- init -- and
+    // proc_alloc zeroed it, so it is god by construction rather than by
+    // a special case naming PID 1.
     p->parent_pid  = current_proc() ? current_proc()->pid : 0;
     if (current_proc()) { p->pgid = current_proc()->pgid; p->sid = current_proc()->sid; }
 
@@ -832,6 +840,8 @@ struct thread *fork_task(struct syscall_frame *frame) {
     // and BusyBox's ash reported "can't set tty process group" for every
     // command it ran -- tcsetpgrp on a terminal the child could not name.
     child_proc->ctty        = parent->ctty;
+    child_proc->uid         = parent->uid;
+    child_proc->gid         = parent->gid;
     // fork does not change the program, so the child keeps the name.
     for (unsigned i = 0; i < sizeof(child_proc->comm); i++) {
         child_proc->comm[i] = parent->comm[i];
@@ -895,10 +905,31 @@ struct kill_ctx {
     int rc;
 };
 
+// May the caller signal `target`?
+//
+// god (uid 0) may signal anything; anyone else may signal only their own
+// processes. That single rule is what makes "a normal process cannot
+// kill init" true, without a special case naming PID 1: init runs as
+// god, so an ordinary process fails the uid comparison like it would
+// against any other god-owned process.
+//
+// This is Linux's rule minus saved-uids, and it is deliberately the
+// WHOLE model -- no capabilities, no ptrace exemption, no session check.
+static int may_signal(const struct process *target) {
+    struct process *me = current_proc();
+    if (!me) { return 1; }            // kernel-internal delivery
+    if (me->uid == 0) { return 1; }   // god
+    return me->uid == target->uid;
+}
+
 static void kill_one(struct process *p, void *v) {
     struct kill_ctx *c = (struct kill_ctx *)v;
     if (p->state == PROC_ZOMBIE) { return; }
     if (c->pid != -1 && p->pgid != c->target_pgid) { return; }
+    // A broadcast skips what it may not signal rather than failing: that
+    // is what `kill -1` means, and reporting EPERM because some
+    // untouchable process exists would make it useless.
+    if (!may_signal(p)) { return; }
     c->found = 1;
     if (c->sig) {
         int r = signal_send_process(p, c->sig, c->info);
@@ -917,8 +948,13 @@ int signal_kill(int pid, int sig, struct siginfo *info) {
     if (pid > 0) {
         struct process *p = proc_find(pid);
         if (!p) { return -ESRCH; }
-        int rc = (p->state == PROC_ZOMBIE) ? -ESRCH
-               : (sig ? signal_send_process(p, sig, info) : 0);
+        // Checked even for sig == 0, which is an existence probe: a
+        // caller that may not signal a process may not use it to learn
+        // whether that process exists either.
+        int rc;
+        if (!may_signal(p))                  { rc = -EPERM; }
+        else if (p->state == PROC_ZOMBIE)    { rc = -ESRCH; }
+        else                                 { rc = sig ? signal_send_process(p, sig, info) : 0; }
         proc_put(p);
         return rc;
     }

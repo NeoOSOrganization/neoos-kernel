@@ -153,7 +153,12 @@
 #define SYS_GETGID          78
 #define SYS_GETEGID         79
 
+// N3. Only uid 0 (god) may change identity, and only downward -- login
+// is the one caller.
+#define SYS_SETUID          80
+#define SYS_SETGID          81
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX             80
+#define SYS_MAX             82
 
 #endif

@@ -270,10 +270,14 @@ static const struct syscall_desc syscall_table[SYS_MAX] = {
     [SYS_GETPPID]         = { sys_getppid,         "getppid" },
     [SYS_UNAME]           = { sys_uname,           "uname" },
     [SYS_BRK]             = { sys_brk,             "brk" },
+    // getuid and geteuid are the same function, as are getgid and
+    // getegid: NeoOS has no effective ids to differ from the real ones.
     [SYS_GETUID]          = { sys_getuid,          "getuid" },
     [SYS_GETEUID]         = { sys_getuid,          "geteuid" },
-    [SYS_GETGID]          = { sys_getuid,          "getgid" },
-    [SYS_GETEGID]         = { sys_getuid,          "getegid" },
+    [SYS_GETGID]          = { sys_getgid,          "getgid" },
+    [SYS_GETEGID]         = { sys_getgid,          "getegid" },
+    [SYS_SETUID]          = { sys_setuid,          "setuid" },
+    [SYS_SETGID]          = { sys_setgid,          "setgid" },
 };
 
 // Asserts what the table's shape is supposed to guarantee. Cheap, and

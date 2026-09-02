@@ -43,6 +43,19 @@ int getpid(void);
 // an orphan is reparented to init rather than left with a stale number.
 int getppid(void);
 
+// Credentials. NeoOS's superuser is `god`, uid 0 -- the name is ours,
+// the number is Unix's, because ported software tests for 0. There are
+// no effective ids distinct from the real ones, so geteuid == getuid.
+int getuid(void);
+int geteuid(void);
+int getgid(void);
+int getegid(void);
+// Only god may change identity, and only downward. -EPERM otherwise.
+// Call setgid BEFORE setuid: after the uid is dropped, the right to
+// change the group is gone too.
+int setuid(int uid);
+int setgid(int gid);
+
 // 1 on /dev/console and /dev/TTY, 0 on a file, pipe or socket.
 int isatty(int fd);
 int ioctl(int fd, unsigned long request, void *arg);

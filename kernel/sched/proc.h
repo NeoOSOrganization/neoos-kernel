@@ -135,6 +135,18 @@ struct process {
     // (kernel/tty/pty.c keeps its structs deliberately, see the note
     // there), so one can never dangle.
     struct tty *ctty;
+
+    // Credentials. NeoOS's superuser is called `god`; its uid is 0,
+    // because every `uid == 0` check in ported software depends on that
+    // number and only the NAME is ours to choose.
+    //
+    // There is deliberately no euid/egid and no saved-uid: nothing yet
+    // elevates privilege, and a saved-uid model with no user of it is
+    // speculative complexity. set-uid execution, when it arrives, brings
+    // its own milestone. Inherited across fork and spawn, kept across
+    // exec.
+    int uid;
+    int gid;
     // Current working directory: always absolute, always canonical
     // (no "." or ".."), never empty, and never with a trailing slash
     // except at the root. EVERY process has one from the moment

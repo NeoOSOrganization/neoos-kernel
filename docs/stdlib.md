@@ -1246,10 +1246,34 @@ with none gets `-ENXIO` from `open("/dev/tty")`, as on Linux.
 root holds directories only. `/tmp` is a ramfs, so tests that must write
 to a real filesystem use `/var/tmp`.
 
-`getuid`/`geteuid`/`getgid`/`getegid` all return **0**. NeoOS is
-single-user with no credentials, and FAT has no ownership, so root is
-the honest answer rather than a placeholder; BusyBox's shell asks for
-all four at startup.
+**Processes carry a `uid` and `gid`, and the superuser is `god`, uid 0.**
+The name is NeoOS's; the number is Unix's, because every `uid == 0` test
+in ported software depends on it. `getuid`/`geteuid`/`getgid`/`getegid`
+report the real values — they answered a hardcoded 0 for everyone before
+N3, so a program that reads them now gets a different answer.
+
+There is **no `euid`/`egid` and no saved-uid**: nothing elevates
+privilege yet, and a saved-uid model with no user of it is speculative.
+`geteuid` is therefore `getuid`. Credentials are inherited across `fork`
+and `spawn` and kept across `exec`.
+
+`setuid`/`setgid`: **only god may change identity, and only downward.**
+Anything else is `-EPERM` rather than a half-implemented approximation
+of Linux's real/effective/saved juggling. Call `setgid` *before*
+`setuid` — after the uid is dropped, the right to change the group is
+gone too.
+
+**Signals are permission-checked.** god may signal anything; anyone else
+only processes with their own uid. That one rule is what makes "an
+ordinary process cannot kill init" true, with no special case naming PID
+1 — init runs as god. The check covers `sig == 0` too, so a caller that
+may not signal a process cannot use the existence probe to learn whether
+it exists. A broadcast (`kill(-1)`) *skips* what it may not signal
+rather than failing, which is what that call means.
+
+**`reboot` is god's**, not PID 1's. Linux gates it on privilege rather
+than on being init, and the old rule is why nothing but init could power
+the machine off.
 
 `poll` and `select` are reachable from musl. They had never been mapped
 in the shim at all, so every musl program that waited on a descriptor

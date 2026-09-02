@@ -84,6 +84,8 @@
 #define NEO_GETEGID         79
 #define NEO_POLL            67
 #define NEO_SELECT          68
+#define NEO_SETUID          80
+#define NEO_SETGID          81
 
 // ---- Linux x86-64 numbers, as musl issues them ----------------------
 #define LX_READ              0
@@ -99,6 +101,8 @@
 #define LX_GETGID          104
 #define LX_GETEUID         107
 #define LX_GETEGID         108
+#define LX_SETUID          105
+#define LX_SETGID          106
 #define LX_CLOSE             3
 #define LX_STAT              4
 #define LX_FSTAT             5
@@ -295,6 +299,8 @@ long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a
     case LX_GETEUID:         return neo(NEO_GETEUID, 0, 0, 0, 0, 0, 0);
     case LX_GETGID:          return neo(NEO_GETGID, 0, 0, 0, 0, 0, 0);
     case LX_GETEGID:         return neo(NEO_GETEGID, 0, 0, 0, 0, 0, 0);
+    case LX_SETUID:          return neo(NEO_SETUID, a1, 0, 0, 0, 0, 0);
+    case LX_SETGID:          return neo(NEO_SETGID, a1, 0, 0, 0, 0, 0);
 
     // poll and select were never mapped at all, so every musl program
     // that waited on a descriptor got -ENOSYS -- which is how BusyBox's

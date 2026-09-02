@@ -111,17 +111,52 @@ int64_t sys_brk(struct syscall_args *a) {
     return (int64_t)current_proc()->brk;
 }
 
-// getuid / geteuid / getgid / getegid, all four the same function.
+// getuid / geteuid, and getgid / getegid.
 //
-// NeoOS is single-user and has no credentials at all, so 0 -- root -- is
-// the honest answer rather than a placeholder, and it is what makes
-// BusyBox's shell stop complaining at startup. FAT has no ownership
-// either, so there is nothing for a non-zero value to mean.
+// These answered a hardcoded 0 for everyone until N3, which is why the
+// change is worth naming: they report the truth now, and a program that
+// reads them gets a different answer than it did.
 //
-// One handler behind four numbers on purpose: four identical functions
-// would invite one of them to drift. Recorded in docs/stdlib.md.
+// There are no EFFECTIVE ids to differ from the real ones, so geteuid
+// is getuid. One function behind both numbers on purpose: two identical
+// ones would invite one of them to drift.
 int64_t sys_getuid(struct syscall_args *a) {
     (void)a;
+    return current_proc()->uid;
+}
+
+int64_t sys_getgid(struct syscall_args *a) {
+    (void)a;
+    return current_proc()->gid;
+}
+
+// Only god may change identity, and only DOWNWARD -- a process that has
+// dropped to an ordinary uid cannot climb back, which is the whole point
+// of dropping. login is the one caller: it authenticates as god and then
+// becomes the user.
+//
+// Linux's setuid does more than this (saved-uids, and a non-root caller
+// switching among its real/effective/saved set). NeoOS has none of
+// those, so anything but "god lowers itself" is -EPERM rather than a
+// half-implemented approximation.
+int64_t sys_setuid(struct syscall_args *a) {
+    struct process *p = current_proc();
+    int uid = (int)a->a1;
+    if (uid < 0) { return -EINVAL; }
+    if (p->uid != 0) { return -EPERM; }
+    p->uid = uid;
+    return 0;
+}
+
+int64_t sys_setgid(struct syscall_args *a) {
+    struct process *p = current_proc();
+    int gid = (int)a->a1;
+    if (gid < 0) { return -EINVAL; }
+    // Guarded by the UID, not the gid: dropping the group is part of
+    // dropping privilege, and login must do it BEFORE setuid -- after
+    // the uid is gone so is the right to change the group.
+    if (p->uid != 0) { return -EPERM; }
+    p->gid = gid;
     return 0;
 }
 
@@ -395,7 +430,10 @@ int64_t sys_exit_group(struct syscall_args *a) {
 
 int64_t sys_reboot(struct syscall_args *a) {
     struct process *p = current_proc();
-    if (!p || p->pid != 1) { return -EPERM; }
+    // god, rather than PID 1. It was pid-1-only before N3 because there
+    // was no notion of a privileged user to check instead -- which is
+    // why `make shell` had no way to power the machine off.
+    if (!p || p->uid != 0) { return -EPERM; }
 
     switch ((uint32_t)a->a1) {
     case REBOOT_POWER_OFF:
