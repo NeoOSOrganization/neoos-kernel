@@ -1260,6 +1260,19 @@ shell, and a bad imitation of `ash` would be worse than none.
 appended**, so `busybox` finds `/bin/busybox.nex`. The bare name wins,
 which is what `./prog` requires.
 
+**`/etc/nshrc`** is read before the first prompt. Every non-blank,
+non-comment line is a command nsh runs — that is the entire format, in
+the spirit of `.bashrc`. "A list of commands" already covers showing a
+banner or changing directory, so a second configuration syntax would be
+one more thing to learn and to get wrong.
+
+It ships printing `/etc/nsh.logo`, which the build generates from
+`shared/neoos_logo.h` — the same art the kernel banner draws — so
+editing the logo updates the boot banner and the shell greeting
+together. Because the logo is ordinary shell output rather than
+something painted outside the terminal, `clear` removes it like any
+other output.
+
 **Processes carry a `uid` and `gid`, and the superuser is `god`, uid 0.**
 The name is NeoOS's; the number is Unix's, because every `uid == 0` test
 in ported software depends on it. `getuid`/`geteuid`/`getgid`/`getegid`

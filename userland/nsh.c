@@ -154,6 +154,8 @@ static void builtin_help(void) {
     out("  cd [dir]   change directory (no argument: $HOME)\n");
     out("  pwd        print the working directory\n");
     out("  echo ...   print the arguments\n");
+    out("  cat FILE   print a file\n");
+    out("  clear      clear the screen\n");
     out("  env        print the environment\n");
     out("  help       this list\n");
     out("  exit [n]   leave the shell\n");
@@ -165,6 +167,25 @@ static int to_int(const char *s) {
     int v = 0;
     for (int i = 0; s[i] >= '0' && s[i] <= '9'; i++) { v = v * 10 + (s[i] - '0'); }
     return v;
+}
+
+// Copies a file to stdout. A builtin rather than a program because the
+// startup file needs it before anything else is guaranteed to exist,
+// and because a shell with no pipes should at least be able to show you
+// a file.
+static int builtin_cat(int argc, char **argv) {
+    for (int i = 1; i < argc; i++) {
+        int fd = open(argv[i], O_RDONLY);
+        if (fd < 0) {
+            out("nsh: cat: "); out(argv[i]); out(": cannot open\n");
+            continue;
+        }
+        char buf[512];
+        long n;
+        while ((n = read(fd, buf, sizeof buf)) > 0) { write(1, buf, (unsigned long)n); }
+        close(fd);
+    }
+    return 1;
 }
 
 // Returns 1 if the command was a builtin (and *quit is set to leave).
@@ -196,6 +217,16 @@ static int run_builtin(int argc, char **argv, int *quit, int *status) {
         out("\n");
         return 1;
     }
+    if (strcmp(argv[0], "cat") == 0) { return builtin_cat(argc, argv); }
+    if (strcmp(argv[0], "clear") == 0) {
+        // The terminal's own escape: home the cursor and erase the
+        // screen INCLUDING the scrollback. The logo is ordinary shell
+        // output, printed by the startup file, so clear removes it like
+        // anything else -- which is the point of printing it here rather
+        // than painting it outside the terminal.
+        out("\033[H\033[2J\033[3J");
+        return 1;
+    }
     if (strcmp(argv[0], "env") == 0) {
         for (char **e = environ; e && *e; e++) { out(*e); out("\n"); }
         return 1;
@@ -203,11 +234,96 @@ static int run_builtin(int argc, char **argv, int *quit, int *status) {
     return 0;
 }
 
+// Runs one line: split, builtin, or PATH lookup + spawn. Returns 1 if
+// the shell was asked to leave.
+static int run_line(int *status) {
+    int argc = split();
+    if (argc == 0) { return 0; }
+
+    int quit = 0;
+    if (run_builtin(argc, argv_buf, &quit, status)) { return quit; }
+
+    char path[PATH_MAX];
+    if (!resolve(argv_buf[0], path)) {
+        out("nsh: "); out(argv_buf[0]); out(": not found\n");
+        *status = 127;
+        return 0;
+    }
+
+    int pid = spawnve(path, argv_buf, environ);
+    if (pid < 0) {
+        out("nsh: "); out(path); out(": cannot run ("); out_int(pid); out(")\n");
+        *status = 126;
+        return 0;
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    if (WIFSIGNALED(st)) {
+        out("nsh: "); out(argv_buf[0]); out(": killed by signal ");
+        out_int(WTERMSIG(st)); out("\n");
+        *status = 128 + WTERMSIG(st);
+    } else if (WIFEXITED(st)) {
+        *status = WEXITSTATUS(st);
+        // Reported only when non-zero: a shell that announced every
+        // success would be unusable.
+        if (*status != 0) {
+            out("nsh: "); out(argv_buf[0]); out(": exit "); out_int(*status); out("\n");
+        }
+    }
+    return 0;
+}
+
+// The startup file, in the spirit of .bashrc: every non-blank,
+// non-comment line is a command nsh runs before the first prompt. That
+// is the whole format -- there is no separate configuration language,
+// because "a list of commands" already covers setting a prompt, showing
+// a banner, or changing directory, and a second syntax would be a
+// second thing to learn and to get wrong.
+//
+// Missing is not an error: a system without one simply starts quiet.
+static void run_rc(const char *path, int *status) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) { return; }
+
+    // Read the whole file, then walk it line by line. The lines are
+    // copied into `line` because run_line SPLITS ITS BUFFER IN PLACE.
+    static char rc[4096];
+    int n = 0, r;
+    while (n < (int)sizeof rc - 1 && (r = (int)read(fd, rc + n, sizeof rc - 1 - n)) > 0) {
+        n += r;
+    }
+    close(fd);
+    rc[n] = 0;
+
+    int i = 0;
+    while (i < n) {
+        int j = i;
+        while (j < n && rc[j] != '\n') { j++; }
+        int len = j - i;
+        if (len > LINE_MAX - 1) { len = LINE_MAX - 1; }
+        memcpy(line, rc + i, (uint64_t)len);
+        line[len] = 0;
+        i = j + 1;
+
+        // Skip blanks and comments.
+        int k = 0;
+        while (line[k] == ' ' || line[k] == '\t') { k++; }
+        if (line[k] == 0 || line[k] == '#') { continue; }
+
+        if (run_line(status)) { break; }   // `exit` in the rc file
+    }
+}
+
 int main(void) {
     const char *ps1 = env_get("PS1");
     if (!ps1) { ps1 = "nsh$ "; }
 
     int status = 0;
+
+    // A per-user file would go here too once N5 gives users homes; for
+    // now there is one system-wide file.
+    run_rc("/etc/nshrc", &status);
+
     for (;;) {
         out(ps1);
 
@@ -215,41 +331,7 @@ int main(void) {
         if (n < 0) { out("\n"); break; }      // end of input: leave
         if (n == 0) { continue; }
 
-        int argc = split();
-        if (argc == 0) { continue; }
-
-        int quit = 0;
-        if (run_builtin(argc, argv_buf, &quit, &status)) {
-            if (quit) { break; }
-            continue;
-        }
-
-        char path[PATH_MAX];
-        if (!resolve(argv_buf[0], path)) {
-            out("nsh: "); out(argv_buf[0]); out(": not found\n");
-            status = 127;
-            continue;
-        }
-
-        int pid = spawnve(path, argv_buf, environ);
-        if (pid < 0) {
-            out("nsh: "); out(path); out(": cannot run ("); out_int(pid); out(")\n");
-            status = 126;
-            continue;
-        }
-        int st = 0;
-        waitpid(pid, &st, 0);
-        if (WIFSIGNALED(st)) {
-            out("nsh: "); out(argv_buf[0]); out(": killed by signal "); out_int(WTERMSIG(st)); out("\n");
-            status = 128 + WTERMSIG(st);
-        } else if (WIFEXITED(st)) {
-            status = WEXITSTATUS(st);
-            // Reported only when non-zero: a shell that announced every
-            // success would be unusable.
-            if (status != 0) {
-                out("nsh: "); out(argv_buf[0]); out(": exit "); out_int(status); out("\n");
-            }
-        }
+        if (run_line(&status)) { break; }
     }
     return status;
 }
