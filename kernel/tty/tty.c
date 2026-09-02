@@ -317,6 +317,27 @@ int64_t tty_obj_ioctl(struct tty *t, uint64_t request, void *arg) {
         *(int *)arg = pg;
         return 0;
     }
+    case TIOCSCTTY: {
+        // Make this tty the caller's controlling terminal. Only a
+        // SESSION LEADER may, which is Linux's rule and the reason the
+        // standard sequence is setsid() then TIOCSCTTY on the inherited
+        // descriptor.
+        //
+        // Without this a shell could never take over a pty it inherited
+        // across fork: pts_devfs_open records the session of whoever
+        // opened the slave FIRST, which for the usual arrangement is the
+        // parent that set the pty up, not the shell. BusyBox's ash then
+        // saw tcgetpgrp() report a group that was not its own and
+        // signalled itself with SIGTTIN until it stopped.
+        struct process *p = current_proc();
+        if (!p) { return -ESRCH; }
+        if (p->pid != p->sid) { return -EPERM; }   // not a session leader
+        uint64_t f = spin_lock_irqsave(&t->lock);
+        t->sid     = p->sid;
+        t->fg_pgid = p->pgid;
+        spin_unlock_irqrestore(&t->lock, f);
+        return 0;
+    }
     case TIOCSPGRP: {
         if (!arg) { return -EFAULT; }
         int pg = *(const int *)arg;

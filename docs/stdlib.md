@@ -1182,6 +1182,15 @@ its number to the next one), and after ~1M process creations they begin
 to repeat. The old allocator did neither — it reused the most recently
 freed pid *first*, and stopped allocating entirely at 2^20.
 
+`TIOCSCTTY` makes a tty the caller's controlling terminal, and requires
+the caller to be a session leader as on Linux. It is what lets a shell
+take over a pty it inherited across `fork`: `pts_devfs_open` records the
+session of whoever opened the slave *first*, which in the usual
+arrangement is the parent that set the pty up. `setsid()` followed by
+`ioctl(fd, TIOCSCTTY, 0)` on the inherited descriptor is the standard
+sequence, and without it `ash` sees a foreground process group that is
+not its own and signals itself with `SIGTTIN` until it stops.
+
 `getuid`/`geteuid`/`getgid`/`getegid` all return **0**. NeoOS is
 single-user with no credentials, and FAT has no ownership, so root is
 the honest answer rather than a placeholder; BusyBox's shell asks for
@@ -1277,12 +1286,17 @@ The environment itself originates in **init**, which is the only place
 it can: nothing above PID 1 has one to pass down. It supplies `PATH`,
 `HOME`, `TERM` and `PS1`, and every process inherits from there.
 
-`fcntl` implements `F_GETFL` and `F_SETFL`, which is enough to turn
-`O_NONBLOCK` on and off. `F_GETFD`/`F_SETFD` are accepted and ignored,
-since nothing closes descriptors at `exec` yet. Everything else —
-`F_DUPFD`, the locking commands — returns `-EINVAL` rather than a
-silent success, because a caller that asked for a duplicate descriptor
-and got one would use fd -1 as if it were open. `F_GETFL` reports only
+`fcntl` implements `F_GETFL`, `F_SETFL`, `F_DUPFD` and
+`F_DUPFD_CLOEXEC`. `F_GETFD`/`F_SETFD` are accepted and ignored, and so
+is `F_DUPFD_CLOEXEC`'s close-on-exec half, since nothing walks the
+descriptor table at `exec` yet. The locking commands still return
+`-EINVAL` rather than a silent success, because a caller that asked for
+a lock and got one would act on a guarantee it never received.
+
+`F_DUPFD` is not optional for a shell: BusyBox's `ash` moves the
+terminal out of a script's way with `fcntl(fd, F_DUPFD_CLOEXEC, 10)`,
+and when that returned `-EINVAL` it gave up on job control entirely
+("can't access tty; job control turned off"). `F_GETFL` reports only
 `O_NONBLOCK`; the access mode is not tracked per descriptor.
 
 `O_NONBLOCK` is per-DESCRIPTOR, which is where POSIX puts it: two

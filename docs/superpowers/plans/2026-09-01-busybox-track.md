@@ -84,7 +84,7 @@ BB0.  fork duplicates the address-space bookkeeping   <- BLOCKER, first
 BB1.  Build-and-run spike: /bin/busybox to first -ENOSYS   <- DONE
 BB2.  The measured syscall set (was BB1 + BB4)             <- DONE
 BB3.  execve(path, argv, envp)                            <- DONE
-BB4.  Job control                                     (was BB2)
+BB4.  Job control                                     (was BB2)  <- DONE
 BB5.  Minimal /proc                                   (was BB3)
 BB6.  Interactive shell bring-up                          <- DONE
 ```
@@ -378,8 +378,27 @@ fork left the child with no thread pointer, and a pty hung up when a
 forked child closed its inherited master fd. Both are described in the
 commit and in the code at the point of the fix.
 
-**Still open:** `sh: can't access tty; job control turned off` at
-startup — BB4's subject, and the reason it was left until the shell
-existed to demonstrate it. The shell is fully usable without it; what is
-missing is `SIGTTIN`/`SIGTTOU` generation and the foreground-pgid
-handshake, which `struct tty` already has a field for.
+## BB4 result — **DONE** (2026-09-02)
+
+`sh: can't access tty; job control turned off` is gone, and `bbsh`
+asserts its absence — the message is the only evidence, since ash runs
+perfectly well without job control and would otherwise degrade silently.
+A background job (`sleep 5 & jobs`) is exercised too.
+
+Two things were missing, both found by reading what ash actually does
+rather than by predicting:
+
+- **`fcntl(F_DUPFD)` / `F_DUPFD_CLOEXEC`** returned `-EINVAL`. ash does
+  `fcntl(fd, F_DUPFD_CLOEXEC, 10)` to move the terminal out of the way,
+  and gives up on job control the moment it fails. This is the first
+  caller of a new `fd_table_alloc_from`.
+- **`TIOCSCTTY`**, so a session leader can claim a tty it inherited.
+  The slave is opened by the parent that sets the pty up, so the pty
+  records the parent's session; without a way to take it over, ash saw a
+  foreground group that was not its own and signalled itself with
+  SIGTTIN until it stopped. Removing the `TIOCSCTTY` call from bbsh
+  reproduces exactly that: the shell answers nothing at all.
+
+`SIGTTIN`/`SIGTTOU` are still not *generated* by background reads and
+writes; nothing exercised so far needs that, and it is the next thing to
+add if something does.

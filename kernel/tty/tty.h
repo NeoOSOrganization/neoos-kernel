@@ -68,6 +68,7 @@ struct termios_k {
 #define TIOCGWINSZ 0x5413
 #define TIOCSWINSZ 0x5414
 #define TIOCGPGRP  0x540F
+#define TIOCSCTTY   0x540E
 #define TIOCSPGRP  0x5410
 
 struct winsize_k {

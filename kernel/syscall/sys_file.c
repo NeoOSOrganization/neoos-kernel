@@ -221,10 +221,30 @@ int64_t sys_fcntl(struct syscall_args *a) {
         return 0;   // FD_CLOEXEC is never set; there is no exec-time walk
     case F_SETFD:
         return 0;   // accepted and ignored, for the same reason
+    case F_DUPFD:
+    case F_DUPFD_CLOEXEC: {
+        // The lowest free descriptor >= a3, pointing at the same open
+        // object. BusyBox's ash does exactly this to move the terminal
+        // out of the way of a script's own redirections
+        // (`fcntl(fd, F_DUPFD_CLOEXEC, 10)`), and gave up on job
+        // control entirely when it came back -EINVAL: "can't access
+        // tty; job control turned off".
+        //
+        // CLOEXEC is accepted and ignored, for the same reason F_SETFD
+        // is: nothing walks the descriptor table at exec yet. Recorded
+        // in docs/stdlib.md.
+        int from = (int)a->a3;
+        if (from < 0 || from >= FD_TABLE_MAX) { return -EINVAL; }
+        int newfd = fd_table_alloc_from(current_proc()->fd_table, from);
+        if (newfd < 0) { return newfd; }
+        int rc = (int)fd_table_dup2(current_proc()->fd_table, (int)a->a1, newfd);
+        if (rc < 0) { fd_table_close(current_proc()->fd_table, newfd); }
+        return rc;
+    }
     default:
-        // F_DUPFD, the locking commands, and everything else. Refusing
-        // is right: a caller that asked for a duplicate and got a
-        // silent success would use fd -1 as if it were open.
+        // The locking commands and everything else. Refusing is right:
+        // a caller that asked for something and got a silent success
+        // would act on a result it never received.
         return -EINVAL;
     }
 }

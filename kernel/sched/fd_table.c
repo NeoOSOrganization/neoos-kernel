@@ -106,7 +106,15 @@ struct file_descriptor *fd_table_get(struct fd_table *table, int fd) {
 }
 
 int fd_table_alloc(struct fd_table *table) {
+    return fd_table_alloc_from(table, 0);
+}
+
+// The lowest free descriptor >= `from`. fd_table_alloc is this with
+// from == 0; fcntl(F_DUPFD) is the only other caller, and it is the
+// reason the floor exists at all.
+int fd_table_alloc_from(struct fd_table *table, int from) {
     if (!table) return -EMFILE;
+    if (from < 0) { from = 0; }
 
     // Strictly lowest-available, from fd 0 upward. Two things used to
     // break that, and a shell notices both:
@@ -126,7 +134,8 @@ int fd_table_alloc(struct fd_table *table) {
     //
     // Full buckets are skipped by their slot_count without a scan, so
     // the common case does not walk 512 slots to find fd 4.
-    for (unsigned bucket_idx = 0; bucket_idx < FD_TABLE_BUCKETS; bucket_idx++) {
+    for (unsigned bucket_idx = (unsigned)from / FD_TABLE_SLOTS;
+         bucket_idx < FD_TABLE_BUCKETS; bucket_idx++) {
         struct fd_bucket *b = &table->buckets[bucket_idx];
 
         uint64_t flags = spin_lock_irqsave(&b->lock);
@@ -142,7 +151,11 @@ int fd_table_alloc(struct fd_table *table) {
             return -EMFILE;   // OOM
         }
 
-        for (unsigned slot_idx = 0; slot_idx < FD_TABLE_SLOTS; slot_idx++) {
+        unsigned first_slot = 0;
+        if ((unsigned)from / FD_TABLE_SLOTS == bucket_idx) {
+            first_slot = (unsigned)from % FD_TABLE_SLOTS;
+        }
+        for (unsigned slot_idx = first_slot; slot_idx < FD_TABLE_SLOTS; slot_idx++) {
             if (slots[slot_idx].in_use) { continue; }
 
             slot_reset(&slots[slot_idx]);

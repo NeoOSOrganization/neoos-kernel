@@ -26,6 +26,7 @@
 #include <auxv.h>
 
 #define TIOCGPTN 0x80045430
+#define TIOCSCTTY 0x540E
 
 extern int ioctl(int fd, unsigned long req, void *arg);
 
@@ -100,6 +101,14 @@ int main(void) {
         dup2(slave, 2);
         if (slave > 2) { close(slave); }
         setsid();                       // the shell wants its own session
+        // ...and then claims this pty as its controlling terminal. The
+        // slave was opened by the PARENT, so the pty recorded the
+        // parent's session; without this the shell sees a foreground
+        // process group that is not its own, and BusyBox's ash
+        // signals itself with SIGTTIN until it stops. setsid() then
+        // TIOCSCTTY on the inherited descriptor is the standard
+        // sequence for exactly this reason.
+        ioctl(0, TIOCSCTTY, 0);
         char *argv[] = { (char *)"sh", (char *)"-i", 0 };
         execve("/BIN/BUSYBOX.ELF", argv, environ);
         exit(127);
@@ -107,6 +116,17 @@ int main(void) {
     close(slave);
 
     drain(m, 500);                      // banner and first prompt
+
+    // BB4. ash announces "can't access tty; job control turned off"
+    // when it cannot take the terminal over, and then runs perfectly
+    // well without job control -- so the message is the only evidence,
+    // and asserting on it is the only way this stays fixed. It needed
+    // fcntl(F_DUPFD), which used to return -EINVAL, and TIOCSCTTY.
+    if (saw("job control turned off")) {
+        printf("[bbsh] FAILED: ash could not take the terminal "
+               "(job control off)\n");
+        goto done;
+    }
 
     // Each command is typed, then its output collected, so a failure
     // names the command that produced it rather than "somewhere in the
@@ -164,8 +184,22 @@ int main(void) {
         goto done;
     }
 
-    printf("[bbsh] interactive ash on a pty: echo, pwd, $(( )), a pipeline "
-           "and a redirection round trip all answered\n");
+    // A background job and `jobs`, which only exist when job control is
+    // on: the shell must put the job in its own process group and keep
+    // the terminal, which is what TIOCSCTTY and tcsetpgrp are for.
+    before = tlen; type(m, "sleep 5 & jobs\n"); drain(m, 2500);
+    if (!saw("Running") && !saw("sleep")) {
+        printf("[bbsh] FAILED: `sleep &; jobs` listed nothing (%d new bytes)\n",
+               tlen - before);
+        goto done;
+    }
+    // Kill it rather than leaving a sleeper behind for the rest of the
+    // boot to wait on.
+    type(m, "kill %1\n"); drain(m, 1000);
+
+    printf("[bbsh] interactive ash on a pty with JOB CONTROL: echo, pwd, "
+           "$(( )), a pipeline, a redirection round trip and a background "
+           "job all answered\n");
     printf("[bbsh] ALL PASSED\n");
     type(m, "exit\n");
     drain(m, 500);

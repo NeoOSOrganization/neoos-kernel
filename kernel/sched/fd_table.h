@@ -84,6 +84,8 @@ void fd_table_unlock_slot(struct fd_table *table, int fd, uint64_t flags);
 // or hands it back with fd_table_close on failure.
 // Returns the fd number, or -EMFILE if the table is full.
 int fd_table_alloc(struct fd_table *table);
+// The lowest available fd >= `from`. What fcntl(F_DUPFD) needs.
+int fd_table_alloc_from(struct fd_table *table, int from);
 
 // Release an fd, dropping its vnode reference if it holds one.
 void fd_table_close(struct fd_table *table, int fd);
