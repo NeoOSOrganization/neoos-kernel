@@ -24,4 +24,13 @@ void render_span(const struct term_fb *fb, const struct vt *v,
 // scrollback view is at the bottom.
 void render_cursor(const struct term_fb *fb, const struct vt *v);
 
+// Paint a glyph / a string at a cell position with explicit colours,
+// bypassing the VT grid. Used for the logo header, which is not
+// terminal content: it must not scroll, must not enter the scrollback,
+// and must survive the shell clearing the screen.
+void render_glyph_at(const struct term_fb *fb, int row, int col,
+                     unsigned char ch, uint32_t fg_rgb, uint32_t bg_rgb);
+void render_text_at(const struct term_fb *fb, int row, int col,
+                    const char *s, uint32_t fg_rgb, uint32_t bg_rgb);
+
 #endif

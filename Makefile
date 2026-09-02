@@ -2,7 +2,7 @@ CC := $(HOME)/opt/cross-x86_64-elf/bin/x86_64-elf-gcc
 AS := nasm
 
 NEOOS_GITREV := $(shell git describe --always --dirty --tags 2>/dev/null || echo unknown)
-CFLAGS := -ffreestanding -fno-stack-protector -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -mcmodel=kernel -Wall -Wextra -std=gnu11 -O2 -Ikernel -DNEOOS_GITREV='"$(NEOOS_GITREV)"'
+CFLAGS := -ffreestanding -fno-stack-protector -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -mcmodel=kernel -Wall -Wextra -std=gnu11 -O2 -Ikernel -Ishared -DNEOOS_GITREV='"$(NEOOS_GITREV)"'
 ASFLAGS := -f elf64
 
 ifdef NEOOS_DEBUG_STOP_WINDOW
@@ -114,7 +114,7 @@ LIB_OBJECTS := $(patsubst $(LIB_DIR)/%.c,$(LIB_BUILD)/%.o,$(LIB_SOURCES))
 
 USERLAND_DIR := userland
 USERLAND_BUILD := $(BUILD_DIR)/userland
-USER_CFLAGS := -ffreestanding -fno-stack-protector -mno-red-zone -msse3 -mssse3 -msse4.1 -msse4.2 -mcmodel=large -fno-pic -ftls-model=local-exec -static -nostdlib -Wall -Wextra -std=gnu11 -O2 -I$(LIB_DIR)/include
+USER_CFLAGS := -ffreestanding -fno-stack-protector -mno-red-zone -msse3 -mssse3 -msse4.1 -msse4.2 -mcmodel=large -fno-pic -ftls-model=local-exec -static -nostdlib -Wall -Wextra -std=gnu11 -O2 -I$(LIB_DIR)/include -Ishared
 
 # ---- musl -----------------------------------------------------------
 #

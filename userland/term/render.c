@@ -79,3 +79,33 @@ void render_cursor(const struct term_fb *fb, const struct vt *v) {
         }
     }
 }
+
+// Draws one glyph at a CELL position with explicit colours, bypassing
+// the VT grid entirely. The logo header is not terminal content -- it
+// must not scroll, must not be in the scrollback, and must survive the
+// shell clearing the screen -- so it is painted straight into the
+// framebuffer instead.
+void render_glyph_at(const struct term_fb *fb, int row, int col,
+                     unsigned char ch, uint32_t fg_rgb, uint32_t bg_rgb) {
+    int y0 = row * TERM_GLYPH_H;
+    int x0 = col * TERM_GLYPH_W;
+    if (y0 + TERM_GLYPH_H > fb->h || x0 + TERM_GLYPH_W > fb->w) { return; }
+
+    uint32_t pfg = pack(fb, fg_rgb), pbg = pack(fb, bg_rgb);
+    const uint8_t *g = term_glyphs[ch];
+    for (int gy = 0; gy < TERM_GLYPH_H; gy++) {
+        volatile uint32_t *dst =
+            (volatile uint32_t *)(fb->pix + (y0 + gy) * fb->pitch) + x0;
+        for (int gx = 0; gx < TERM_GLYPH_W; gx++) {
+            int ink = (g[gy * 2 + (gx >> 3)] >> (7 - (gx & 7))) & 1;
+            dst[gx] = ink ? pfg : pbg;
+        }
+    }
+}
+
+void render_text_at(const struct term_fb *fb, int row, int col,
+                    const char *s, uint32_t fg_rgb, uint32_t bg_rgb) {
+    for (int i = 0; s[i]; i++) {
+        render_glyph_at(fb, row, col + i, (unsigned char)s[i], fg_rgb, bg_rgb);
+    }
+}

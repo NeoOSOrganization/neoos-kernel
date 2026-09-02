@@ -17,6 +17,7 @@
 #include "render.h"
 #include "palette.h"
 #include "font_term.h"
+#include "neoos_logo.h"
 
 #define PROT_READ  1
 #define PROT_WRITE 2
@@ -89,6 +90,46 @@ static unsigned fb_px(const struct term_fb *fb, int x, int y) {
 //
 // Omitting argv[2..] falls back to argv[0] = path, which is right for
 // any program that does not care.
+// Paints the shared logo art at the top of the framebuffer and returns
+// how many text ROWS it used, including the blank separator line. The
+// colours match the kernel banner's: 'P' cells purple, the rest red.
+static int logo_draw(const struct term_fb *fb) {
+    const uint32_t purple = vt_palette[13];   // bright magenta
+    const uint32_t red    = vt_palette[9];    // bright red
+    const uint32_t bg     = VT_DEFAULT_BG;
+
+    int max_rows = fb->h / TERM_GLYPH_H;
+    int max_cols = fb->w / TERM_GLYPH_W;
+
+    int r = 0;
+    for (; neoos_logo_art[r]; r++) {
+        // A framebuffer too short for the whole logo gets as much as
+        // fits and no terminal at all would be worse -- stop early and
+        // leave the rest of the screen to the shell.
+        if (r + 2 >= max_rows) { break; }
+        const char *a = neoos_logo_art[r];
+        const char *c = neoos_logo_col[r];
+        int clen = 0;
+        while (c && c[clen]) { clen++; }
+        for (int i = 0; a[i] && i < max_cols; i++) {
+            uint32_t fg = (i < clen && c[i] == 'P') ? purple : red;
+            render_glyph_at(fb, r, i, (unsigned char)a[i], fg, bg);
+        }
+    }
+
+    if (r < max_rows) {
+        // Wordmark only, no version string: NEOOS_VERSION lives in
+        // kernel/version.h, and dragging a kernel header onto the
+        // userland include path to print four characters is a worse
+        // trade than leaving them out. The kernel banner already
+        // reports the version at boot.
+        render_text_at(fb, r, 3, "NeoOS", purple, bg);
+        r++;
+    }
+    if (r < max_rows) { r++; }        // one blank row between logo and shell
+    return r;
+}
+
 int main(int argc, char **argv) {
     char *default_child[] = { (char *)"/BIN/TERMCHILD.ELF", 0 };
     char *path_only[]     = { 0, 0 };
@@ -157,14 +198,33 @@ int main(int argc, char **argv) {
         ro, go, bo,
     };
 
+    palette_init();
+
+    // The logo header.
+    //
+    // Taking the framebuffer over means clearing it, and that erased the
+    // kernel's boot banner -- logo and all. So the terminal repaints the
+    // logo itself, from the same art the kernel draws
+    // (shared/neoos_logo.h, included by both so the two cannot drift).
+    //
+    // It is painted straight into the framebuffer rather than fed to the
+    // VT, because it is not terminal content: it must not scroll away,
+    // must not enter the scrollback, and must survive the shell running
+    // `clear`. The terminal is then confined to the rows BELOW it by
+    // moving the framebuffer origin down -- after which every render_*
+    // call is already relative to FB.pix and needs no changes at all.
+    render_clear(&FB, VT_DEFAULT_BG);
+    int header_rows = logo_draw(&FB);
+
+    FB.pix += (long)header_rows * TERM_GLYPH_H * FB.pitch;
+    FB.h   -= header_rows * TERM_GLYPH_H;
+
     int cols = FB.w / TERM_GLYPH_W;
     int rows = FB.h / TERM_GLYPH_H;
     if (cols > VT_MAX_COLS) cols = VT_MAX_COLS;
     if (rows > VT_MAX_ROWS) rows = VT_MAX_ROWS;
 
-    palette_init();
     vt_init(&V, cols, rows);
-    render_clear(&FB, VT_DEFAULT_BG);
 
     // Open the slave ourselves and hold it across the fork, so the pty
     // never momentarily looks hung up (slave_refs == 0) while the child

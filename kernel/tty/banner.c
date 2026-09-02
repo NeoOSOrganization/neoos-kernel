@@ -7,46 +7,13 @@
 #include "smp/smp.h"
 #include "drivers/char/serial.h"
 
-// The butterfly-N. `art` is the glyph rows; `col` is the per-cell
-// colour, same shape: 'P' = purple (the N strokes + body + antennae),
-// anything else = red (the wings). Iterate the glyphs freely; keep the
-// two arrays the same length row-for-row.
-static const char *const art[] = {
-    "  \\.                    ./  ",
-    "   \\`.      .--.      .`/   ",
-    " |  \\ `.   /    \\   .` /  | ",
-    " |   \\  `-'  ()  '-`  /   | ",
-    " |    \\      .--.     /    | ",
-    " |  () \\    ( ## )   / ()  | ",
-    " |      \\    '--'    /      |",
-    " |   .-. \\    ||    / .-.   |",
-    " |  ( ) ) \\   ||   / ( ( )  |",
-    " |   `-'   \\  ||  /   `-'   |",
-    " |  ()      \\ || /      ()  |",
-    " |    .--.   \\||/   .--.    |",
-    " |   ( () )   \\/   ( () )   |",
-    "  \\.  '--'    /\\    '--'  ./ ",
-    "   `/        /  \\        \\`  ",
-    NULL,
-};
-static const char *const col[] = {
-    "  PP                    PP  ",
-    "   PPP      RRRR      PPP   ",
-    " P  PP PP   RRRRRR   PP PP P ",
-    " P   PP  PPP  RR  PPP  PP   P ",
-    " P    PP      RRRR     PP    P ",
-    " P  RR PP    RRRRRR   PP RR  P ",
-    " P      PP    RRRR    PP      P",
-    " P   RRR PP    PP    PP RRR   P",
-    " P  RRRRRR PP   PP   PP RRRRR  P",
-    " P   RRR   PP  PP  PP   RRR   P",
-    " P  RR      PP PP PP      RR  P",
-    " P    RRRR   PPPP   RRRR    P",
-    " P   RRRRRR   PP   RRRRRR   P",
-    "  PP  RRRR    PP    RRRR  PP ",
-    "   PP        P  P        PP  ",
-    NULL,
-};
+// The logo art lives in shared/neoos_logo.h, included by BOTH this and
+// userland/term -- the terminal repaints it as a header when it takes
+// the framebuffer over, and two copies of the art would drift.
+#include "neoos_logo.h"
+
+#define art neoos_logo_art
+#define col neoos_logo_col
 
 // --- tiny console-only formatter -------------------------------------
 
