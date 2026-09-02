@@ -1182,6 +1182,23 @@ its number to the next one), and after ~1M process creations they begin
 to repeat. The old allocator did neither — it reused the most recently
 freed pid *first*, and stopped allocating entirely at 2^20.
 
+**`/proc` is synthetic, read-only, and minimal.** It provides
+`/proc/<pid>/stat` and `/proc/<pid>/cmdline` and nothing else — no
+`/proc/self`, no `meminfo`, no `mounts`. That is not an oversight: `ps`
+is the only thing that has asked for `/proc`, and it asked by name, so
+this provides what `ps` reads and stops. Divergences worth knowing:
+
+- **`stat` reports `st_size` 0** for every `/proc` file, as Linux does.
+  The content is rendered at *read* time.
+- **Fields NeoOS does not track are `0`, not omitted.** `stat`'s format
+  is positional, so a missing field would silently shift every later
+  field into the wrong slot. `tty_nr`, the time and fault counters and
+  the priority fields are all 0; `pid`, `comm`, state, `ppid`, `pgrp`
+  and `session` are real.
+- **Writes return `-EPERM`** rather than succeeding silently.
+- **A process that exits between `open` and `read` reads as empty**
+  (EOF) rather than erroring.
+
 `TIOCSCTTY` makes a tty the caller's controlling terminal, and requires
 the caller to be a session leader as on Linux. It is what lets a shell
 take over a pty it inherited across `fork`: `pts_devfs_open` records the

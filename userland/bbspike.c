@@ -24,7 +24,7 @@
 
 #define BB "/BIN/BUSYBOX.ELF"
 
-static void run(const char *label, char *const argv[]) {
+static int run(const char *label, char *const argv[]) {
     // spawnVE, not spawnv: the environment is the point of half these
     // invocations, and spawnv passes an empty one. bbspike's own
     // environment came from init, so forwarding it is what makes
@@ -32,20 +32,23 @@ static void run(const char *label, char *const argv[]) {
     int pid = spawnve(BB, argv, environ);
     if (pid < 0) {
         printf("[bbspike] %s: spawnv FAILED (%d)\n", label, pid);
-        return;
+        return -1;
     }
     int st = 0;
     if (waitpid(pid, &st, 0) < 0) {
         printf("[bbspike] %s: waitpid FAILED\n", label);
-        return;
+        return -1;
     }
     if (WIFSIGNALED(st)) {
         printf("[bbspike] %s: KILLED by signal %d\n", label, WTERMSIG(st));
-    } else if (WIFEXITED(st)) {
-        printf("[bbspike] %s: exit %d\n", label, WEXITSTATUS(st));
-    } else {
-        printf("[bbspike] %s: ended in an unrecognised state %d\n", label, st);
+        return -1;
     }
+    if (WIFEXITED(st)) {
+        printf("[bbspike] %s: exit %d\n", label, WEXITSTATUS(st));
+        return WEXITSTATUS(st);
+    }
+    printf("[bbspike] %s: ended in an unrecognised state %d\n", label, st);
+    return -1;
 }
 
 int main(void) {
@@ -141,6 +144,25 @@ int main(void) {
     char *p_pipe[] = { (char *)"busybox", (char *)"sh", (char *)"-c",
                        (char *)"echo one two three | wc -w", 0 };
     run("pipeline",        p_pipe);
+
+    // BB5. `ps` is the only thing that has asked for /proc, and it asked
+    // by name: "ps: can't open '/proc': No such file or directory".
+    // Piping it through grep asserts the CONTENT rather than the exit
+    // status -- ps exits 0 whether or not it found anything, so the exit
+    // code alone would pass against an empty /proc.
+    char *p_ps[] = { (char *)"busybox", (char *)"ps", 0 };
+    char *p_ps1[] = { (char *)"busybox", (char *)"sh", (char *)"-c",
+                      (char *)"busybox ps | grep -q INIT.ELF && echo PS-FOUND-INIT", 0 };
+    run("ps",              p_ps);
+    // This one IS asserted: `grep -q` exits non-zero when it finds
+    // nothing, and ps exits 0 whether or not it listed anything, so the
+    // exit status of the pipeline is the only thing that distinguishes
+    // a working /proc from an empty one.
+    if (run("ps | grep init", p_ps1) != 0) {
+        printf("[bbspike] FAILED: ps did not list init -- /proc is empty "
+               "or unreadable\n");
+        return 1;
+    }
 
     int ek = fork();
     if (ek == 0) {

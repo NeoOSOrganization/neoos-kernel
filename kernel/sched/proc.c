@@ -401,6 +401,17 @@ void spawn_args_free(struct spawn_args *args) {
     args->envc = 0;
 }
 
+// Basename of `path`, truncated to Linux's TASK_COMM_LEN - 1.
+static void set_comm(struct process *p, const char *path) {
+    const char *base = path;
+    for (const char *c = path; *c; c++) {
+        if (*c == '/') { base = c + 1; }
+    }
+    int i = 0;
+    while (base[i] && i < (int)sizeof(p->comm) - 1) { p->comm[i] = base[i]; i++; }
+    p->comm[i] = '\0';
+}
+
 struct process *spawn(const char *path) { return spawn_argv(path, 0); }
 
 struct process *spawn_argv(const char *path, const struct spawn_args *args) {
@@ -424,6 +435,7 @@ struct process *spawn_argv(const char *path, const struct spawn_args *args) {
         spawn_args_free(&local); return 0;
     }
     p->pml4_phys   = pml4_phys;
+    set_comm(p, path);
     p->elf          = info;   // the auxv and every thread's TLS come from here
     // A spawn from a running process inherits its cwd, as a fork does.
     // The FIRST process has no caller and keeps proc_alloc's "/".
@@ -609,6 +621,7 @@ int exec_task(const char *path, struct syscall_frame *frame,
     }
 
     p->elf = info;
+    set_comm(p, path);
 
     // The caller's argument vector, already copied into kernel memory by
     // the syscall layer -- it HAD to be: the user pages it lived in were
@@ -814,6 +827,10 @@ struct thread *fork_task(struct syscall_frame *frame) {
 
     child_proc->pml4_phys   = child_pml4_phys;
     child_proc->parent_pid  = parent->pid;
+    // fork does not change the program, so the child keeps the name.
+    for (unsigned i = 0; i < sizeof(child_proc->comm); i++) {
+        child_proc->comm[i] = parent->comm[i];
+    }
     child_proc->pgid        = parent->pgid;
     child_proc->sid         = parent->sid;
     for (int i = 0; i < THREAD_SLOT_WORDS; i++) {

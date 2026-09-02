@@ -210,6 +210,9 @@ void kmain(void *multiboot_info) {
     vfs_mount_fs("hd0", "/",    "fat");
     vfs_mount_fs(0,     "/dev", "devfs");
     vfs_mount_fs(0,     "/tmp", "ramfs");
+    // BB5: synthetic, read-only, and mounted unconditionally -- `ps`
+    // looks for /proc by name and says so when it is missing.
+    vfs_mount_fs(0,     "/proc", "procfs");
     vfs_mount_fs("hd1", "/mnt", "fat");
     vfs_selftest();
     devfs_selftest();

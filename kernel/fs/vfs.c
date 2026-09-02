@@ -4,6 +4,7 @@
 #include "fs/ramfs.h"
 #include "fs/fatfs.h"
 #include "fs/devfs.h"
+#include "fs/procfs.h"
 #include "errno.h"
 #include "drivers/char/serial.h"
 #include "sched/proc.h"
@@ -240,6 +241,8 @@ int vfs_mount_fs(const char *source, const char *target, const char *fstype) {
         m->ops = &fatfs_ops;
     } else if (str_eq(fstype, "devfs")) {
         m->ops = &devfs_ops;
+    } else if (str_eq(fstype, "procfs") || str_eq(fstype, "proc")) {
+        m->ops = &procfs_ops;
     } else {
         return -ENODEV;
     }

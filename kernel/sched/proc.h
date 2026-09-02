@@ -104,6 +104,11 @@ struct process {
     // of the process because every thread created later needs the TLS
     // template again, not just the first one.
     struct elf_info elf;
+    // The program's name, as /proc/<pid>/stat's `comm` field and `ps`
+    // report it: the basename of the path it was spawned or exec'd
+    // from, truncated to Linux's 15 characters plus a NUL. Set at spawn
+    // and again at exec, because exec is a new program.
+    char comm[16];
     struct vma *vmas;               // sorted by start, non-overlapping
     uint64_t    mmap_next;          // bump hint for unhinted mmap
     // The program break. Never grows -- sys_brk reports it unchanged,

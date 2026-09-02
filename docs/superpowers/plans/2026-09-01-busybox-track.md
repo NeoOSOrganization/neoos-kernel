@@ -85,7 +85,7 @@ BB1.  Build-and-run spike: /bin/busybox to first -ENOSYS   <- DONE
 BB2.  The measured syscall set (was BB1 + BB4)             <- DONE
 BB3.  execve(path, argv, envp)                            <- DONE
 BB4.  Job control                                     (was BB2)  <- DONE
-BB5.  Minimal /proc                                   (was BB3)
+BB5.  Minimal /proc                                   (was BB3)  <- DONE
 BB6.  Interactive shell bring-up                          <- DONE
 ```
 
@@ -402,3 +402,26 @@ rather than by predicting:
 `SIGTTIN`/`SIGTTOU` are still not *generated* by background reads and
 writes; nothing exercised so far needs that, and it is the next thing to
 add if something does.
+
+## BB5 result — **DONE** (2026-09-02)
+
+`ps` was the only thing that ever asked for `/proc`, and it asked by
+name — `ps: can't open '/proc': No such file or directory` — which is
+why this was measured rather than assumed before being built.
+
+`kernel/fs/procfs.c` is a synthetic read-only filesystem mounted at
+`/proc` at boot, providing `/proc/<pid>/stat` and `/proc/<pid>/cmdline`
+and nothing else. `busybox ps` now lists real processes by pid and name;
+`bbspike` asserts it through `busybox ps | grep -q INIT.ELF`, because
+`ps` exits 0 whether or not it found anything and only the pipeline's
+status distinguishes a working `/proc` from an empty one.
+
+A `comm` field was added to `struct process` for it — the basename of
+the spawned or exec'd path, Linux's 16 bytes — set at spawn, reset at
+exec, inherited across fork.
+
+One thing had to be learned by panicking: the first version rendered
+each file in `read_inode` to report a real `st_size`, and `read_inode`
+runs with the VFS's locks held while the process-table walk takes a
+lock ranked below them. The rank checker caught it on the first boot.
+Reporting 0 is both what Linux does and what the lock order allows.
