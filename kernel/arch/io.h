@@ -23,6 +23,19 @@ static inline uint16_t inw(uint16_t port) {
     return value;
 }
 
+// 32-bit port access, needed by PCI configuration space: the address
+// and data registers at 0xCF8/0xCFC are dword-wide and must be accessed
+// as dwords -- a byte or word access to 0xCFC reads a different thing.
+static inline void outl(uint16_t port, uint32_t value) {
+    __asm__ volatile ("outl %0, %1" :: "a"(value), "Nd"(port));
+}
+
+static inline uint32_t inl(uint16_t port) {
+    uint32_t value;
+    __asm__ volatile ("inl %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+
 static inline void io_wait(void) {
     __asm__ volatile ("outb %%al, $0x80" :: "a"((uint8_t)0));
 }

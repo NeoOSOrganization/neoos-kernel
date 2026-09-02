@@ -16,6 +16,7 @@
 #include "drivers/irq/pic.h"
 #include "drivers/irq/lapic.h"
 #include "drivers/irq/ioapic.h"
+#include "drivers/pci/pci.h"
 #include "drivers/char/timer.h"
 #include "drivers/char/rtc.h"
 #include "tty/tty.h"
@@ -192,6 +193,12 @@ void kmain(void *multiboot_info) {
     // heap_lock made "uninitialised" mean rank 0 with no name, an
     // instant inversion under the vma lock.
     vma_selftest();
+
+    // D0. Before any driver that needs to find its device, and after
+    // heap_init only because the log goes out over an initialised
+    // serial port -- enumeration itself allocates nothing.
+    pci_init();
+    pci_selftest();
 
     ata_init();   // before the first ata_* call
     struct ata_identify_info ata_info;

@@ -50,6 +50,7 @@ ISO_DIR := iso
 # picked up silently.
 KERNEL_DIRS := kernel kernel/arch kernel/drivers/video kernel/drivers/input \
 	kernel/drivers/block kernel/drivers/char kernel/drivers/irq kernel/drivers/acpi \
+	kernel/drivers/pci \
 	kernel/tty kernel/ipc kernel/smp \
 	kernel/syscall kernel/mm kernel/fs kernel/sched kernel/sync kernel/net kernel/lib
 C_SOURCES := $(foreach d,$(KERNEL_DIRS),$(wildcard $(d)/*.c))
@@ -896,6 +897,7 @@ BOOT_MARKER  ?= NeoOS: interrupts enabled, starting scheduler
 # `make test` still said PASS. grep -F because "[vfstest]" is a character
 # class to a regex, and would never match the literal brackets.
 REQUIRED_MARKERS := \
+	"[pci] ALL PASSED" \
 	"[smp] local timer selftest passed" \
 	"[smp] steal selftest passed" \
 	"[vfstest] ALL PASSED" \
