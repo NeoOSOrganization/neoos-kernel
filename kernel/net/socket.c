@@ -226,13 +226,42 @@ void net_udp_deliver(uint32_t src_n, uint16_t sport_n,
 
 // --------------------------------------------------------------- syscalls
 
-static struct socket *sock_of(int fd, struct file_descriptor **out_f) {
+// Returns the socket behind `fd` with a REFERENCE HELD, or 0. Every
+// caller must sock_put() it on every exit path.
+//
+// The reference is taken under the fd bucket lock, which is the only
+// window in which the slot -- and therefore the object behind it -- is
+// guaranteed to still exist. The previous version returned f->priv with
+// nothing held and let recv_one take the reference afterwards, which is
+// too late: fd_table_close clears the slot under that lock and then runs
+// file_close OUTSIDE it, so a concurrent close could free the socket
+// between the lookup and the increment. The increment then landed in
+// freed memory, and recv_one went on to waitq_sleep on a lock inside it.
+//
+// That is what the gauntlet's long-standing
+//   [lock] PANIC: schedule() with a spinlock held ... holding=socktable
+// actually was. Nothing holds socktable there; schedule() consults
+// per-CPU held-lock bookkeeping that a freed-and-reused lock had
+// corrupted, and "socktable" is simply what the garbage said.
+//
+// Only an atomic increment happens under the bucket lock -- nothing that
+// sleeps, and no second lock -- because fd_table_close deliberately runs
+// the closing side outside it.
+static struct socket *sock_ref_of(int fd, int *nonblock) {
     struct process *p = current_proc();
     if (!p) { return 0; }
-    struct file_descriptor *f = fd_table_get(p->fd_table, fd);
-    if (!f || f->ops != socket_file_ops()) { return 0; }
-    if (out_f) { *out_f = f; }
-    return (struct socket *)f->priv;
+    uint64_t fl = 0;
+    struct file_descriptor *f = fd_table_lock_slot(p->fd_table, fd, &fl);
+    if (!f) { return 0; }
+
+    struct socket *s = 0;
+    if (f->ops == socket_file_ops() && f->priv) {
+        s = (struct socket *)f->priv;
+        __atomic_fetch_add(&s->refs, 1, __ATOMIC_ACQ_REL);
+        if (nonblock) { *nonblock = f->nonblock; }
+    }
+    fd_table_unlock_slot(p->fd_table, fd, fl);
+    return s;
 }
 
 // Validates a sockaddr coming from userland and extracts the pair.
@@ -298,27 +327,36 @@ int64_t socket_create(int domain, int type, int protocol) {
 }
 
 int64_t socket_bind(int fd, const struct k_sockaddr *addr, uint32_t len) {
-    struct socket *s = sock_of(fd, 0);
+    struct socket *s = sock_ref_of(fd, 0);
     if (!s) { return -EBADF; }
 
     uint32_t ip_n; uint16_t port_n;
     int rc = addr_in(addr, len, &ip_n, &port_n);
-    if (rc != 0) { return rc; }
+    if (rc != 0) { sock_put(s); return rc; }
 
     // Only an address this host owns can be bound. INADDR_ANY means
     // "whatever the packet came in on", which with one interface is
     // still just loopback, but is kept distinct because the demux rule
     // above depends on the difference.
-    if (ip_n != 0 && !net_route(ip_n)) { return -EADDRNOTAVAIL; }
+    if (ip_n != 0 && !net_route(ip_n)) { sock_put(s); return -EADDRNOTAVAIL; }
 
     uint64_t tf = spin_lock_irqsave(&sock_table_lock);
-    if (s->bound) { spin_unlock_irqrestore(&sock_table_lock, tf); return -EINVAL; }
+    if (s->bound) {
+        spin_unlock_irqrestore(&sock_table_lock, tf);
+        sock_put(s);
+        return -EINVAL;
+    }
 
     if (port_n == 0) {
         port_n = alloc_ephemeral(ip_n);
-        if (!port_n) { spin_unlock_irqrestore(&sock_table_lock, tf); return -EADDRINUSE; }
+        if (!port_n) {
+            spin_unlock_irqrestore(&sock_table_lock, tf);
+            sock_put(s);
+            return -EADDRINUSE;
+        }
     } else if (port_in_use(ip_n, port_n)) {
         spin_unlock_irqrestore(&sock_table_lock, tf);
+        sock_put(s);
         return -EADDRINUSE;
     }
 
@@ -327,17 +365,18 @@ int64_t socket_bind(int fd, const struct k_sockaddr *addr, uint32_t len) {
     s->bound        = 1;
     table_insert(s);
     spin_unlock_irqrestore(&sock_table_lock, tf);
+    sock_put(s);
     return 0;
 }
 
 int64_t socket_connect(int fd, const struct k_sockaddr *addr, uint32_t len) {
-    struct socket *s = sock_of(fd, 0);
+    struct socket *s = sock_ref_of(fd, 0);
     if (!s) { return -EBADF; }
 
     uint32_t ip_n; uint16_t port_n;
     int rc = addr_in(addr, len, &ip_n, &port_n);
-    if (rc != 0) { return rc; }
-    if (!net_route(ip_n)) { return -ENETUNREACH; }
+    if (rc != 0) { sock_put(s); return rc; }
+    if (!net_route(ip_n)) { sock_put(s); return -ENETUNREACH; }
 
     // A connected datagram socket needs a source port, so that replies
     // have somewhere to go. Linux binds one implicitly here and so does
@@ -345,7 +384,11 @@ int64_t socket_connect(int fd, const struct k_sockaddr *addr, uint32_t len) {
     if (!s->bound) {
         uint64_t tf = spin_lock_irqsave(&sock_table_lock);
         uint16_t p = alloc_ephemeral(0);
-        if (!p) { spin_unlock_irqrestore(&sock_table_lock, tf); return -EADDRINUSE; }
+        if (!p) {
+            spin_unlock_irqrestore(&sock_table_lock, tf);
+            sock_put(s);
+            return -EADDRINUSE;
+        }
         s->local_ip_n   = 0;
         s->local_port_n = p;
         s->bound        = 1;
@@ -358,31 +401,34 @@ int64_t socket_connect(int fd, const struct k_sockaddr *addr, uint32_t len) {
     s->peer_port_n = port_n;
     s->connected   = 1;
     spin_unlock_irqrestore(&s->lock, sf);
+    sock_put(s);
     return 0;
 }
 
 int64_t socket_getsockname(int fd, struct k_sockaddr *addr, uint32_t *len) {
-    struct socket *s = sock_of(fd, 0);
+    struct socket *s = sock_ref_of(fd, 0);
     if (!s) { return -EBADF; }
-    return addr_out(addr, len, s->local_ip_n, s->local_port_n);
+    int64_t rc = addr_out(addr, len, s->local_ip_n, s->local_port_n);
+    sock_put(s);
+    return rc;
 }
 
 int64_t socket_sendto(int fd, const void *buf, uint64_t len, int flags,
                       const struct k_sockaddr *dest, uint32_t dest_len) {
     (void)flags;   // MSG_* are all unimplemented; see docs/stdlib.md
-    struct socket *s = sock_of(fd, 0);
+    struct socket *s = sock_ref_of(fd, 0);
     if (!s) { return -EBADF; }
     // send only READS buf -- a string literal in .rodata is a valid
     // source (it stopped being writable when the ELF loader started
     // honouring p_flags).
-    if (!user_range_readable((uint64_t)(uintptr_t)buf, len)) { return -EFAULT; }
+    if (!user_range_readable((uint64_t)(uintptr_t)buf, len)) { sock_put(s); return -EFAULT; }
 
     uint32_t dst_ip_n; uint16_t dst_port_n;
     if (dest) {
         int rc = addr_in(dest, dest_len, &dst_ip_n, &dst_port_n);
-        if (rc != 0) { return rc; }
+        if (rc != 0) { sock_put(s); return rc; }
     } else {
-        if (!s->connected) { return -EDESTADDRREQ; }
+        if (!s->connected) { sock_put(s); return -EDESTADDRREQ; }
         dst_ip_n   = s->peer_ip_n;
         dst_port_n = s->peer_port_n;
     }
@@ -393,7 +439,11 @@ int64_t socket_sendto(int fd, const void *buf, uint64_t len, int flags,
         uint64_t tf = spin_lock_irqsave(&sock_table_lock);
         if (!s->bound) {
             uint16_t p = alloc_ephemeral(0);
-            if (!p) { spin_unlock_irqrestore(&sock_table_lock, tf); return -EADDRINUSE; }
+            if (!p) {
+                spin_unlock_irqrestore(&sock_table_lock, tf);
+                sock_put(s);
+                return -EADDRINUSE;
+            }
             s->local_ip_n   = 0;
             s->local_port_n = p;
             s->bound        = 1;
@@ -410,6 +460,7 @@ int64_t socket_sendto(int fd, const void *buf, uint64_t len, int flags,
     int rc = net_udp_output(src_ip_n, s->local_port_n,
                             dst_ip_n ? dst_ip_n : IP_LOOPBACK_N, dst_port_n,
                             (const uint8_t *)buf, (uint32_t)len);
+    sock_put(s);
     if (rc != 0) { return rc; }
     return (int64_t)len;
 }
@@ -433,13 +484,11 @@ static int64_t recv_one(struct socket *s, int nonblock, void *buf, uint64_t len,
     while (!s->rx_head) {
         if (nonblock) {
             spin_unlock_irqrestore(&s->lock, sf);
-            sock_put(s);
             return -EAGAIN;
         }
         int rc = waitq_sleep(&s->readers, &s->lock);
         if (rc == -EINTR) {
             spin_unlock_irqrestore(&s->lock, sf);
-            sock_put(s);
             return -EINTR;
         }
     }
@@ -460,7 +509,6 @@ static int64_t recv_one(struct socket *s, int nonblock, void *buf, uint64_t len,
 
     int rc = addr_out(src, src_len, d->src_ip_n, d->src_port_n);
     kfree(d);
-    sock_put(s);
     if (rc != 0) { return rc; }
     return (int64_t)give;
 }
@@ -468,11 +516,16 @@ static int64_t recv_one(struct socket *s, int nonblock, void *buf, uint64_t len,
 int64_t socket_recvfrom(int fd, void *buf, uint64_t len, int flags,
                         struct k_sockaddr *src, uint32_t *src_len) {
     (void)flags;   // MSG_* are all unimplemented; see docs/stdlib.md
-    struct file_descriptor *f = 0;
-    struct socket *s = sock_of(fd, &f);
+    int nonblock = 0;
+    struct socket *s = sock_ref_of(fd, &nonblock);
     if (!s) { return -EBADF; }
-    if (!user_range_writable((uint64_t)(uintptr_t)buf, len)) { return -EFAULT; }
-    return recv_one(s, f->nonblock, buf, len, src, src_len);
+    if (!user_range_writable((uint64_t)(uintptr_t)buf, len)) {
+        sock_put(s);
+        return -EFAULT;
+    }
+    int64_t rc = recv_one(s, nonblock, buf, len, src, src_len);
+    sock_put(s);
+    return rc;
 }
 
 // -------------------------------------------------------------- file_ops

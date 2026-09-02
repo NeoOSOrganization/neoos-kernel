@@ -72,6 +72,26 @@ void fd_table_init(struct fd_table *table) {
 // ever installed, never swapped or freed while the process runs, so a
 // racing allocation can make this miss a brand-new fd but can never
 // make it read freed memory.
+struct file_descriptor *fd_table_lock_slot(struct fd_table *table, int fd, uint64_t *flags) {
+    if (!table || fd < 0 || fd >= FD_TABLE_MAX) { return 0; }
+    struct fd_bucket *b = &table->buckets[fd_bucket(fd)];
+    if (!b->slots) { return 0; }
+
+    uint64_t f = spin_lock_irqsave(&b->lock);
+    struct file_descriptor *fdp = &b->slots[fd_slot(fd)];
+    if (!fdp->in_use) {
+        spin_unlock_irqrestore(&b->lock, f);
+        return 0;
+    }
+    *flags = f;
+    return fdp;
+}
+
+void fd_table_unlock_slot(struct fd_table *table, int fd, uint64_t flags) {
+    if (!table || fd < 0 || fd >= FD_TABLE_MAX) { return; }
+    spin_unlock_irqrestore(&table->buckets[fd_bucket(fd)].lock, flags);
+}
+
 struct file_descriptor *fd_table_get(struct fd_table *table, int fd) {
     if (!table || fd < 0 || fd >= FD_TABLE_MAX) {
         return 0;

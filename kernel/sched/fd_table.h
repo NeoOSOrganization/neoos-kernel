@@ -19,8 +19,18 @@
  * Lookup: bucket = fd / 512, slot = fd % 512. O(1).
  *
  * Locking: buckets[i].lock protects buckets[i], rank LOCK_RANK_FDTABLE.
- * Reads (fd_table_get) are lockless -- a slot array is installed once
- * and never swapped while the process lives.
+ * Reads (fd_table_get) are lockless in the sense that the slot ARRAY is
+ * installed once and never swapped while the process lives -- but the
+ * slot CONTENTS change under the bucket lock, and fd_table_close frees
+ * the object behind f->priv once the slot is cleared. So a bare
+ * fd_table_get pointer is safe to dereference only for as long as
+ * nothing can close that fd.
+ *
+ * A caller that needs the OBJECT to stay alive across a blocking
+ * operation must take its reference while the slot is still valid, with
+ * fd_table_lock_slot/unlock_slot. Taking it afterwards is too late: the
+ * object may already be freed, and the reference count then lives in
+ * freed memory.
  */
 
 #define FD_TABLE_BUCKETS       32     // Level 1: bucket count
@@ -56,6 +66,17 @@ void fd_table_init(struct fd_table *table);
 
 // Get a file descriptor entry (returns NULL if out of range or not in use)
 struct file_descriptor *fd_table_get(struct fd_table *table, int fd);
+
+// Locks the bucket owning `fd` and returns its slot, or 0 (with nothing
+// locked) if the fd is not open. The caller MUST pair a non-NULL return
+// with fd_table_unlock_slot.
+//
+// Exists so a caller can take a reference on the object behind an fd
+// while the slot is still guaranteed valid. Hold it only long enough to
+// do that: fd_table_close runs file_close OUTSIDE this lock precisely
+// because closing can sleep, so nothing that sleeps may run under it.
+struct file_descriptor *fd_table_lock_slot(struct fd_table *table, int fd, uint64_t *flags);
+void fd_table_unlock_slot(struct fd_table *table, int fd, uint64_t flags);
 
 // Reserve the lowest available fd >= 3 (stdin/stdout/stderr excluded).
 // The slot is marked in-use with a NULL vnode; the caller fills it in,
