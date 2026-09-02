@@ -53,8 +53,14 @@ re-litigated mid-implementation.
 - **Test binaries live in `/usr/tests`, not `/bin`.** `ls /bin` showing
   fifty test programs beside the two real ones is the mess this
   milestone exists to remove.
-- **Passwords are salted SHA-256**, documented plainly as a hash and
-  **not** a password-hardening KDF. Plaintext was the alternative.
+- **Passwords are `$6$` SHA-512-crypt, via musl's own `crypt()`.**
+  Superseded during implementation: the plan was a hand-written salted
+  SHA-256 carrying an explicit caveat that a bare hash is not a
+  password-hardening KDF. That caveat turned out to be avoidable --
+  musl already ships SHA-256-crypt, SHA-512-crypt, MD5 and bcrypt
+  back-ends, all pure computation with no files and no randomness, so
+  NeoOS gets a real rounds-based KDF with nothing ported and nothing
+  hand-rolled. Checking what is already in the tree beat writing crypto.
 
 ---
 
@@ -210,7 +216,7 @@ lookup, check a bad command reports and does not kill the shell.
 **`/etc/passwd`**, one record per line:
 
 ```
-name:uid:gid:home:shell:salt:sha256hex
+name:uid:gid:home:shell:hash
 ```
 
 Linux's field order for the first five, with the hash kept in the same
@@ -219,11 +225,9 @@ that a second file would enforce, and pretending otherwise would be
 security theatre. Ships with `god` (uid 0, `/root`) and one ordinary
 user.
 
-**SHA-256** goes into `lib/` as `sha256.c`. Well-defined, about a
-hundred lines, no dependencies. The stored value is
-`sha256(salt || password)`, and `docs/stdlib.md` will say plainly that
-this is a **hash, not a KDF**: it does not resist an offline
-brute-force the way bcrypt or Argon2 does, and it is not trying to.
+**Hashing is musl's `crypt()`** with `$6$` (SHA-512-crypt), which is why
+`login` links against musl rather than libneoos. No SHA-256
+implementation was written; see the decision above.
 
 **`login`** runs as god because `init` spawns it. It:
 1. prompts for a user name, then a password with echo disabled
@@ -275,3 +279,33 @@ proves the privilege drop actually happened rather than being skipped.
 - **`login` handles a password.** If the echo-disable fails, the password
   is echoed to the screen. `login` must verify the termios change took
   effect rather than assuming it, and refuse to prompt if it did not.
+
+---
+
+## Results — N1 to N5 (2026-09-02)
+
+All five landed, each gated on a green suite and gauntlet.
+
+**N1/N2** together, as planned: `.nex` with `NOX` magic accepted
+alongside ELF and recorded on the process; lowercase, case-sensitive
+paths; a root holding directories only. Two things had to be measured
+rather than assumed — VFAT stores a lowercase 8.3 name as uppercase plus
+two flag bits with *no* long-name entry, and the cutover turned
+`/dev/tty` from a failing open into a succeeding one that returned the
+console instead of the controlling terminal.
+
+**N3** credentials, `god` = uid 0, signal permission, `reboot` moved
+from PID 1 to uid 0. `permtest` is built around the refusals.
+
+**N4** `nsh`, plus `/etc/nshrc` and a `cat`/`clear` pair, after the logo
+moved out of the terminal and into shell output.
+
+**N5** login and sessions, with `$6$` hashing from musl.
+
+**Found along the way, none of them predicted by this spec:** the pty
+silently discarded output that did not fit its queue; `spawn` gave every
+process fresh console fds instead of inheriting the caller's, so nothing
+a shell launched was connected to the terminal; the terminal never
+answered `ESC[6n`; and the cursor was never erased from the cell it
+left. Every one of them was found by running a real program rather than
+by reading code.
