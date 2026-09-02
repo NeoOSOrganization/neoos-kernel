@@ -494,13 +494,32 @@ struct process *spawn_argv(const char *path, const struct spawn_args *args) {
     t->kernel_stack_top  = kstack_top;
     t->kernel_stack_phys = kstack_phys;
 
-    // Standard streams as real /dev/console vnodes. stdin is opened
-    // read-only and always returns EOF; stdout and stderr both write
-    // to the console. The table belongs to the process, so every
-    // thread of it shares these.
-    vfs_open_into("/dev/console", p, 0, 0);
-    vfs_open_into("/dev/console", p, 1, 1);
-    vfs_open_into("/dev/console", p, 2, 1);
+    // The child INHERITS the spawner's open files, as posix_spawn does
+    // and as fork does. Only a process with no spawner -- init, the
+    // first one -- gets fresh console streams, because there is nothing
+    // to inherit from.
+    //
+    // Spawn used to open /dev/console on 0/1/2 unconditionally, and the
+    // consequence was invisible until a shell existed to notice it:
+    // every program a shell launched wrote to the CONSOLE instead of the
+    // shell's terminal, and read its input from there too. Running
+    // `busybox sh` from nsh printed BusyBox's banner over the kernel's
+    // own screen output, left the new shell reading a terminal nobody
+    // was typing at, and looked for all the world like a hang. It was
+    // visible in the serial log the whole time, which is where that
+    // banner was actually going.
+    if (spawner) {
+        if (!fd_table_dup(p->fd_table, spawner->fd_table)) {
+            serial_write_string("[process] spawn FAILED: out of memory for the fd table\n");
+            spawn_args_free(&local);
+            free_address_space(pml4_phys);
+            return 0;
+        }
+    } else {
+        vfs_open_into("/dev/console", p, 0, 0);
+        vfs_open_into("/dev/console", p, 1, 1);
+        vfs_open_into("/dev/console", p, 2, 1);
+    }
 
     enqueue_ready(t);
     spawn_args_free(&local);

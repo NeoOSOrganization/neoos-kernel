@@ -43,7 +43,10 @@ alongside the library code that exposes it.
   slice to the scheduler.
 - `int spawn(const char *path)` — builds a fresh process directly from
   the ELF executable at `path` (NUL-terminated) and returns its PID,
-  or `-1` on failure. NeoOS-specific: not `fork`+`exec`.
+  or `-1` on failure. NeoOS-specific: not `fork`+`exec`. The child
+  **inherits the caller's open file descriptors**, as `posix_spawn` and
+  `fork` do; only the first process, which has no spawner, is given
+  fresh `/dev/console` streams.
 - `int wait(int pid)` — blocks until the process with the given PID
   exits, reaps it, and returns its exit code. NeoOS-specific: takes
   one specific PID, not "any child".
