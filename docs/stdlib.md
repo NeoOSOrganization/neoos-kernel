@@ -1159,6 +1159,13 @@ powers off once nothing is left to reap. A ported daemon that expects a
 shutdown signal will not get one. If PID 1 itself exits, the kernel
 panics (there is nothing to reap the machine or power it off).
 
+`poll()` accepts up to `FD_TABLE_MAX` (16,384) descriptors — the size
+of the process's descriptor table, since polling more than it can hold
+open is meaningless. It previously refused anything over **16** with
+`-EINVAL`; `select()` accepted them and silently dropped every ready
+descriptor past the sixteenth. Both are fixed, and both are covered by
+`polltrunc`.
+
 File descriptors are allocated **lowest-available from 0**, as POSIX
 requires — including 0, 1 and 2 once the process has closed them. This
 is what makes `close(0); open(file)` (which is what shell input

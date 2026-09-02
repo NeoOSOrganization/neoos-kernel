@@ -1,5 +1,9 @@
 // polltrunc.c -- select(2) must report every ready fd, not the first 16.
 //
+// ...and poll(2) must ACCEPT more than 16, which is the other half of
+// the same defect (CS4): where select silently truncated, poll refused
+// outright with -EINVAL.
+//
 // CS2.2: sys_poll.c collected select()'s interesting descriptors into a
 // fixed 16-entry array while accepting nfds up to FD_SETSIZE (1024), so
 // every ready fd past the sixteenth it encountered was silently dropped
@@ -51,6 +55,27 @@ int main(void) {
         }
     }
     printf("[polltrunc] %d simultaneously-ready fds all reported\n", NPIPES);
+
+    // The same descriptors through poll(), which had the other half of
+    // the defect: select() truncated at sixteen, poll() REFUSED at
+    // sixteen with -EINVAL. Twenty is past it either way (CS4).
+    struct pollfd pf[NPIPES];
+    for (int i = 0; i < NPIPES; i++) {
+        pf[i].fd = rfd[i]; pf[i].events = POLLIN; pf[i].revents = 0;
+    }
+    int pn = poll(pf, NPIPES, 0);
+    if (pn != NPIPES) {
+        printf("[polltrunc] FAILED: poll(%d fds) returned %d "
+               "(-22 is the old EINVAL ceiling)\n", NPIPES, pn);
+        return 1;
+    }
+    for (int i = 0; i < NPIPES; i++) {
+        if (!(pf[i].revents & POLLIN)) {
+            printf("[polltrunc] FAILED: poll left fd %d unreported\n", rfd[i]);
+            return 1;
+        }
+    }
+    printf("[polltrunc] poll accepted %d fds and reported them all\n", NPIPES);
 
     printf("[polltrunc] ALL PASSED\n");
     return 0;

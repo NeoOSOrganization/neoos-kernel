@@ -17,7 +17,10 @@
 #include "mm/heap.h"
 #include "errno.h"
 
-#define POLL_MAX_FDS 16   // nfds ceiling; the M1a terminal polls two
+// Stack budget for a small poll. Not a ceiling: past this the array is
+// allocated. The ceiling is FD_TABLE_MAX, since polling more
+// descriptors than the process can hold open is meaningless.
+#define POLL_SMALL_FDS 16
 
 struct pollfd { int fd; short events; short revents; };
 
@@ -76,11 +79,25 @@ int64_t sys_poll(struct syscall_args *a) {
     unsigned n    = (unsigned)a->a2;
     int      tmo  = (int)a->a3;
 
-    if (n > POLL_MAX_FDS) { return -EINVAL; }
+    // The ceiling is the descriptor table's size, not a fixed 16.
+    // sixteen was the M1a terminal's own need, and any program polling
+    // more than that got -EINVAL -- a shell with a few jobs, or anything
+    // built on a poll loop, is straight past it. select() was widened in
+    // CS2.2; this is the same fix on the other call.
+    if (n > FD_TABLE_MAX) { return -EINVAL; }
     if (n == 0) { return 0; }
     if (!user_range_writable(uptr, n * sizeof(struct pollfd))) { return -EFAULT; }
 
-    struct pollfd pfd[POLL_MAX_FDS];
+    // Small polls -- which is nearly all of them -- stay on the stack.
+    // Only a large set pays for an allocation, and 16384 pollfds would
+    // be 128 KiB, far past what a 16 KiB kernel stack can hold.
+    struct pollfd small[POLL_SMALL_FDS];
+    struct pollfd *pfd = small;
+    if (n > POLL_SMALL_FDS) {
+        pfd = kmalloc((uint64_t)n * sizeof(struct pollfd));
+        if (!pfd) { return -ENOMEM; }
+    }
+
     for (unsigned i = 0; i < n; i++) {
         struct pollfd *up = (struct pollfd *)(uintptr_t)(uptr + i * sizeof(struct pollfd));
         pfd[i].fd     = up->fd;
@@ -95,6 +112,7 @@ int64_t sys_poll(struct syscall_args *a) {
             up->revents = pfd[i].revents;
         }
     }
+    if (pfd != small) { kfree(pfd); }
     return r;
 }
 
@@ -116,8 +134,8 @@ int64_t sys_select(struct syscall_args *a) {
                for (int i = 0; i < FD_WORDS; i++) { ex[i] = ((uint64_t *)(uintptr_t)uex)[i]; } }
 
     // Collect the set bits into a pollfd array sized to what the caller
-    // actually described. This used to be a fixed POLL_MAX_FDS array
-    // with `n < POLL_MAX_FDS` in the loop condition, which silently
+    // actually described. This used to be a fixed 16-entry array
+    // with `n < 16` in the loop condition, which silently
     // dropped every interesting fd past the sixteenth -- no error, no
     // truncation flag, just a wrong answer (CS2.2). nfds is already
     // bounded by FD_SETSIZE above, so the allocation is bounded too.
