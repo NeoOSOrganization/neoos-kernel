@@ -135,7 +135,15 @@ MUSL_CFLAGS := -static -nostdlib -nostdinc -ffreestanding \
 # Installs the shim, then builds musl. Both steps are idempotent, and
 # the shim sources live in third_party/shim so the submodule itself
 # stays a pristine checkout apart from the two files copied in.
-$(MUSL_LIB):
+# Depends on the SHIM SOURCES, not just on its own absence. Without
+# that, editing the shim left the built libc.a alone: the execve mapping
+# added for BusyBox sat in third_party/shim for hours while every
+# musl-linked program kept calling the old library, and BusyBox's shell
+# reported "Function not implemented" for every external command. The
+# mapping was correct the whole time; the build simply never picked it
+# up. `make musl` is idempotent, so rebuilding on a shim edit is cheap.
+$(MUSL_LIB): $(wildcard third_party/shim/*.c third_party/shim/*.h \
+                        third_party/shim/*.s third_party/shim/apply.sh)
 	third_party/shim/apply.sh
 	cd $(MUSL_DIR) && ./configure --target=x86_64 --disable-shared \
 		CC=$(CC) AR=$(HOME)/opt/cross-x86_64-elf/bin/x86_64-elf-ar \
@@ -145,6 +153,28 @@ $(MUSL_LIB):
 
 .PHONY: musl
 musl: $(MUSL_LIB)
+
+# ---- busybox ---------------------------------------------------------
+#
+# BB1. A pristine upstream submodule; everything NeoOS-specific lives in
+# third_party/busybox-config, mirroring third_party/shim. apply.sh runs
+# allnoconfig + a fragment rather than checking in a whole .config, so a
+# version bump takes upstream's default for options the fragment does
+# not name.
+#
+# Not built by `all`: it is a minute of compile that the kernel's own
+# test cycle does not need. `make busybox` builds it, and the disk image
+# picks it up if it is there.
+BUSYBOX_DIR := third_party/busybox
+BUSYBOX_BIN := $(BUSYBOX_DIR)/busybox
+
+$(BUSYBOX_BIN): $(MUSL_LIB) third_party/busybox-config/neoos.fragment \
+                third_party/busybox-config/apply.sh $(USERLAND_DIR)/user.ld
+	third_party/busybox-config/apply.sh
+	$(MAKE) -C $(BUSYBOX_DIR) -j$(shell nproc)
+
+.PHONY: busybox
+busybox: $(BUSYBOX_BIN)
 
 $(USERLAND_BUILD)/MUSLHELO.ELF: $(USERLAND_DIR)/musl/hello.c $(USERLAND_DIR)/user.ld $(MUSL_LIB)
 	mkdir -p $(USERLAND_BUILD)
@@ -306,6 +336,10 @@ $(USERLAND_BUILD)/POLLTEST.ELF: $(USERLAND_DIR)/polltest.c $(USERLAND_DIR)/user.
 	mkdir -p $(USERLAND_BUILD)
 	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/polltest.c -L$(LIB_BUILD) -lneoos
 
+$(USERLAND_BUILD)/BBSPIKE.ELF: $(USERLAND_DIR)/bbspike.c $(USERLAND_DIR)/user.ld $(LIB_BUILD)/crt0.o $(LIB_BUILD)/libneoos.a
+	@mkdir -p $(USERLAND_BUILD)
+	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/bbspike.c -L$(LIB_BUILD) -lneoos
+
 $(USERLAND_BUILD)/THRDMANY.ELF: $(USERLAND_DIR)/threadmany.c $(USERLAND_DIR)/user.ld $(LIB_BUILD)/crt0.o $(LIB_BUILD)/libneoos.a
 	@mkdir -p $(USERLAND_BUILD)
 	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/threadmany.c -L$(LIB_BUILD) -lneoos
@@ -370,7 +404,7 @@ $(USERLAND_BUILD)/MPITEST.ELF: $(USERLAND_DIR)/mpitest.c $(USERLAND_DIR)/user.ld
 	mkdir -p $(USERLAND_BUILD)
 	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/mpitest.c -L$(LIB_BUILD) -lneoos
 
-$(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_BUILD)/PARENT.ELF $(USERLAND_BUILD)/LOOPER.ELF $(USERLAND_BUILD)/YIELDER.ELF $(USERLAND_BUILD)/FAULTER.ELF $(USERLAND_BUILD)/FILEIO.ELF $(USERLAND_BUILD)/SSE_TEST.ELF $(USERLAND_BUILD)/FORKTEST.ELF $(USERLAND_BUILD)/EXECTARG.ELF $(USERLAND_BUILD)/MOUNTTST.ELF $(USERLAND_BUILD)/VFSTEST.ELF $(USERLAND_BUILD)/VTTEST.ELF $(USERLAND_BUILD)/ACTIVETTYTEST.ELF $(USERLAND_BUILD)/VTSWITCHTEST.ELF $(USERLAND_BUILD)/TERM.ELF $(USERLAND_BUILD)/TERMCHILD.ELF $(USERLAND_BUILD)/THRDTEST.ELF $(USERLAND_BUILD)/SIGTEST.ELF $(USERLAND_BUILD)/AVXTEST.ELF $(USERLAND_BUILD)/MMAPTEST.ELF $(USERLAND_BUILD)/REBTEST.ELF $(USERLAND_BUILD)/ORPHANTEST.ELF $(USERLAND_BUILD)/INIT.ELF $(USERLAND_BUILD)/FBTEST.ELF $(USERLAND_BUILD)/POLLTEST.ELF $(USERLAND_BUILD)/POLLTRUNC.ELF $(USERLAND_BUILD)/ARGVTEST.ELF $(USERLAND_BUILD)/FDALLOC.ELF $(USERLAND_BUILD)/THRDMANY.ELF $(USERLAND_BUILD)/TLBSTORM.ELF $(USERLAND_BUILD)/FORKSTORM.ELF $(USERLAND_BUILD)/PTYCHURN.ELF $(USERLAND_BUILD)/SIGSTORM.ELF $(USERLAND_BUILD)/POLLSTORM.ELF $(USERLAND_BUILD)/FAULTFLOOD.ELF $(USERLAND_BUILD)/PTYTEST.ELF $(USERLAND_BUILD)/SMPTEST.ELF $(USERLAND_BUILD)/EVTEST.ELF $(USERLAND_BUILD)/IPCTEST.ELF $(USERLAND_BUILD)/PIPETEST.ELF $(USERLAND_BUILD)/TLSTEST.ELF $(USERLAND_BUILD)/NETTEST.ELF $(USERLAND_BUILD)/MPITEST.ELF $(USERLAND_BUILD)/CWDTEST.ELF $(USERLAND_BUILD)/STATTEST.ELF $(USERLAND_BUILD)/DIRTEST.ELF $(USERLAND_BUILD)/LFNTEST.ELF $(USERLAND_BUILD)/TIER0.ELF $(USERLAND_BUILD)/MUSLHELO.ELF $(USERLAND_BUILD)/TTYTEST.ELF
+$(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_BUILD)/PARENT.ELF $(USERLAND_BUILD)/LOOPER.ELF $(USERLAND_BUILD)/YIELDER.ELF $(USERLAND_BUILD)/FAULTER.ELF $(USERLAND_BUILD)/FILEIO.ELF $(USERLAND_BUILD)/SSE_TEST.ELF $(USERLAND_BUILD)/FORKTEST.ELF $(USERLAND_BUILD)/EXECTARG.ELF $(USERLAND_BUILD)/MOUNTTST.ELF $(USERLAND_BUILD)/VFSTEST.ELF $(USERLAND_BUILD)/VTTEST.ELF $(USERLAND_BUILD)/ACTIVETTYTEST.ELF $(USERLAND_BUILD)/VTSWITCHTEST.ELF $(USERLAND_BUILD)/TERM.ELF $(USERLAND_BUILD)/TERMCHILD.ELF $(USERLAND_BUILD)/THRDTEST.ELF $(USERLAND_BUILD)/SIGTEST.ELF $(USERLAND_BUILD)/AVXTEST.ELF $(USERLAND_BUILD)/MMAPTEST.ELF $(USERLAND_BUILD)/REBTEST.ELF $(USERLAND_BUILD)/ORPHANTEST.ELF $(USERLAND_BUILD)/INIT.ELF $(USERLAND_BUILD)/FBTEST.ELF $(USERLAND_BUILD)/POLLTEST.ELF $(USERLAND_BUILD)/POLLTRUNC.ELF $(USERLAND_BUILD)/ARGVTEST.ELF $(USERLAND_BUILD)/FDALLOC.ELF $(USERLAND_BUILD)/THRDMANY.ELF $(USERLAND_BUILD)/BBSPIKE.ELF $(USERLAND_BUILD)/TLBSTORM.ELF $(USERLAND_BUILD)/FORKSTORM.ELF $(USERLAND_BUILD)/PTYCHURN.ELF $(USERLAND_BUILD)/SIGSTORM.ELF $(USERLAND_BUILD)/POLLSTORM.ELF $(USERLAND_BUILD)/FAULTFLOOD.ELF $(USERLAND_BUILD)/PTYTEST.ELF $(USERLAND_BUILD)/SMPTEST.ELF $(USERLAND_BUILD)/EVTEST.ELF $(USERLAND_BUILD)/IPCTEST.ELF $(USERLAND_BUILD)/PIPETEST.ELF $(USERLAND_BUILD)/TLSTEST.ELF $(USERLAND_BUILD)/NETTEST.ELF $(USERLAND_BUILD)/MPITEST.ELF $(USERLAND_BUILD)/CWDTEST.ELF $(USERLAND_BUILD)/STATTEST.ELF $(USERLAND_BUILD)/DIRTEST.ELF $(USERLAND_BUILD)/LFNTEST.ELF $(USERLAND_BUILD)/TIER0.ELF $(USERLAND_BUILD)/MUSLHELO.ELF $(USERLAND_BUILD)/TTYTEST.ELF
 	mkdir -p $(DISK_SRC)/DIR
 	printf 'Hello from NeoOS FAT16!\n' > $(DISK_SRC)/HELLO.TXT
 	head -c 8192 /dev/zero | tr '\0' 'N' > $(DISK_SRC)/BIGFILE.TXT
@@ -413,6 +447,16 @@ $(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_B
 	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/ARGVTEST.ELF ::BIN/ARGVTEST.ELF
 	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/FDALLOC.ELF ::BIN/FDALLOC.ELF
 	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/THRDMANY.ELF ::BIN/THRDMANY.ELF
+	@mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/BBSPIKE.ELF ::BIN/BBSPIKE.ELF
+	@# BusyBox is optional: `make busybox` builds it, and the image
+	@# picks it up if it is present. A tree that has never built it
+	@# still produces a bootable disk.
+	@if [ -f $(BUSYBOX_BIN) ]; then \
+	    mcopy -i $(DISK_IMG) $(BUSYBOX_BIN) ::BIN/BUSYBOX.ELF && \
+	    echo "disk: BusyBox included ($$(stat -c%s $(BUSYBOX_BIN)) bytes)"; \
+	else \
+	    echo "disk: no BusyBox (run 'make busybox')"; \
+	fi
 	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/TLBSTORM.ELF ::BIN/TLBSTORM.ELF
 	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/FORKSTORM.ELF ::BIN/FORKSTORM.ELF
 	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/PTYCHURN.ELF ::BIN/PTYCHURN.ELF
@@ -476,6 +520,10 @@ $(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_B
 	  'spawn /BIN/ARGVTEST.ELF' \
 	  'spawn /BIN/FDALLOC.ELF' \
 	  'spawn /BIN/THRDMANY.ELF' \
+	  '# BBSPIKE is a wait entry: it is a survey, and its value is a' \
+	  '# readable transcript of what BusyBox did. Interleaved with the' \
+	  '# rest of the suite that transcript is unreadable.' \
+	  'wait /BIN/BBSPIKE.ELF' \
 	  'spawn /BIN/TLBSTORM.ELF' \
 	  'spawn /BIN/FORKSTORM.ELF' \
 	  '# PTYCHURN is a wait entry: it deliberately holds the ENTIRE pty' \
@@ -577,6 +625,7 @@ REQUIRED_MARKERS := \
 	"[argvtest] ALL PASSED" \
 	"[fdalloc] ALL PASSED" \
 	"[threadmany] ALL PASSED" \
+	"[bbspike] ALL PASSED" \
 	"[tlbstorm] ALL PASSED" \
 	"[forkstorm] ALL PASSED" \
 	"[ptychurn] ALL PASSED" \

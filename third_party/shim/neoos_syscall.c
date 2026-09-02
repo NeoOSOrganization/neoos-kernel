@@ -156,6 +156,37 @@ static long neo(long n, long a, long b, long c, long d, long e, long f) {
     return (long)ret;
 }
 
+// Writes "[shim] ENOSYS <n>" to /dev/kmsg, once per distinct number.
+//
+// Direct NeoOS write to fd 2, not printf: this runs underneath the C
+// library, and the program whose syscall just failed may be in the
+// middle of its own stdio. Repeats are suppressed so a program that
+// retries in a loop does not bury the log it is trying to produce.
+#define ENOSYS_SEEN_MAX 64
+static long enosys_seen[ENOSYS_SEEN_MAX];
+static int  enosys_count;
+
+static void neo_report_enosys(long n) {
+    for (int i = 0; i < enosys_count; i++) {
+        if (enosys_seen[i] == n) { return; }
+    }
+    if (enosys_count < ENOSYS_SEEN_MAX) { enosys_seen[enosys_count++] = n; }
+
+    char buf[32];
+    int k = 0;
+    buf[k++] = '['; buf[k++] = 's'; buf[k++] = 'h'; buf[k++] = 'i'; buf[k++] = 'm';
+    buf[k++] = ']'; buf[k++] = ' ';
+    buf[k++] = 'E'; buf[k++] = 'N'; buf[k++] = 'O'; buf[k++] = 'S'; buf[k++] = 'Y';
+    buf[k++] = 'S'; buf[k++] = ' ';
+    long v = n < 0 ? 0 : n;
+    char d[8];
+    int dn = 0;
+    do { d[dn++] = (char)('0' + (v % 10)); v /= 10; } while (v && dn < 8);
+    while (dn > 0) { buf[k++] = d[--dn]; }
+    buf[k++] = '\n';
+    neo(NEO_WRITE, 2, (long)(unsigned long)buf, k, 0, 0, 0);
+}
+
 long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6)
 {
     switch (n) {
@@ -245,6 +276,13 @@ long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a
     default:
         // Not forwarded. This is the signal that a primitive belongs in
         // the kernel -- NOT an invitation to implement it here.
+        //
+        // The number is REPORTED, not swallowed. Porting a real program
+        // means meeting a wall of these, and "Function not implemented"
+        // with no number is a guess where a fact should be: BusyBox's
+        // shell failed to run an external command with exactly that
+        // message, and the number is what says which call to add.
+        neo_report_enosys(n);
         return -ENOSYS;
     }
 }

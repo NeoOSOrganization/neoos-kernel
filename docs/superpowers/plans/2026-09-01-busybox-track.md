@@ -81,7 +81,7 @@ which is BB2's job.
 
 ```
 BB0.  fork duplicates the address-space bookkeeping   <- BLOCKER, first
-BB1.  Build-and-run spike: /bin/busybox to first -ENOSYS
+BB1.  Build-and-run spike: /bin/busybox to first -ENOSYS   <- DONE
 BB2.  The measured syscall set (was BB1 + BB4)
 BB3.  execve(path, argv, envp)
 BB4.  Job control                                     (was BB2)
@@ -158,6 +158,53 @@ region it inherited.
 **Exit:** a written list of what BusyBox actually calls, checked into
 this file as BB2's scope. No marker required — this milestone's output
 is knowledge.
+
+### BB1 result — **DONE** (2026-09-02)
+
+BusyBox 1.37.0, static against NeoOS's musl, 324 KB, 76 config options,
+`/BIN/BUSYBOX.ELF`. `userland/bbspike.c` runs nine invocations at boot
+and prints how each ended. **All nine now succeed:**
+
+| invocation | result |
+|---|---|
+| `busybox true` | exit 0 |
+| `busybox echo ...` | prints, exit 0 |
+| `busybox uname -a` | exit 0, prints a **blank line** |
+| `busybox pwd` | prints `/`, exit 0 |
+| `busybox ls /` | lists the volume, exit 0 |
+| `busybox cat /ETC/INITTAB` | prints the file, exit 0 |
+| `busybox sh -c :` | exit 0 |
+| `busybox sh -c 'echo shell works'` | prints, exit 0 |
+| `busybox sh -c 'busybox echo external'` | prints, exit 0 — **ash forks and execs** |
+
+So `ash` runs, and runs external commands. That last row failed at first
+with `sh: busybox: Function not implemented`, and the diagnosis was
+wrong twice before it was right: the `execve` shim mapping had been
+written hours earlier and was correct, but `$(MUSL_LIB)` depended only
+on its own absence, so `libc.a` was never rebuilt and every musl program
+kept calling the old library. The Makefile dependency is fixed, and that
+is the finding worth keeping from BB1 — not a missing syscall but a
+build that could not tell you the truth about which syscalls it had.
+
+**The measured missing set.** The shim now reports every unmapped number
+to `/dev/kmsg` once (`[shim] ENOSYS <n>`) instead of silently returning
+`-ENOSYS`, which is what turned guesswork into a list. Across the whole
+suite plus all nine BusyBox invocations, exactly **three** numbers came
+up:
+
+| Linux nr | call | why BusyBox wants it |
+|---|---|---|
+| 12 | `brk` | musl's allocator probes it before falling back to `mmap` |
+| 63 | `uname` | `uname -a`, which is why it printed a blank line |
+| 110 | `getppid` | `ash` startup |
+
+That is a far shorter list than the roadmap's predicted ~25, and it is
+measured rather than predicted — which was the whole argument for taking
+BB1 before BB2. The predicted list (`rename`, `rmdir`, `access`,
+`readlink`, `chmod`, `utimensat`, `getrandom`, `openat`, ...) is not
+wrong so much as *not yet reached*: nothing exercised so far needs any
+of it. BB2 implements the three that are real, and the rest when a
+session demands them.
 
 ## BB2 — the measured syscall set
 
