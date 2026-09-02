@@ -30,15 +30,22 @@ static int fail(const char *what, int got, int want) {
 }
 
 int main(void) {
-    // 1. Lowest-available in the ordinary case: the first open after
-    //    0/1/2 is 3, and freeing 3 gives 3 back rather than 4.
+    // 1. Lowest-available in the ordinary case: consecutive opens rise
+    //    by one, and freeing the lower one gives it back rather than
+    //    handing out a higher number.
+    //
+    //    The FIRST descriptor is not assumed to be 3. Processes inherit
+    //    their spawner's open files, and init has a /dev/kmsg
+    //    descriptor open for its own diagnostics -- so the first free
+    //    number here is whatever it is. What this tests is the POLICY,
+    //    which is unchanged by where it starts.
     int a = open(PROBE, O_RDONLY);
-    if (a != 3) { return fail("first open", a, 3); }
+    if (a < 3) { return fail("first open", a, 3); }
     int b = open(PROBE, O_RDONLY);
-    if (b != 4) { return fail("second open", b, 4); }
+    if (b != a + 1) { return fail("second open", b, a + 1); }
     close(a);
     int c = open(PROBE, O_RDONLY);
-    if (c != 3) { return fail("open after closing 3", c, 3); }
+    if (c != a) { return fail("open after closing the lower fd", c, a); }
     close(b); close(c);
 
     // 2. A hole low down is filled before anything higher.
