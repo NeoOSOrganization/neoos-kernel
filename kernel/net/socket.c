@@ -474,15 +474,18 @@ int64_t socket_sendto(int fd, const void *buf, uint64_t len, int flags,
 // with nowhere to report the sender.
 static int64_t recv_one(struct socket *s, int nonblock, void *buf, uint64_t len,
                         struct k_sockaddr *src, uint32_t *src_len) {
-    // Hold a reference across the (possibly blocking) wait. A close() on
-    // another thread of this process -- or this thread being SIGKILLed
-    // as its process exits, which closes every fd -- can drop the fd's
-    // reference to zero while we are parked on s->readers. Without this
-    // ref, sock_free() would pull s->lock and s->readers out from under
-    // waitq_sleep()'s own re-acquire, and schedule() would then run
-    // against a freed lock (seen as a bogus "[lock] PANIC: schedule()
-    // with a spinlock held ... holding=socktable").
-    __atomic_fetch_add(&s->refs, 1, __ATOMIC_ACQ_REL);
+    // A reference IS held across the (possibly blocking) wait below --
+    // by the CALLER. sock_ref_of takes it under the fd table's bucket
+    // lock and every caller releases it on every exit path, so the
+    // socket cannot be freed while this function is parked on
+    // s->readers.
+    //
+    // This function used to take a SECOND reference here and never drop
+    // it: none of the four exits below released it, so every recvfrom
+    // leaked one and no socket that had ever been read from was freed.
+    // It was written when the caller's reference was taken too late to
+    // help (see sock_ref_of); once that moved under the bucket lock this
+    // became redundant as well as leaky.
 
     uint64_t sf = spin_lock_irqsave(&s->lock);
     while (!s->rx_head) {
