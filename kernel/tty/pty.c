@@ -8,8 +8,23 @@
 #include "sched/proc.h"
 #include "drivers/char/serial.h"
 #include "errno.h"
+#include "mm/heap.h"
 
-#define PTY_MAX 16
+// Slots in the pty pool. The pool GROWS into these: a slot's struct is
+// allocated the first time that slot is needed, so an idle machine
+// carries a 2 KiB pointer array rather than 16 fully-built ttys.
+//
+// It was a static array of 16 struct pty, each holding a whole struct
+// tty (three 1 KiB buffers), so 16 was both the ceiling and the cost.
+// Sixteen is not many: it is four terminals with a couple of jobs each.
+//
+// Structs are never FREED, only marked unused and reused. A pty is torn
+// down from ptm_close, which has just woken every reader blocked on it;
+// those threads wake up inside pt->slave and would be walking freed
+// memory. The pool is therefore a high-water mark, which for a device
+// pool is the right trade -- the alternative is a use-after-free that
+// only shows up under load.
+#define PTY_MAX 256
 
 struct pty {
     struct tty slave;       // the /dev/pts/N side: full line discipline
@@ -20,7 +35,7 @@ struct pty {
     int  owns_active;       // this master holds the active tty + framebuffer
 };
 
-static struct pty ptys[PTY_MAX];
+static struct pty *ptys[PTY_MAX];
 static struct spinlock pool_lock;
 static const struct file_ops ptm_file_ops;
 static const struct file_ops pts_file_ops;
@@ -49,6 +64,16 @@ static void pty_ref(int *counter) {
     spin_unlock_irqrestore(&pool_lock, fl);
 }
 
+// "pts/N". Three digits, since the pool no longer stops at two.
+static void pts_path_for(int n, char *out) {
+    int k = 0;
+    out[k++] = 'p'; out[k++] = 't'; out[k++] = 's'; out[k++] = '/';
+    if (n >= 100) { out[k++] = (char)('0' + n / 100); }
+    if (n >= 10)  { out[k++] = (char)('0' + (n / 10) % 10); }
+    out[k++] = (char)('0' + n % 10);
+    out[k] = 0;
+}
+
 static void pty_unref(struct pty *pt, int *counter) {
     uint64_t fl = spin_lock_irqsave(&pool_lock);
     if (*counter > 0) { (*counter)--; }
@@ -56,11 +81,8 @@ static void pty_unref(struct pty *pt, int *counter) {
     if (gone) { pt->used = 0; }
     spin_unlock_irqrestore(&pool_lock, fl);
     if (!gone) { return; }
-    char path[16] = "pts/";
-    int n = pt->index, k = 4;
-    if (n >= 10) { path[k++] = (char)('0' + n / 10); }
-    path[k++] = (char)('0' + n % 10);
-    path[k] = 0;
+    char path[16];
+    pts_path_for(pt->index, path);
     devfs_unregister(path);
 }
 
@@ -260,28 +282,69 @@ void pty_init(void) {
     spin_init(&pool_lock, LOCK_RANK_PTY, "pty-pool");
 }
 
+// Claims a free slot whose struct already exists. Caller holds pool_lock.
+static struct pty *claim_existing_locked(void) {
+    for (int i = 0; i < PTY_MAX; i++) {
+        if (ptys[i] && !ptys[i]->used) {
+            ptys[i]->used = 1;
+            ptys[i]->index = i;
+            ptys[i]->master_refs = 1;
+            ptys[i]->slave_refs = 0;
+            return ptys[i];
+        }
+    }
+    return 0;
+}
+
 int ptmx_open(struct file_descriptor *f) {
     uint64_t fl = spin_lock_irqsave(&pool_lock);
-    struct pty *pt = 0;
-    for (int i = 0; i < PTY_MAX; i++) {
-        if (!ptys[i].used) { pt = &ptys[i]; break; }
-    }
-    if (pt) {
-        pt->used = 1;
-        pt->index = (int)(pt - ptys);
-        pt->master_refs = 1;
-        pt->slave_refs = 0;
+    struct pty *pt = claim_existing_locked();
+    int need_slot = -1;
+    if (!pt) {
+        for (int i = 0; i < PTY_MAX; i++) {
+            if (!ptys[i]) { need_slot = i; break; }
+        }
     }
     spin_unlock_irqrestore(&pool_lock, fl);
-    if (!pt) { return -ENFILE; }
+
+    if (!pt) {
+        if (need_slot < 0) { return -ENFILE; }   // every slot built and busy
+
+        // Allocated with the pool lock DROPPED: the heap has its own
+        // lock, and taking it under pool_lock would be a second rank to
+        // reason about on a path that does not need it.
+        struct pty *fresh = kmalloc(sizeof(*fresh));
+        if (!fresh) { return -ENOMEM; }
+        for (unsigned i = 0; i < sizeof(*fresh); i++) { ((uint8_t *)fresh)[i] = 0; }
+
+        fl = spin_lock_irqsave(&pool_lock);
+        // Re-check: another CPU may have freed a slot, or filled this
+        // one, while the allocation was in flight.
+        pt = claim_existing_locked();
+        if (!pt) {
+            int slot = -1;
+            for (int i = 0; i < PTY_MAX; i++) {
+                if (!ptys[i]) { slot = i; break; }
+            }
+            if (slot >= 0) {
+                ptys[slot] = fresh;
+                fresh->used = 1;
+                fresh->index = slot;
+                fresh->master_refs = 1;
+                fresh->slave_refs = 0;
+                pt = fresh;
+                fresh = 0;
+            }
+        }
+        spin_unlock_irqrestore(&pool_lock, fl);
+        if (fresh) { kfree(fresh); }             // lost the race; not needed
+        if (!pt) { return -ENFILE; }
+    }
 
     tty_obj_init(&pt->slave, &pty_backend, pt);
 
-    char path[16] = "pts/";
-    int n = pt->index, k = 4;
-    if (n >= 10) { path[k++] = (char)('0' + n / 10); }
-    path[k++] = (char)('0' + n % 10);
-    path[k] = 0;
+    char path[16];
+    pts_path_for(pt->index, path);
     int rc = devfs_register(path, &pts_file_ops, pt, pts_devfs_open);
     if (rc != 0) {
         uint64_t g = spin_lock_irqsave(&pool_lock);

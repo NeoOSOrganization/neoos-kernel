@@ -190,7 +190,12 @@ static const struct devfs_dev devices[] = {
 // ---- dynamic entries (/dev/pts/N) --------------------------------------
 #include "sync/lock.h"
 static int name_eq(const char *a, const char *b);
-#define DEVFS_DYN_MAX  32
+// Every /dev/pts/N registers one of these, so this is the REAL ceiling
+// on concurrent ptys -- it was 32, and the pty pool growing past 16 in
+// CS4 simply ran into it instead. Sized to match PTY_MAX (tty/pty.c) so
+// the pool's own bound is the one that applies, at roughly 80 bytes an
+// entry.
+#define DEVFS_DYN_MAX  256
 #define DEVFS_DYN_BASE 1000              // synthetic inode ids start here
 
 static struct {

@@ -1159,6 +1159,14 @@ powers off once nothing is left to reap. A ported daemon that expects a
 shutdown signal will not get one. If PID 1 itself exits, the kernel
 panics (there is nothing to reap the machine or power it off).
 
+The pty pool holds up to **256** concurrent ptys (was 16), and grows
+into that: a slot's `struct pty` — which contains a whole `struct tty`,
+three 1 KiB buffers — is built the first time that slot is used, so an
+idle machine pays for a pointer array rather than sixteen ttys. Slot
+structs are reused but never freed, deliberately: a pty is torn down
+right after waking every reader blocked on it, and those threads wake up
+inside it. `/dev/pts/N` now goes to three digits.
+
 A process may hold up to **1024 threads** (was 16). The number comes
 from the thread-stack layout: each thread's stack sits one
 `THREAD_STACK_STRIDE` below the last, downward from `USER_STACK_TOP`,

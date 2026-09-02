@@ -1,15 +1,18 @@
 // ptychurn.c -- the pty pool across and beyond its ceiling.
 //
-// CS3. PTY_MAX is 16 and the pool is a flat array; pty_unref's refcounted
-// `gone` check drives teardown and the devfs unregistration that goes
-// with it. CS0 made pool_lock rank-checked, so an ordering mistake now
-// panics instead of hiding.
+// CS3, updated by CS4. The pool used to be a flat array of 16; it now
+// GROWS -- a slot's struct is allocated the first time it is needed, up
+// to PTY_MAX slots -- so the ceiling this test was written against has
+// moved. pty_unref's refcounted `gone` check still drives teardown and
+// the devfs unregistration that goes with it. CS0 made pool_lock
+// rank-checked, so an ordering mistake now panics instead of hiding.
 //
 // What this asserts, none of which the existing ptytest covers:
 //
-//   - the ceiling is enforced CLEANLY: the 17th concurrent open fails
-//     with an error rather than crashing, corrupting the pool, or
-//     handing back a duplicate;
+//   - MORE than the old sixteen can be open at once, which is the CS4
+//     change, and the ceiling wherever it now falls is enforced
+//     CLEANLY: the open past it fails with an error rather than
+//     crashing, corrupting the pool, or handing back a duplicate;
 //   - slots come back. After closing everything, a fresh open must
 //     succeed again -- that is teardown actually releasing, not just
 //     appearing to;
@@ -18,15 +21,21 @@
 //   - the survivors still work: a master/slave round-trip after the
 //     churn proves the pool was not left subtly wrong.
 //
-// CS4 removes the ceiling. This test is what will prove that removal did
-// not break teardown.
+// The growth is what makes teardown worth re-checking: a reused slot is
+// a struct a previous pty lived in, so a teardown that half-releases
+// shows up as the NEXT open behaving oddly rather than as a leak.
 
 #include <unistd.h>
 #include <stdio.h>
 #include <fcntl.h>
 
 #define TIOCGPTN 0x80045430
-#define PTY_MAX_EXPECTED 16
+// The pool's slot count. Opening every one of them each round would
+// build 256 ttys and then tear them down, 40 times over; the point is
+// to exceed the OLD ceiling and to churn, not to exhaust the machine.
+#define PTY_POOL_SLOTS 256
+#define PTY_OLD_CEILING 16
+#define OPEN_PER_ROUND  40
 
 extern int ioctl(int fd, unsigned long req, void *arg);
 
@@ -47,12 +56,13 @@ int main(void) {
     int peak = 0;
 
     for (int r = 0; r < ROUNDS; r++) {
-        int m[PTY_MAX_EXPECTED + 4];
+        int m[OPEN_PER_ROUND];
         int nopen = 0;
 
-        // Open until the pool refuses. The refusal is the point: it must
-        // be an error return, not a crash or a duplicate.
-        for (int i = 0; i < PTY_MAX_EXPECTED + 4; i++) {
+        // Open a batch well past the old ceiling. A refusal here would
+        // be an error return, not a crash or a duplicate -- but at 40 of
+        // 256 slots there should not be one.
+        for (int i = 0; i < OPEN_PER_ROUND; i++) {
             int fd = open("/dev/ptmx", O_RDWR);
             if (fd < 0) { break; }
             for (int j = 0; j < nopen; j++) {
@@ -70,11 +80,12 @@ int main(void) {
         }
         if (nopen > peak) { peak = nopen; }
 
-        // The pool must actually have a ceiling; if this ever stops
-        // being true the test has silently stopped testing anything.
-        if (nopen > PTY_MAX_EXPECTED + 2) {
-            printf("[ptychurn] FAILED: round %d opened %d ptys, expected a ceiling near %d\n",
-                   r, nopen, PTY_MAX_EXPECTED);
+        // The CS4 assertion: more than the old sixteen open at once.
+        // Before the pool grew, the seventeenth returned -ENFILE.
+        if (nopen <= PTY_OLD_CEILING) {
+            printf("[ptychurn] FAILED: round %d opened only %d ptys -- "
+                   "the old %d ceiling is still there\n",
+                   r, nopen, PTY_OLD_CEILING);
             return 1;
         }
 
@@ -116,6 +127,33 @@ int main(void) {
         return 1;
     }
     close(again);
+
+    // And the ceiling still EXISTS: the pool grows to PTY_POOL_SLOTS and
+    // then refuses, cleanly. Without this the test would pass just as
+    // well against a pool with no bound at all, which is not what was
+    // built.
+    static int all[PTY_POOL_SLOTS + 8];
+    int nall = 0;
+    while (nall < PTY_POOL_SLOTS + 8) {
+        int fd = open("/dev/ptmx", O_RDWR);
+        if (fd < 0) { break; }
+        all[nall++] = fd;
+    }
+    if (nall > PTY_POOL_SLOTS) {
+        printf("[ptychurn] FAILED: opened %d ptys, past the %d-slot pool\n",
+               nall, PTY_POOL_SLOTS);
+        return 1;
+    }
+    for (int i = 0; i < nall; i++) { close(all[i]); }
+    int after_full = open("/dev/ptmx", O_RDWR);
+    if (after_full < 0) {
+        printf("[ptychurn] FAILED: no pty available after filling and "
+               "draining the pool\n");
+        return 1;
+    }
+    close(after_full);
+    printf("[ptychurn] pool grew to %d concurrent ptys, refused cleanly, "
+           "and drained\n", nall);
 
     printf("[ptychurn] %d rounds, peak %d concurrent ptys, slots reclaimed each time\n",
            ROUNDS, peak);
