@@ -1256,13 +1256,16 @@ the wrong command, which is worse than a failure it can report.
 `spawn(path)` and `exec(path)` are the same calls with
 `argv = {path, NULL}`.
 
-**Divergence: `execve` ignores `envp`.** NeoOS has no environment yet;
-the kernel pushes an empty `envp` onto every new stack, and the auxv
-that follows it is complete. `execve(path, argv, envp)` therefore
-behaves exactly as `execv(path, argv)` rather than failing, so that a
-ported program calling `execve` with an environment it does not depend
-on still runs. A program that expects `getenv` in the new image to see
-what it passed will not find it.
+`execve(path, argv, envp)` carries the environment, as does `spawnve`
+(BB3). The entry stack is the full SysV shape — `argc`, `argv[]`, NULL,
+`envp[]`, NULL, auxv — and the same three ceilings that bound argv bound
+the environment. `execv`/`spawnv` pass an empty environment rather than
+inheriting one, exactly as their names promise; a child that should
+inherit needs `execve(path, argv, environ)`.
+
+The environment itself originates in **init**, which is the only place
+it can: nothing above PID 1 has one to pass down. It supplies `PATH`,
+`HOME`, `TERM` and `PS1`, and every process inherits from there.
 
 `fcntl` implements `F_GETFL` and `F_SETFL`, which is enough to turn
 `O_NONBLOCK` on and off. `F_GETFD`/`F_SETFD` are accepted and ignored,

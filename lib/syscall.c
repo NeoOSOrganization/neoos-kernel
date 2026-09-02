@@ -145,6 +145,10 @@ long __neoos_syscall3(long n, long a, long b, long c) {
     return (long)syscall3(n, a, b, c);
 }
 
+long __neoos_syscall4(long n, long a, long b, long c, long d) {
+    return (long)syscall4(n, a, b, c, d);
+}
+
 void exit(int code) {
     syscall1(SYS_EXIT, code);
     __builtin_unreachable();
@@ -204,9 +208,15 @@ int spawn(const char *path) {
 
 int spawnv(const char *path, char *const argv[]) {
     uint64_t len = strlen(path);
-    return (int)__neoos_syscall3(SYS_SPAWNV, (long)(uintptr_t)path, (long)len,
-                                 (long)(uintptr_t)argv);
+    return (int)__neoos_syscall4(SYS_SPAWNV, (long)(uintptr_t)path, (long)len,
+                                 (long)(uintptr_t)argv, 0);
 }
+int spawnve(const char *path, char *const argv[], char *const envp[]) {
+    uint64_t len = strlen(path);
+    return (int)__neoos_syscall4(SYS_SPAWNV, (long)(uintptr_t)path, (long)len,
+                                 (long)(uintptr_t)argv, (long)(uintptr_t)envp);
+}
+
 
 int fork(void) {
     return (int)syscall0(SYS_FORK);
@@ -238,17 +248,13 @@ int exec(const char *path) {
 }
 
 int execv(const char *path, char *const argv[]) {
-    uint64_t len = strlen(path);
-    return (int)__neoos_syscall3(SYS_EXEC, (long)(uintptr_t)path, (long)len,
-                                 (long)(uintptr_t)argv);
+    return execve(path, argv, 0);
 }
 
 int execve(const char *path, char *const argv[], char *const envp[]) {
-    // envp is accepted and ignored: NeoOS has no environment yet, and
-    // the kernel pushes an empty envp onto every new stack. Recorded as
-    // a divergence in docs/stdlib.md.
-    (void)envp;
-    return execv(path, argv);
+    uint64_t len = strlen(path);
+    return (int)__neoos_syscall4(SYS_EXEC, (long)(uintptr_t)path, (long)len,
+                                 (long)(uintptr_t)argv, (long)(uintptr_t)envp);
 }
 
 int getppid(void) {

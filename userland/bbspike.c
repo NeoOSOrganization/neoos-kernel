@@ -20,11 +20,16 @@
 #include <stdio.h>
 #include <sys/wait.h>
 #include <sys/utsname.h>
+#include <auxv.h>
 
 #define BB "/BIN/BUSYBOX.ELF"
 
 static void run(const char *label, char *const argv[]) {
-    int pid = spawnv(BB, argv);
+    // spawnVE, not spawnv: the environment is the point of half these
+    // invocations, and spawnv passes an empty one. bbspike's own
+    // environment came from init, so forwarding it is what makes
+    // `sh -c 'echo $PATH'` a test of the whole chain.
+    int pid = spawnve(BB, argv, environ);
     if (pid < 0) {
         printf("[bbspike] %s: spawnv FAILED (%d)\n", label, pid);
         return;
@@ -91,6 +96,53 @@ int main(void) {
         return 1;
     }
     printf("[bbspike] getppid: %d (init is 1)\n", ppid);
+
+    // BB3: the environment must survive both spawn and exec, and be
+    // visible to the shell as shell variables. `sh -c 'echo $PATH'` is
+    // the end-to-end check -- it goes kernel entry stack -> musl envp ->
+    // ash's variable table -> expansion.
+    char *a_env[]  = { (char *)"busybox", (char *)"sh", (char *)"-c",
+                       (char *)"echo PATH=$PATH HOME=$HOME", 0 };
+    // ...and again through an exec, so a lost environment at the exec
+    // boundary shows up separately from a lost one at spawn.
+    char *a_env2[] = { (char *)"busybox", (char *)"sh", (char *)"-c",
+                       (char *)"busybox env", 0 };
+    // Four probes, each isolating one hop, and each TAGGING its own
+    // output. Untagged probes were unreadable: `env` prints the same
+    // four lines whoever ran it, serial output from several processes
+    // interleaves, and "which probe printed this" became guesswork.
+    //
+    //   spawnve  -- the kernel's spawn path carries the environment
+    //   ash      -- ash read its own envp and can expand from it
+    //   execve   -- the kernel's exec path carries it (execve's 3rd arg)
+    //   ash-exec -- ash passes it on when IT execs something
+    char *p_spawn[] = { (char *)"busybox", (char *)"sh", (char *)"-c",
+                        (char *)"echo TAG-spawnve PATH=$PATH", 0 };
+    char *p_exec[]  = { (char *)"busybox", (char *)"sh", (char *)"-c",
+                        (char *)"echo TAG-execve PATH=$PATH", 0 };
+    char *p_ashex[] = { (char *)"busybox", (char *)"sh", (char *)"-c",
+                        (char *)"busybox sh -c 'echo TAG-ashexec PATH=$PATH'", 0 };
+
+    // Is the loss PATH-specific, or the whole environment? ash keeps
+    // PATH as a special variable with a built-in default, so those are
+    // very different diagnoses.
+    char *p_expo[]  = { (char *)"busybox", (char *)"sh", (char *)"-c",
+                        (char *)"export FOO=bar; busybox sh -c 'echo TAG-nested FOO=$FOO HOME=$HOME PATH=$PATH'", 0 };
+
+    run("env via spawnve", p_spawn);
+    run("env via ash-exec", p_ashex);
+    run("nested exports",  p_expo);
+
+    int ek = fork();
+    if (ek == 0) {
+        execve(BB, p_exec, environ);
+        printf("[bbspike] execve returned -- it should not have\n");
+        exit(9);
+    } else if (ek > 0) {
+        int st = 0; waitpid(ek, &st, 0);
+        printf("[bbspike] env via execve: exit %d\n",
+               WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+    }
 
     printf("[bbspike] --- end of first contact ---\n");
     printf("[bbspike] ALL PASSED\n");

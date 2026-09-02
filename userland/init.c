@@ -89,9 +89,25 @@ static void parse_inittab(void) {
     }
 }
 
+// The environment every process on the machine inherits (BB3). init is
+// the only place it can come from: there is nothing above PID 1 to
+// inherit one from, so if init does not supply it, nothing has one.
+//
+// PATH names /BIN because that is where the disk image puts programs,
+// and the names there are FAT 8.3 uppercase. HOME is / because NeoOS
+// has no users and therefore no home directories -- a shell still wants
+// somewhere to go when asked for one.
+static char *const base_env[] = {
+    (char *)"PATH=/BIN",
+    (char *)"HOME=/",
+    (char *)"TERM=linux",
+    (char *)"PS1=neoos$ ",
+    0
+};
+
 static int launch(int e) {
     char *argv[2] = { ents[e].path, 0 };
-    int pid = spawnv(ents[e].path, argv);
+    int pid = spawnve(ents[e].path, argv, base_env);
     if (pid < 0) {
         printf("[init] spawn %s failed (%d)\n", ents[e].path, pid);
         return -1;

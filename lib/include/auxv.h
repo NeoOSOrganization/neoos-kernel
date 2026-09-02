@@ -20,9 +20,10 @@
 // Linux's getauxval(3) signature and semantics, minus errno.
 unsigned long getauxval(unsigned long type);
 
-// The environment. Empty for now -- the kernel supplies no environment
-// strings -- but present and NULL-terminated, so code that walks it
-// works rather than dereferencing nothing.
+// The environment, as the kernel laid it out on the entry stack. init
+// supplies the base set (PATH, HOME, TERM, PS1) and every process
+// inherits it; it was empty before BB3. Pass it on to a child with
+// spawnve or execve -- neither spawnv nor execv does it for you.
 extern char **environ;
 
 #endif

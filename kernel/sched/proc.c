@@ -296,11 +296,29 @@ static uint64_t build_initial_stack(uint64_t pml4_phys, uint64_t stack_top,
     int argc = args->argc;
     if (argc > SPAWN_MAX_ARGS) { argc = SPAWN_MAX_ARGS; }
 
+    int envc = args->envc;
+    if (envc > SPAWN_MAX_ARGS) { envc = SPAWN_MAX_ARGS; }
+
     // Heap, not stack. This array used to be `uint64_t[SPAWN_MAX_ARGS]`
     // with SPAWN_MAX_ARGS == 8. At the ceiling a shell actually needs it
-    // would be 8 KiB of a 16 KiB kernel stack.
-    uint64_t *argv_ptr = kmalloc((uint64_t)argc * sizeof(uint64_t));
+    // would be 8 KiB of a 16 KiB kernel stack. One allocation covers
+    // both vectors: argv's pointers first, then envp's.
+    uint64_t *argv_ptr = kmalloc((uint64_t)(argc + envc) * sizeof(uint64_t));
     if (!argv_ptr) { return 0; }
+    uint64_t *envp_ptr = argv_ptr + argc;
+
+    // The environment's strings go down first, so argv's end up nearer
+    // the stack top. Order between the two blocks is not specified by
+    // anything; only each vector's own order is.
+    for (int i = envc - 1; i >= 0; i--) {
+        const char *s = args->envp[i];
+        uint64_t len = 0;
+        while (s[len]) { len++; }
+        len++;                        // the NUL
+        sp -= len;
+        envp_ptr[i] = sp;
+        if (!poke_user_bytes(pml4_phys, sp, (const uint8_t *)s, len)) { kfree(argv_ptr); return 0; }
+    }
 
     for (int i = argc - 1; i >= 0; i--) {
         const char *s = args->argv[i];
@@ -323,10 +341,11 @@ static uint64_t build_initial_stack(uint64_t pml4_phys, uint64_t stack_top,
     rand_bytes(at_random_bytes, 16);
     if (!poke_user_bytes(pml4_phys, at_random, at_random_bytes, 16)) { kfree(argv_ptr); return 0; }
 
-    // The vector itself: argc(1) + argv(argc) + NULL(1) + envp NULL(1)
-    // + 7 auxv pairs, in qwords.
+    // The vector itself: argc(1) + argv(argc) + NULL(1) + envp(envc)
+    // + NULL(1) + 7 auxv pairs, in qwords.
     const int aux_pairs = 7;
-    uint64_t words = 1 + (uint64_t)argc + 1 + 1 + (uint64_t)aux_pairs * 2;
+    uint64_t words = 1 + (uint64_t)argc + 1 + (uint64_t)envc + 1
+                   + (uint64_t)aux_pairs * 2;
     // RSP must be 16-byte aligned AT _start. The vector occupies
     // `words` qwords above it, so the base is aligned after rounding
     // the whole block down to 16.
@@ -338,7 +357,8 @@ static uint64_t build_initial_stack(uint64_t pml4_phys, uint64_t stack_top,
     PUSH((uint64_t)argc);
     for (int i = 0; i < argc; i++) { PUSH(argv_ptr[i]); }
     PUSH(0);            // argv terminator
-    PUSH(0);            // envp terminator (no environment yet)
+    for (int i = 0; i < envc; i++) { PUSH(envp_ptr[i]); }
+    PUSH(0);            // envp terminator
     PUSH(AT_PHDR);   PUSH(info->phdr);
     PUSH(AT_PHENT);  PUSH(info->phentsize);
     PUSH(AT_PHNUM);  PUSH(info->phnum);
@@ -360,6 +380,7 @@ int spawn_args_single(struct spawn_args *out, const char *path) {
     while (path[len] && len < SPAWN_ARG_MAX - 1) { len++; }
 
     out->argc = 1;
+    out->envc = 0; out->envp = 0; out->env_blob = 0;
     out->blob = kmalloc(len + 1);
     out->argv = kmalloc(sizeof(char *));
     if (!out->blob || !out->argv) { spawn_args_free(out); return 0; }
@@ -372,15 +393,18 @@ int spawn_args_single(struct spawn_args *out, const char *path) {
 
 void spawn_args_free(struct spawn_args *args) {
     if (!args) { return; }
-    if (args->argv) { kfree(args->argv); args->argv = 0; }
-    if (args->blob) { kfree(args->blob); args->blob = 0; }
+    if (args->argv)     { kfree(args->argv);     args->argv = 0; }
+    if (args->blob)     { kfree(args->blob);     args->blob = 0; }
+    if (args->envp)     { kfree(args->envp);     args->envp = 0; }
+    if (args->env_blob) { kfree(args->env_blob); args->env_blob = 0; }
     args->argc = 0;
+    args->envc = 0;
 }
 
 struct process *spawn(const char *path) { return spawn_argv(path, 0); }
 
 struct process *spawn_argv(const char *path, const struct spawn_args *args) {
-    struct spawn_args local = { 0, 0, 0 };
+    struct spawn_args local = { 0, 0, 0, 0, 0, 0 };
     if (!args) {
         if (!spawn_args_single(&local, path)) { return 0; }
         args = &local;
@@ -590,7 +614,7 @@ int exec_task(const char *path, struct syscall_frame *frame,
     // the syscall layer -- it HAD to be: the user pages it lived in were
     // freed a few lines above, along with the rest of the old image.
     // A caller with no vector (the kernel's own exec) gets argv[0] = path.
-    struct spawn_args local = { 0, 0, 0 };
+    struct spawn_args local = { 0, 0, 0, 0, 0, 0 };
     if (!args) {
         if (!spawn_args_single(&local, path)) { return 0; }
         args = &local;

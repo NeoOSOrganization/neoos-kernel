@@ -143,8 +143,27 @@ int64_t sys_spawn(struct syscall_args *a) {
 // overall. Exceeding any of them is -E2BIG. It is NOT silent truncation:
 // a shell handed back a command with its arguments quietly dropped would
 // run the wrong thing, which is worse than failing.
+static int copy_user_vector(uint64_t uargv_addr, int *out_count,
+                            char ***out_vec, char **out_blob);
+
+// argv into `out`. The environment is a separate call; see below.
 static int copy_user_argv(uint64_t uargv_addr, struct spawn_args *out) {
     out->argc = 0; out->argv = 0; out->blob = 0;
+    out->envc = 0; out->envp = 0; out->env_blob = 0;
+    return copy_user_vector(uargv_addr, &out->argc, &out->argv, &out->blob);
+}
+
+// envp into `out`, using the same walk and the same ceilings. BB3.
+// Called after copy_user_argv, so a failure here must leave argv for
+// spawn_args_free to release -- which it does, since the two blocks are
+// separate fields.
+static int copy_user_envp(uint64_t uenvp_addr, struct spawn_args *out) {
+    return copy_user_vector(uenvp_addr, &out->envc, &out->envp, &out->env_blob);
+}
+
+static int copy_user_vector(uint64_t uargv_addr, int *out_count,
+                            char ***out_vec, char **out_blob) {
+    *out_count = 0; *out_vec = 0; *out_blob = 0;
 
     const char *const *uargv = (const char *const *)(uintptr_t)uargv_addr;
     if (!uargv) { return 0; }
@@ -179,20 +198,22 @@ static int copy_user_argv(uint64_t uargv_addr, struct spawn_args *out) {
         if (total > SPAWN_ARG_TOTAL) { return -E2BIG; }
     }
 
-    out->blob = kmalloc(total);
-    out->argv = kmalloc((uint64_t)argc * sizeof(char *));
-    if (!out->blob || !out->argv) { spawn_args_free(out); return -ENOMEM; }
-    out->argc = argc;
+    (*out_blob) = kmalloc(total);
+    (*out_vec) = kmalloc((uint64_t)argc * sizeof(char *));
+    if (!(*out_blob) || !(*out_vec)) { if (*out_blob) { kfree(*out_blob); *out_blob = 0; }
+        if (*out_vec) { kfree(*out_vec); *out_vec = 0; }
+        return -ENOMEM; }
+    (*out_count) = argc;
 
-    char *w = out->blob;
+    char *w = (*out_blob);
     for (int i = 0; i < argc; i++) {
         const char *src = (const char *)(uintptr_t)uargv[i];
-        out->argv[i] = w;
+        (*out_vec)[i] = w;
         // Bounded by `total`, which was measured from these same
         // strings a moment ago. A concurrent thread lengthening one
         // cannot push past the blob: the copy stops at SPAWN_ARG_MAX
         // and at the end of the space this string was measured to need.
-        uint64_t room = (uint64_t)(out->blob + total - w);
+        uint64_t room = (uint64_t)((*out_blob) + total - w);
         uint64_t n = 0;
         while (n + 1 < room && src[n]) { *w++ = src[n]; n++; }
         *w++ = '\0';
@@ -209,6 +230,10 @@ int64_t sys_spawnv(struct syscall_args *a) {
     struct spawn_args args;
     int rc = copy_user_argv(a->a3, &args);
     if (rc != 0) { return rc; }
+    // a4 is the environment (BB3). spawnv's older two-argument form
+    // passes 0, which is an empty environment rather than an error.
+    rc = copy_user_envp(a->a4, &args);
+    if (rc != 0) { spawn_args_free(&args); return rc; }
 
     // No vector, or an empty one, means the same as spawn(): argv[0] is
     // the path. A program with no argv[0] at all is a shape nothing
@@ -228,11 +253,12 @@ int64_t sys_fork(struct syscall_args *a) {
     return child ? child->proc->pid : -1;
 }
 
-// execve. a3 is the user argv, NULL-terminated; 0 means "just the path",
-// which is what the older one-argument exec() wrapper passes.
+// execve. a3 is the user argv and a4 the environment, both
+// NULL-terminated; 0 for either means "none", which is what the older
+// one-argument exec() wrapper passes.
 //
-// The vector is copied into the kernel HERE, before exec_task runs, and
-// deliberately so: exec_task frees the calling image's address space
+// Both vectors are copied into the kernel HERE, before exec_task runs,
+// and deliberately so: exec_task frees the calling image's address space
 // partway through, and these strings live in it.
 int64_t sys_exec(struct syscall_args *a) {
     char path_buf[VFS_MAX_PATH];
@@ -242,8 +268,11 @@ int64_t sys_exec(struct syscall_args *a) {
     struct spawn_args args;
     int rc = copy_user_argv(a->a3, &args);
     if (rc != 0) { return rc; }
+    rc = copy_user_envp(a->a4, &args);
+    if (rc != 0) { spawn_args_free(&args); return rc; }
 
-    int ok = exec_task(path_buf, a->frame, args.argc ? &args : 0);
+    int ok = exec_task(path_buf, a->frame,
+                       (args.argc || args.envc) ? &args : 0);
     spawn_args_free(&args);
     return ok ? 0 : -1;
 }

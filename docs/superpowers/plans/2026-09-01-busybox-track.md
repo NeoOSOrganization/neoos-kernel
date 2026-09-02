@@ -83,7 +83,7 @@ which is BB2's job.
 BB0.  fork duplicates the address-space bookkeeping   <- BLOCKER, first
 BB1.  Build-and-run spike: /bin/busybox to first -ENOSYS   <- DONE
 BB2.  The measured syscall set (was BB1 + BB4)             <- DONE
-BB3.  execve(path, argv, envp)                            <- argv DONE (CS4); envp remains
+BB3.  execve(path, argv, envp)                            <- DONE
 BB4.  Job control                                     (was BB2)
 BB5.  Minimal /proc                                   (was BB3)
 BB6.  Interactive shell bring-up
@@ -328,3 +328,35 @@ the serial log is scraped for the prompts and command output —
   program's terminal again.
 - **DL1–DL3** are deferred, not dropped. Nothing in this track needs
   them; the `fork` fix in BB0 is where file-backed vmas will hook in.
+
+## BB3 result — **DONE** (2026-09-02)
+
+The entry stack is now the full SysV shape: `argc`, `argv[]`, NULL,
+`envp[]`, NULL, auxv. `execve` and a new `spawnve` both carry the
+environment; `execv`/`spawnv` pass an empty one, as their names say.
+init supplies the base set (`PATH=/BIN`, `HOME=/`, `TERM=linux`, `PS1`),
+since nothing above PID 1 has one to hand down.
+
+`tlstest` had asserted `environ[0] == 0` — an empty environment, which
+was correct before this and is now wrong. It asserts the vector is
+well-formed instead (present, every entry `NAME=...`, NULL-terminated);
+*which* variables exist is init's business, not the entry contract's.
+
+**Open, and BusyBox's rather than the kernel's:** a command that `ash`
+launches sees NO environment at all — not `PATH` alone. Four tagged
+probes in `bbspike` separate the hops:
+
+| probe | result |
+|---|---|
+| `spawnve` → `sh -c 'echo $PATH'` | `PATH=/BIN` ✓ |
+| `execve` → `sh -c 'echo $PATH'` | `PATH=/BIN` ✓ |
+| `ash` → `busybox sh -c 'echo $PATH'` | ash's built-in default ✗ |
+| `ash` → `export FOO=bar; busybox sh -c ...` | `FOO=`, `HOME=`, default `PATH` ✗ |
+
+So both kernel paths carry the environment and the loss is inside ash's
+own launching of a child — the whole environment, including a variable
+just exported, which rules out `PATH`'s special handling as the cause.
+The probes are tagged because untagged ones were unreadable: `env`
+prints the same lines whoever ran it and several processes interleave on
+the serial port. Chase this in BB6, where an interactive shell makes it
+directly observable.

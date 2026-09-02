@@ -72,6 +72,9 @@ int dup3(int oldfd, int newfd, int flags);
 // the new process's argv; passing null is the same as spawn(). At most
 // 8 arguments of 128 bytes each -- see docs/stdlib.md.
 int spawnv(const char *path, char *const argv[]);
+// spawnv with an environment. The child's envp is what a program reads
+// through getenv; spawnv itself passes an empty one.
+int spawnve(const char *path, char *const argv[], char *const envp[]);
 
 // sysconf() names. Values match Linux's <bits/confname.h> so a ported
 // program compiled against glibc/musl headers sees the same constants.

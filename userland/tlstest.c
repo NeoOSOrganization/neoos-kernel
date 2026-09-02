@@ -88,10 +88,32 @@ static int check_entry_contract(int argc, char **argv) {
         printf("[tlstest] FAILED: argv is not NULL-terminated\n");
         return 0;
     }
-    if (!environ || environ[0] != 0) {
-        printf("[tlstest] FAILED: environ missing or not empty\n");
+    // environ used to be asserted EMPTY, which was right when the
+    // kernel pushed a bare NULL for it. BB3 gave every process a real
+    // environment from init, so the check is now that the vector is
+    // well-formed: present, NUL-terminated strings of the form NAME=...,
+    // and terminated by a NULL pointer. That is the part the entry
+    // contract actually guarantees -- WHICH variables are init's
+    // business, not this test's.
+    if (!environ) {
+        printf("[tlstest] FAILED: environ is NULL\n");
         return 0;
     }
+    int nenv = 0;
+    for (char **e = environ; *e; e++) {
+        int has_eq = 0;
+        for (const char *c = *e; *c; c++) { if (*c == '=') { has_eq = 1; break; } }
+        if (!has_eq) {
+            printf("[tlstest] FAILED: environ[%d] has no '=': %s\n", nenv, *e);
+            return 0;
+        }
+        if (++nenv > 256) {
+            printf("[tlstest] FAILED: environ is not NULL-terminated\n");
+            return 0;
+        }
+    }
+    printf("[tlstest] entry contract: argc=%d, %d environment variables\n",
+           argc, nenv);
     // The auxv entries TLS actually depends on.
     if (getauxval(AT_PHDR) == 0 || getauxval(AT_PHNUM) == 0 ||
         getauxval(AT_PHENT) == 0) {

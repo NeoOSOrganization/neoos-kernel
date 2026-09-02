@@ -265,10 +265,10 @@ long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a
     case LX_CHDIR:
         return neo(NEO_CHDIR, a1, neo_strlen((const char *)a1), 0, 0, 0, 0);
     case LX_EXECVE:
-        // (path, argv, envp) -> (ptr, len, argv). envp is dropped: NeoOS
-        // has no environment yet, and the auxv the kernel builds pushes
-        // an empty envp. Recorded as a divergence in docs/stdlib.md.
-        return neo(NEO_EXEC, a1, neo_strlen((const char *)a1), a2, 0, 0, 0);
+        // (path, argv, envp) -> (ptr, len, argv, envp). BB3 added the
+        // fourth argument; before it the environment was dropped and
+        // every exec'd program started with an empty one.
+        return neo(NEO_EXEC, a1, neo_strlen((const char *)a1), a2, a3, 0, 0);
     case LX_NEWFSTATAT:
         // (dirfd, path, buf, flags) -> (dirfd, ptr, len, buf, flags)
         return neo(NEO_NEWFSTATAT, a1, a2, neo_strlen((const char *)a2), a3, a4, 0);

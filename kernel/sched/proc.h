@@ -310,10 +310,19 @@ struct spawn_args {
     int    argc;
     char **argv;   // argc entries, each pointing into `blob`
     char  *blob;   // every string, NUL-separated; freed with the args
+
+    // The environment, carried the same way and under the same ceilings
+    // (BB3). Separate from argv rather than appended to it because the
+    // two are separate vectors on the entry stack, with their own NULL
+    // terminators, and a program reads envp by walking past argv's.
+    int    envc;
+    char **envp;
+    char  *env_blob;
 };
 
 // Builds a one-argument vector (argv[0] = path), which is what a spawn
-// with no vector gets. Returns 0 on allocation failure.
+// with no vector gets. The environment is left empty. Returns 0 on
+// allocation failure.
 int  spawn_args_single(struct spawn_args *out, const char *path);
 // Frees what spawn_args_single or the syscall layer allocated. Safe on a
 // zeroed struct.
