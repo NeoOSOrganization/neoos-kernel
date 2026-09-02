@@ -56,9 +56,22 @@ void render_span(const struct term_fb *fb, const struct vt *v,
     }
 }
 
+// Where the cursor was last painted, so it can be wiped when it moves.
+// -1 means "nowhere", which is the state after a clear.
+static int cur_x = -1, cur_y = -1;
+
 void render_cursor(const struct term_fb *fb, const struct vt *v) {
     int x, y, visible;
     vt_cursor(v, &x, &y, &visible);
+
+    // Repaint whatever the cursor was sitting on before deciding
+    // anything else: it must be erased when the cursor moves away, when
+    // it is hidden, and when the view scrolls off the bottom.
+    if (cur_x >= 0 && (cur_x != x || cur_y != y || !visible || vt_view_offset(v) != 0)) {
+        render_span(fb, v, cur_y, cur_x, cur_x + 1);
+        cur_x = cur_y = -1;
+    }
+
     if (!visible || vt_view_offset(v) != 0) return;
 
     int x0 = x * TERM_GLYPH_W, y0 = y * TERM_GLYPH_H;
@@ -78,6 +91,8 @@ void render_cursor(const struct term_fb *fb, const struct vt *v) {
             dst[gx] = ink ? pfg : pbg;
         }
     }
+    cur_x = x;
+    cur_y = y;
 }
 
 // Draws one glyph at a CELL position with explicit colours, bypassing

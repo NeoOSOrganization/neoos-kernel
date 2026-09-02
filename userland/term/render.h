@@ -21,7 +21,14 @@ void render_span(const struct term_fb *fb, const struct vt *v,
                  int row, int col0, int col1);
 
 // Draw the cursor (inverse block) at its cell, if visible and the
-// scrollback view is at the bottom.
+// scrollback view is at the bottom, REPAINTING the cell it last
+// occupied.
+//
+// The repaint is not optional. The cursor is drawn over a cell rather
+// than being part of the grid, so when it moves, the cell it left keeps
+// the inverted block unless something else happens to redraw it. A
+// newline moves the cursor to a cell nothing writes to, which left a
+// white block at the end of every line the user pressed Enter on.
 void render_cursor(const struct term_fb *fb, const struct vt *v);
 
 // Paint a glyph / a string at a cell position with explicit colours,
