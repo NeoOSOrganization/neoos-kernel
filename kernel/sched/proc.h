@@ -59,6 +59,19 @@ struct sigqueue;
 struct thread_table;  // opaque; defined in thread_table.h
 struct fd_table;      // opaque; defined in fd_table.h
 
+// Threads per process. Sixteen was a Phase-2 placeholder, and it was a
+// hard wall: pthread_create simply failed at the seventeenth thread.
+//
+// The number is set by the ADDRESS SPACE, which is the honest
+// constraint. Each thread's stack is THREAD_STACK_STRIDE below the last
+// (four pages plus a guard page), laid out downward from
+// USER_STACK_TOP, and the gap between MMAP_BASE and USER_STACK_TOP is
+// 32 TiB -- so 1024 slots occupies 20 MiB of a region with room for
+// millions. What actually costs something is the per-process bitmap
+// tracking them, at 8 bytes per 64 slots.
+#define MAX_THREADS_PER_PROC 1024
+#define THREAD_SLOT_WORDS    (MAX_THREADS_PER_PROC / 64)
+
 struct process {
     int pid, parent_pid;
     // One count per LIVE thread. When it reaches zero the address space
@@ -113,7 +126,9 @@ struct process {
     struct thread *threads;         // live threads, via thread->proc_next
     struct thread *zombies;         // exited, unjoined; freed at reap
     struct thread_table *thread_table;  // per-process thread hash table (NEW)
-    uint16_t stack_slots;           // bitmap of live thread user stacks
+    // Bitmap of live thread user stacks, one bit per slot. Was a single
+    // uint16_t, which is where the 16-thread ceiling actually lived.
+    uint64_t stack_slots[THREAD_SLOT_WORDS];
     int exiting;
     int exit_code;
     // Set under p->lock by the first proc_reap(); a second waiter that
@@ -239,7 +254,7 @@ void thread_wait_off_cpu(struct thread *t);
 #define USER_STACK_PAGES 4
 #define USER_STACK_TOP 0x0000700000000000ULL
 
-#define MAX_THREADS_PER_PROC 16
+
 
 // Each thread's user stack is USER_STACK_PAGES pages, followed (at
 // LOWER addresses) by one unmapped guard page, so a stack overflow

@@ -1159,6 +1159,13 @@ powers off once nothing is left to reap. A ported daemon that expects a
 shutdown signal will not get one. If PID 1 itself exits, the kernel
 panics (there is nothing to reap the machine or power it off).
 
+A process may hold up to **1024 threads** (was 16). The number comes
+from the thread-stack layout: each thread's stack sits one
+`THREAD_STACK_STRIDE` below the last, downward from `USER_STACK_TOP`,
+and 1024 of them occupy 20 MiB of a 32 TiB gap — so what bounds it is
+the per-process bitmap, not the address space. `thread_create` also had
+a *userland* ceiling of 16 concurrent calls, which is gone.
+
 PIDs are allocated from a bitmap with a **rising cursor that wraps**, so
 a freed pid is not handed out again until the cursor comes back round to
 it. Two consequences worth knowing when porting: pid numbers are not

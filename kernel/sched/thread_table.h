@@ -19,7 +19,10 @@
  */
 
 #define THREAD_HASH_BUCKETS 16    // Per-process; tunable
-#define MAX_THREADS_PER_PROC 16   // Current hard limit (Phase 2 will increase)
+// MAX_THREADS_PER_PROC lives in sched/proc.h, which owns the thread
+// stack layout the number actually comes from. It was DUPLICATED here
+// at 16, and the duplicate silently won wherever this header was
+// included first -- so raising the real one had no effect there.
 
 struct thread;
 struct process;

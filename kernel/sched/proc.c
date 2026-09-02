@@ -121,8 +121,11 @@ int thread_stack_alloc(struct process *p, uint64_t *out_top) {
     uint64_t f = spin_lock_irqsave(&p->mm_lock);
 
     int slot = -1;
-    for (int i = 0; i < MAX_THREADS_PER_PROC; i++) {
-        if (!(p->stack_slots & (1u << i))) { slot = i; break; }
+    for (int w = 0; w < THREAD_SLOT_WORDS && slot < 0; w++) {
+        if (p->stack_slots[w] == ~0ULL) { continue; }   // word full, skip it
+        for (int b = 0; b < 64; b++) {
+            if (!(p->stack_slots[w] & (1ULL << b))) { slot = w * 64 + b; break; }
+        }
     }
     if (slot < 0) { spin_unlock_irqrestore(&p->mm_lock, f); return -1; }
 
@@ -148,7 +151,7 @@ int thread_stack_alloc(struct process *p, uint64_t *out_top) {
     }
     // The guard page immediately below this stack is simply never mapped.
 
-    p->stack_slots |= (uint16_t)(1u << slot);
+    p->stack_slots[slot >> 6] |= 1ULL << (slot & 63);
     *out_top = top;
     spin_unlock_irqrestore(&p->mm_lock, f);
     return slot;
@@ -168,7 +171,7 @@ void thread_stack_free(struct process *p, int slot) {
         uint64_t v = top - (uint64_t)(USER_STACK_PAGES - i) * PMM_FRAME_SIZE;
         paging_unmap_from(pml4, v, 1);
     }
-    p->stack_slots &= (uint16_t)~(1u << slot);
+    p->stack_slots[slot >> 6] &= ~(1ULL << (slot & 63));
     spin_unlock_irqrestore(&p->mm_lock, f);
     // With mm_lock released: the unmapped frames are only deferred until
     // a shootdown runs, and a sibling on another CPU may still hold a
@@ -476,7 +479,13 @@ struct process *spawn_argv(const char *path, const struct spawn_args *args) {
 static void exec_reduce_to_one_thread(struct process *p) {
     struct thread *self = current_thread();
 
-    struct thread *victims[MAX_THREADS_PER_PROC];
+    // Heap, not stack: at MAX_THREADS_PER_PROC this array is 8 KiB, and
+    // the kernel stack is 16 KiB. On allocation failure the process is
+    // left alone rather than half-reduced -- exec's caller sees the
+    // failure and keeps running its old image, which is the documented
+    // behaviour for every other way exec can fail.
+    struct thread **victims = kmalloc(MAX_THREADS_PER_PROC * sizeof(*victims));
+    if (!victims) { return; }
     int nv = 0;
     uint64_t f = spin_lock_irqsave(&p->lock);
     for (struct thread *t = p->threads;
@@ -488,6 +497,7 @@ static void exec_reduce_to_one_thread(struct process *p) {
         thread_kill_solo(victims[i]);
         thread_put(victims[i]);
     }
+    kfree(victims);
     if (nv == 0) { return; }
 
     // Now WAIT for them, which is the part that makes this a fix rather
@@ -568,7 +578,7 @@ int exec_task(const char *path, struct syscall_frame *frame,
     // returned every frame they described.
     vma_forget_all(p);
     p->mmap_next   = MMAP_BASE;
-    p->stack_slots = 0;
+    for (int i = 0; i < THREAD_SLOT_WORDS; i++) { p->stack_slots[i] = 0; }
     uint64_t user_stack_top;
     if (thread_stack_alloc(p, &user_stack_top) != 0) {
         return 0; // caller is left running its old program
@@ -775,7 +785,9 @@ struct thread *fork_task(struct syscall_frame *frame) {
     child_proc->parent_pid  = parent->pid;
     child_proc->pgid        = parent->pgid;
     child_proc->sid         = parent->sid;
-    child_proc->stack_slots = parent->stack_slots;
+    for (int i = 0; i < THREAD_SLOT_WORDS; i++) {
+        child_proc->stack_slots[i] = parent->stack_slots[i];
+    }
     // Copied by value, references included -- see docs/stdlib.md.
     if (!fd_table_dup(child_proc->fd_table, parent->fd_table)) {
         serial_write_string("[process] fork FAILED: out of memory for fd table\n");
@@ -1028,19 +1040,40 @@ void process_exit(int code) {
         // with the lock released: thread_kill -> signal_send_thread can
         // reach thread_wait_off_cpu(), which spins on a sibling that may
         // itself be blocked on p->lock in thread_exit_self.
-        // MAX_THREADS_PER_PROC bounds the snapshot.
-        struct thread *victims[MAX_THREADS_PER_PROC];
-        int nv = 0;
-        uint64_t sf = spin_lock_irqsave(&p->lock);
-        for (struct thread *t = p->threads;
-             t && nv < MAX_THREADS_PER_PROC; t = t->proc_next) {
-            if (t != self) { thread_get(t); victims[nv++] = t; }
+        // MAX_THREADS_PER_PROC bounds the snapshot, and it is allocated
+        // rather than held on the kernel stack: at 1024 threads the
+        // array is 8 KiB against a 16 KiB stack. If the allocation
+        // fails, the siblings are killed in batches off a small stack
+        // array instead -- this path is a process DYING, and refusing to
+        // proceed would leave it half-exited.
+        struct thread *small[16];
+        struct thread **victims = kmalloc(MAX_THREADS_PER_PROC * sizeof(*victims));
+        int cap = victims ? MAX_THREADS_PER_PROC : (int)(sizeof small / sizeof *small);
+        if (!victims) { victims = small; }
+
+        // Rounds, not one pass: a snapshot that FILLS the array may have
+        // left siblings behind, and the old code (a fixed 16-entry array
+        // and `nv < MAX_THREADS_PER_PROC` in the walk) simply did leave
+        // them -- silently, on a process that had been told to die. The
+        // round count is bounded because thread_kill makes progress:
+        // killed siblings leave p->threads, so each round that fills the
+        // array removes `cap` of them.
+        for (int round = 0; round < 64; round++) {
+            int nv = 0;
+            uint64_t sf = spin_lock_irqsave(&p->lock);
+            for (struct thread *t = p->threads;
+                 t && nv < cap; t = t->proc_next) {
+                if (t != self) { thread_get(t); victims[nv++] = t; }
+            }
+            spin_unlock_irqrestore(&p->lock, sf);
+            if (nv == 0) { break; }
+            // Refs held across the SIGKILL close the window where a
+            // sibling is freed by a concurrent same-process thread_join
+            // between the snapshot and the kill.
+            for (int i = 0; i < nv; i++) { thread_kill(victims[i]); thread_put(victims[i]); }
+            if (nv < cap) { break; }   // the whole list fitted this time
         }
-        spin_unlock_irqrestore(&p->lock, sf);
-        // Refs held across the SIGKILL close the window where a sibling
-        // is freed by a concurrent same-process thread_join between the
-        // snapshot and the kill.
-        for (int i = 0; i < nv; i++) { thread_kill(victims[i]); thread_put(victims[i]); }
+        if (victims != small) { kfree(victims); }
 
         // PID 1 must never exit: nothing would reap the machine's
         // processes or power it off. Treat it as a fatal kernel event.
