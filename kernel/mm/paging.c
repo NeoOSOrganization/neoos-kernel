@@ -25,8 +25,16 @@ extern uint64_t p4_table[512]; // boot.asm's live PML4 -- see boot/boot.asm
 // process page tables are being built.
 static int physmap_installed = 0;
 
+// Returns 0 if no frame was available. Checking that is not optional:
+// with pmm_alloc's result unchecked, phys was 0 and phys_to_virt(0) is
+// the PHYSMAP BASE, so this zeroed 512 entries at the start of physical
+// memory as seen through the physmap -- silent, wholesale corruption on
+// every failed table allocation, worse than the crash that followed it.
+//
+// Found by CS3's pmm_alloc failure injection at one failure in 100.
 static uint64_t alloc_table_frame(void) {
     uint64_t phys = pmm_alloc(0);
+    if (!phys) { return 0; }
     uint64_t *table = physmap_installed ? (uint64_t *)phys_to_virt(phys) : (uint64_t *)(uintptr_t)phys;
     for (int i = 0; i < 512; i++) {
         table[i] = 0;
@@ -38,11 +46,17 @@ static uint64_t alloc_table_frame(void) {
 // entry isn't present yet. Assumes 4KiB-page-tree structure throughout
 // (not valid on huge-page-mapped regions -- see paging.h).
 static uint64_t *table_entry(uint64_t *table, unsigned index, int create, uint64_t create_flags) {
+    if (!table) { return 0; }
     if (!(table[index] & PAGE_PRESENT)) {
         if (!create) {
             return 0;
         }
         uint64_t new_table_phys = alloc_table_frame();
+        // On failure, leave the entry ALONE. Writing `0 | create_flags`
+        // installed an entry marked PRESENT pointing at physical 0, and
+        // every later walk followed it -- free_address_space died on one
+        // with a #GP, having passed its PAGE_PRESENT check honestly.
+        if (!new_table_phys) { return 0; }
         table[index] = new_table_phys | create_flags;
     }
     uint64_t next_phys = table[index] & PAGE_ADDR_MASK;
@@ -58,6 +72,10 @@ int paging_map_into(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags
     uint64_t *pdpt = table_entry(pml4, PML4_INDEX(virt), 1, default_flags);
     uint64_t *pd   = table_entry(pdpt, PDPT_INDEX(virt), 1, default_flags);
     uint64_t *pt   = table_entry(pd, PD_INDEX(virt), 1, default_flags);
+    // Any level can fail now that a failed table allocation reports it.
+    // The read-only walkers below always checked; this path did not, and
+    // dereferenced whatever it got.
+    if (!pt) { return -1; }
 
     pt[PT_INDEX(virt)] = (phys & PAGE_ADDR_MASK) | flags | PAGE_PRESENT;
     __asm__ volatile ("invlpg (%0)" :: "r"(virt) : "memory");

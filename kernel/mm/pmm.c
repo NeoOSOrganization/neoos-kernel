@@ -103,6 +103,32 @@ static uint64_t pmm_alloc_locked(unsigned order) {
 static void pmm_free_locked(uint64_t phys_addr, unsigned order) {
     uint64_t frame = phys_to_frame(phys_addr);
 
+    // Validate before touching frame_refcount. This used to index
+    // straight into it with whatever it was handed, so a free of 0 or of
+    // a stale address walked off the end of the array and decremented
+    // unrelated memory -- a wild kernel write with no diagnostic at all.
+    //
+    // Found by CS3's pmm_alloc failure injection: at one failure in 100,
+    // a caller that ignored an allocation failure went on to free the
+    // address it never got, and the crash landed here as a page fault
+    // inside pmm_free with pmm_lock held (rip in the refcount loop,
+    // cr2 a physical-looking address). The secondary "rank inversion
+    // acquiring=tty-pts holding=pmm" panic was just the exception
+    // printer running underneath that lock.
+    //
+    // Ignoring a bad free leaks at worst; honouring one corrupts memory
+    // that belongs to something else.
+    if ((phys_addr & (PMM_FRAME_SIZE - 1)) != 0 ||
+        frame >= PMM_MAX_FRAMES ||
+        (1ULL << order) > PMM_MAX_FRAMES - frame) {
+        serial_write_string("[pmm] IGNORED free of invalid phys=");
+        serial_write_hex64(phys_addr);
+        serial_write_string(" order=");
+        serial_write_hex64((uint64_t)order);
+        serial_write_string("\n");
+        return;
+    }
+
     for (uint64_t i = 0; i < (1ULL << order); i++) {
         frame_refcount[frame + i]--;
     }
@@ -135,6 +161,20 @@ static void pmm_free_locked(uint64_t phys_addr, unsigned order) {
 // within an already-locked region, and locking them too would be a
 // same-rank self-deadlock.
 uint64_t pmm_alloc(unsigned order) {
+#ifdef NEOOS_DEBUG_PMMFAIL
+    // Fail one allocation in N, by count. Deterministic rather than
+    // random on purpose: a failure that cannot be reproduced from the
+    // build flag alone is a bug report nobody can act on. The counter is
+    // unlocked because exactness does not matter here -- only that
+    // failures keep arriving.
+    {
+        static volatile uint64_t pmmfail_n;
+        if ((__atomic_add_fetch(&pmmfail_n, 1, __ATOMIC_RELAXED)
+             % NEOOS_DEBUG_PMMFAIL) == 0) {
+            return 0;
+        }
+    }
+#endif
     uint64_t flags = spin_lock_irqsave(&pmm_lock);
     uint64_t phys = pmm_alloc_locked(order);
     spin_unlock_irqrestore(&pmm_lock, flags);

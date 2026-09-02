@@ -23,6 +23,12 @@ ifdef DEBUG_HZ
 CFLAGS += -DNEOOS_DEBUG_HZ=$(DEBUG_HZ)
 endif
 
+# Fail one pmm_alloc in N, deterministically by count, so the
+# "if (!frame) ..." paths that never run in a 128 MiB VM actually run.
+ifdef DEBUG_PMMFAIL
+CFLAGS += -DNEOOS_DEBUG_PMMFAIL=$(DEBUG_PMMFAIL)
+endif
+
 ifeq ($(MAKECMDGOALS),test)
 CFLAGS += -DNEOOS_TEST_HOOKS
 endif
