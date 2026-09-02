@@ -89,7 +89,28 @@ struct tty;
 // Where a tty's cooked output goes. The console backend writes serial +
 // framebuffer; the pty backend appends to the master's read buffer.
 struct tty_backend {
-    void (*output)(struct tty *t, const char *s, uint32_t n);
+    // Returns how many of the `n` bytes were ACCEPTED. A backend with a
+    // bounded buffer -- the pty master's queue -- may take fewer, and
+    // the caller then blocks rather than discarding the rest.
+    //
+    // This used to return void, and pty_output silently dropped
+    // everything that did not fit. A program painting a screen faster
+    // than the terminal drained it lost bytes mid-escape-sequence, so
+    // the rest of the sequence arrived as visible garbage. Found by
+    // running 3d-ascii-viewer, which writes a full colour frame at a
+    // time.
+    uint32_t (*output)(struct tty *t, const char *s, uint32_t n);
+
+    // How many bytes `output` would accept right now. The console has
+    // no queue and answers "as much as you like"; the pty master's
+    // queue answers what is free.
+    //
+    // This exists so cooked output can size a BLOCK it knows will fit,
+    // rather than offering one byte at a time and checking each. Doing
+    // it per byte works but makes the console render once per
+    // character instead of once per 64-byte block, which was slow
+    // enough to hang the boot.
+    uint32_t (*space)(struct tty *t);
 };
 
 struct tty {
@@ -112,6 +133,8 @@ struct tty {
     // pty master side: what the slave wrote, waiting for the master read.
     char     outq[TTY_BUF]; uint32_t out_head, out_len;
     struct waitq out_readers;
+    // Writers parked because outq is full. Woken by the master's read.
+    struct waitq out_writers;
     // CS5.2: pollers registered on THIS tty. One head for both
     // directions -- poll_core re-scans on any wake, so a second list
     // would only save a scan it does anyway.

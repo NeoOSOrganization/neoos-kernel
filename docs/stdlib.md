@@ -1246,6 +1246,14 @@ with none gets `-ENXIO` from `open("/dev/tty")`, as on Linux.
 root holds directories only. `/tmp` is a ramfs, so tests that must write
 to a real filesystem use `/var/tmp`.
 
+**A pty's output has flow control.** A write into a full master queue
+blocks until the master drains, and returns the partial count if
+interrupted. It used to DISCARD what did not fit and report success for
+it, so a program painting a screen faster than the terminal read it lost
+bytes — and a byte lost inside an escape sequence turns the rest of that
+sequence into visible text. Found by running `3d-ascii-viewer`, which
+writes a full colour frame at a time.
+
 **`nsh` is the NeoOS shell** (`/bin/nsh.nex`): a prompt, one line at a
 time split on whitespace, the builtins `cd` `pwd` `echo` `env` `help`
 `exit`, and `PATH` lookup for everything else. It reports a non-zero

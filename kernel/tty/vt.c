@@ -94,7 +94,7 @@ static void render_full_locked(struct vt_console *vc) {
 
 // --- tty backend: cooked output feeds the parser ---------------------
 
-static void vt_backend_output(struct tty *t, const char *s, uint32_t n) {
+static uint32_t vt_backend_output(struct tty *t, const char *s, uint32_t n) {
     struct vt_console *vc = t->backend_priv;
     kvt_feed(&vc->scr, s, n);                  // under t->lock already
     uint64_t f = vt_panicking ? 0 : spin_lock_irqsave(&vt_lock);
@@ -103,8 +103,11 @@ static void vt_backend_output(struct tty *t, const char *s, uint32_t n) {
         if (vc->kd_mode == KD_TEXT) { render_diff_locked(vc); }
     }
     if (!vt_panicking) { spin_unlock_irqrestore(&vt_lock, f); }
-}
-static const struct tty_backend vt_backend = { vt_backend_output };
+    return n;   // the screen has no bounded queue: it always takes all of it
+}// The screen has no bounded queue: it always takes everything offered.
+static uint32_t vt_backend_space(struct tty *t) { (void)t; return 0xFFFFFFFFu; }
+
+static const struct tty_backend vt_backend = { vt_backend_output, vt_backend_space };
 
 // --- public ------------------------------------------------------
 

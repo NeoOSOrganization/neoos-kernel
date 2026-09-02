@@ -65,6 +65,7 @@ void tty_obj_init(struct tty *t, const struct tty_backend *b, void *priv) {
     spin_init(&t->lock, LOCK_RANK_TTY, priv ? "tty-pts" : "tty-con");
     waitq_init(&t->readers);
     waitq_init(&t->out_readers);
+    waitq_init(&t->out_writers);
     poll_head_init(&t->poll, "tty-poll");
     t->backend = b;
     t->backend_priv = priv;
@@ -93,17 +94,33 @@ void tty_init(void) {
 
 // Cooked output: expand LF -> CRLF when OPOST|ONLCR, then one call into
 // the backend so a userland write cannot interleave with kernel output.
-static void tty_out_cooked(struct tty *t, const char *s, uint32_t n) {
+// Returns how many bytes OF THE INPUT were consumed. Stops early when
+// the backend cannot take more, so the caller can wait for room instead
+// of throwing the remainder away.
+static uint32_t tty_out_cooked(struct tty *t, const char *s, uint32_t n) {
     int post = (t->tio.c_oflag & OPOST) && (t->tio.c_oflag & ONLCR);
-    if (!post) { t->backend->output(t, s, n); return; }
+    if (!post) { return t->backend->output(t, s, n); }
+
+    // Take only as much input as is CERTAIN to fit once expanded, then
+    // write it in blocks. Two output bytes per input byte is the worst
+    // case (LF -> CRLF), so half the free space is always safe. Sizing
+    // the work up front is what keeps this a block write: the
+    // alternative -- offer a byte, see if it was taken -- renders the
+    // console once per character.
+    uint32_t space = t->backend->space ? t->backend->space(t) : n * 2;
+    uint32_t max_in = space / 2;
+    if (max_in > n) { max_in = n; }
+    if (max_in == 0) { return 0; }
+
     char buf[64];
     uint32_t k = 0;
-    for (uint32_t i = 0; i < n; i++) {
+    for (uint32_t i = 0; i < max_in; i++) {
         if (k >= sizeof(buf) - 2) { t->backend->output(t, buf, k); k = 0; }
         if (s[i] == '\n') { buf[k++] = '\r'; }
         buf[k++] = s[i];
     }
     if (k) { t->backend->output(t, buf, k); }
+    return max_in;
 }
 
 static void tty_echo(struct tty *t, char c) {
@@ -111,13 +128,41 @@ static void tty_echo(struct tty *t, char c) {
 }
 
 int64_t tty_obj_write(struct tty *t, const void *buf, uint32_t len) {
-    uint64_t f = spin_lock_irqsave(&t->lock);
-    tty_out_cooked(t, (const char *)buf, len);
-    spin_unlock_irqrestore(&t->lock, f);
-    // A pty backend just appended to outq under the lock; wake the
-    // master reader now that it is dropped. Harmless for the console
-    // (out_readers is always empty there).
-    (t->backend_priv ? tty_wake_out_readers(t) : (void)0);
+    const char *s = (const char *)buf;
+    uint32_t done = 0;
+
+    // Loop, because a pty's output queue is 1 KiB and a program may
+    // write far more than that in one call. The old version wrote once
+    // and returned `len` regardless -- claiming success for bytes the
+    // backend had silently dropped.
+    while (done < len) {
+        uint64_t f = spin_lock_irqsave(&t->lock);
+        uint32_t n = tty_out_cooked(t, s + done, len - done);
+        if (n == 0 && t->hung_up) {
+            // Nothing will ever drain this queue again.
+            spin_unlock_irqrestore(&t->lock, f);
+            return done ? (int64_t)done : -EIO;
+        }
+        if (n == 0) {
+            // No room. Sleep until the master drains; waitq_sleep drops
+            // t->lock while parked and takes it again on the way out.
+            int rc = waitq_sleep(&t->out_writers, &t->lock);
+            spin_unlock_irqrestore(&t->lock, f);
+            if (rc == -EINTR) {
+                // Report the partial write rather than an error: the
+                // bytes already accepted really were written, and a
+                // caller told otherwise would send them twice.
+                return done ? (int64_t)done : -EINTR;
+            }
+            continue;
+        }
+        done += n;
+        spin_unlock_irqrestore(&t->lock, f);
+        // A pty backend just appended to outq under the lock; wake the
+        // master reader now that it is dropped. Harmless for the console
+        // (out_readers is always empty there).
+        (t->backend_priv ? tty_wake_out_readers(t) : (void)0);
+    }
     return (int64_t)len;
 }
 

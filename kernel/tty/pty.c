@@ -44,14 +44,23 @@ static int pts_devfs_open(struct file_descriptor *f);
 // The slave backend: its cooked output is what the master reads. Called
 // with slave->lock HELD (tty_out_cooked runs under it), so this only
 // touches outq; tty.c wakes out_readers once the lock is dropped.
-static void pty_output(struct tty *t, const char *s, uint32_t n) {
-    for (uint32_t i = 0; i < n; i++) {
+// Accepts what fits and REPORTS it. Everything that did not fit used to
+// be dropped on the floor, which a caller had no way to detect.
+static uint32_t pty_output(struct tty *t, const char *s, uint32_t n) {
+    uint32_t i = 0;
+    for (; i < n; i++) {
         if (t->out_len >= TTY_BUF) { break; }
         t->outq[(t->out_head + t->out_len) % TTY_BUF] = s[i];
         t->out_len++;
     }
+    return i;
 }
-static const struct tty_backend pty_backend = { pty_output };
+// Free room in the master's queue. See tty.h.
+static uint32_t pty_space(struct tty *t) {
+    return (t->out_len >= TTY_BUF) ? 0 : (TTY_BUF - t->out_len);
+}
+
+static const struct tty_backend pty_backend = { pty_output, pty_space };
 
 // ---- refcounting --------------------------------------------------
 // A struct pty lives until every fd on either end is closed. The counts
@@ -117,6 +126,11 @@ static int64_t ptm_read(struct file_descriptor *f, void *buf, uint64_t len) {
         t->out_len--;
     }
     spin_unlock_irqrestore(&t->lock, fl);
+    // Room in the queue again: wake anything blocked writing into it.
+    // Without this the flow control added with it would be a deadlock
+    // rather than a fix -- the writer sleeps and nothing ever wakes it.
+    waitq_wake_all(&t->out_writers);
+    poll_head_notify(&t->poll);
     return (int64_t)k;
 }
 
@@ -226,6 +240,11 @@ static void ptm_close(struct file_descriptor *f) {
         // enough for M1a; M2's init hangs sessions up properly. See
         // docs/stdlib.md.
         tty_wake_readers(&pt->slave);
+        // ...and anything blocked WRITING into the queue. Nothing will
+        // ever drain it now, so a writer parked there would sleep for
+        // good. It wakes, finds the tty hung up, and its write returns
+        // what it had already managed.
+        waitq_wake_all(&pt->slave.out_writers);
     }
     f->priv = 0;
     pty_unref(pt, &pt->master_refs);
