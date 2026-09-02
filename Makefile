@@ -241,6 +241,16 @@ ports-test: ports iso disk-image
 	@echo "PORTS PASSED: 3d-ascii-viewer rendered and exited 0, no missing syscalls"
 
 
+# login links against musl, not libneoos, for one reason: crypt().
+# musl ships SHA-256-crypt, SHA-512-crypt, MD5 and bcrypt back-ends, all
+# pure computation with no files and no randomness -- so NeoOS gets real
+# password hashing with nothing ported and nothing hand-rolled.
+$(USERLAND_BUILD)/LOGIN.ELF: $(USERLAND_DIR)/musl/login.c $(USERLAND_DIR)/user.ld $(MUSL_LIB)
+	mkdir -p $(USERLAND_BUILD)
+	$(CC) $(MUSL_CFLAGS) -T $(USERLAND_DIR)/user.ld -z noexecstack -o $@ \
+		$(MUSL_DIR)/lib/crt1.o $(USERLAND_DIR)/musl/login.c \
+		-L$(MUSL_DIR)/lib -lc -lgcc
+
 $(USERLAND_BUILD)/MUSLFORK.ELF: $(USERLAND_DIR)/musl/forkchild.c $(USERLAND_DIR)/user.ld $(MUSL_LIB)
 	mkdir -p $(USERLAND_BUILD)
 	$(CC) $(MUSL_CFLAGS) -T $(USERLAND_DIR)/user.ld -z noexecstack -o $@ \
@@ -419,6 +429,10 @@ $(USERLAND_BUILD)/NSHTEST.ELF: $(USERLAND_DIR)/nshtest.c $(USERLAND_DIR)/user.ld
 	@mkdir -p $(USERLAND_BUILD)
 	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/nshtest.c -L$(LIB_BUILD) -lneoos
 
+$(USERLAND_BUILD)/LOGINTEST.ELF: $(USERLAND_DIR)/logintest.c $(USERLAND_DIR)/user.ld $(LIB_BUILD)/crt0.o $(LIB_BUILD)/libneoos.a
+	@mkdir -p $(USERLAND_BUILD)
+	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/logintest.c -L$(LIB_BUILD) -lneoos
+
 $(USERLAND_BUILD)/RANDTEST.ELF: $(USERLAND_DIR)/randtest.c $(USERLAND_DIR)/user.ld $(LIB_BUILD)/crt0.o $(LIB_BUILD)/libneoos.a
 	@mkdir -p $(USERLAND_BUILD)
 	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/randtest.c -L$(LIB_BUILD) -lneoos
@@ -499,7 +513,7 @@ $(USERLAND_BUILD)/MPITEST.ELF: $(USERLAND_DIR)/mpitest.c $(USERLAND_DIR)/user.ld
 	mkdir -p $(USERLAND_BUILD)
 	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/mpitest.c -L$(LIB_BUILD) -lneoos
 
-$(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_BUILD)/PARENT.ELF $(USERLAND_BUILD)/LOOPER.ELF $(USERLAND_BUILD)/YIELDER.ELF $(USERLAND_BUILD)/FAULTER.ELF $(USERLAND_BUILD)/FILEIO.ELF $(USERLAND_BUILD)/SSE_TEST.ELF $(USERLAND_BUILD)/FORKTEST.ELF $(USERLAND_BUILD)/EXECTARG.ELF $(USERLAND_BUILD)/MOUNTTST.ELF $(USERLAND_BUILD)/VFSTEST.ELF $(USERLAND_BUILD)/VTTEST.ELF $(USERLAND_BUILD)/ACTIVETTYTEST.ELF $(USERLAND_BUILD)/VTSWITCHTEST.ELF $(USERLAND_BUILD)/TERM.ELF $(USERLAND_BUILD)/TERMCHILD.ELF $(USERLAND_BUILD)/THRDTEST.ELF $(USERLAND_BUILD)/SIGTEST.ELF $(USERLAND_BUILD)/AVXTEST.ELF $(USERLAND_BUILD)/MMAPTEST.ELF $(USERLAND_BUILD)/REBTEST.ELF $(USERLAND_BUILD)/ORPHANTEST.ELF $(USERLAND_BUILD)/INIT.ELF $(USERLAND_BUILD)/FBTEST.ELF $(USERLAND_BUILD)/POLLTEST.ELF $(USERLAND_BUILD)/POLLTRUNC.ELF $(USERLAND_BUILD)/ARGVTEST.ELF $(USERLAND_BUILD)/FDALLOC.ELF $(USERLAND_BUILD)/THRDMANY.ELF $(USERLAND_BUILD)/BBSPIKE.ELF $(USERLAND_BUILD)/NEXCHECK.ELF $(USERLAND_BUILD)/PERMTEST.ELF $(USERLAND_BUILD)/RANDTEST.ELF $(USERLAND_BUILD)/NSH.ELF $(USERLAND_BUILD)/NSHTEST.ELF $(USERLAND_BUILD)/BBSH.ELF $(USERLAND_BUILD)/TLBSTORM.ELF $(USERLAND_BUILD)/FORKSTORM.ELF $(USERLAND_BUILD)/PTYCHURN.ELF $(USERLAND_BUILD)/SIGSTORM.ELF $(USERLAND_BUILD)/POLLSTORM.ELF $(USERLAND_BUILD)/FAULTFLOOD.ELF $(USERLAND_BUILD)/PTYTEST.ELF $(USERLAND_BUILD)/SMPTEST.ELF $(USERLAND_BUILD)/EVTEST.ELF $(USERLAND_BUILD)/IPCTEST.ELF $(USERLAND_BUILD)/PIPETEST.ELF $(USERLAND_BUILD)/TLSTEST.ELF $(USERLAND_BUILD)/NETTEST.ELF $(USERLAND_BUILD)/MPITEST.ELF $(USERLAND_BUILD)/CWDTEST.ELF $(USERLAND_BUILD)/STATTEST.ELF $(USERLAND_BUILD)/DIRTEST.ELF $(USERLAND_BUILD)/LFNTEST.ELF $(USERLAND_BUILD)/TIER0.ELF $(USERLAND_BUILD)/MUSLHELO.ELF $(USERLAND_BUILD)/MUSLFORK.ELF $(USERLAND_BUILD)/TTYTEST.ELF
+$(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_BUILD)/PARENT.ELF $(USERLAND_BUILD)/LOOPER.ELF $(USERLAND_BUILD)/YIELDER.ELF $(USERLAND_BUILD)/FAULTER.ELF $(USERLAND_BUILD)/FILEIO.ELF $(USERLAND_BUILD)/SSE_TEST.ELF $(USERLAND_BUILD)/FORKTEST.ELF $(USERLAND_BUILD)/EXECTARG.ELF $(USERLAND_BUILD)/MOUNTTST.ELF $(USERLAND_BUILD)/VFSTEST.ELF $(USERLAND_BUILD)/VTTEST.ELF $(USERLAND_BUILD)/ACTIVETTYTEST.ELF $(USERLAND_BUILD)/VTSWITCHTEST.ELF $(USERLAND_BUILD)/TERM.ELF $(USERLAND_BUILD)/TERMCHILD.ELF $(USERLAND_BUILD)/THRDTEST.ELF $(USERLAND_BUILD)/SIGTEST.ELF $(USERLAND_BUILD)/AVXTEST.ELF $(USERLAND_BUILD)/MMAPTEST.ELF $(USERLAND_BUILD)/REBTEST.ELF $(USERLAND_BUILD)/ORPHANTEST.ELF $(USERLAND_BUILD)/INIT.ELF $(USERLAND_BUILD)/FBTEST.ELF $(USERLAND_BUILD)/POLLTEST.ELF $(USERLAND_BUILD)/POLLTRUNC.ELF $(USERLAND_BUILD)/ARGVTEST.ELF $(USERLAND_BUILD)/FDALLOC.ELF $(USERLAND_BUILD)/THRDMANY.ELF $(USERLAND_BUILD)/BBSPIKE.ELF $(USERLAND_BUILD)/NEXCHECK.ELF $(USERLAND_BUILD)/PERMTEST.ELF $(USERLAND_BUILD)/RANDTEST.ELF $(USERLAND_BUILD)/LOGINTEST.ELF $(USERLAND_BUILD)/NSH.ELF $(USERLAND_BUILD)/NSHTEST.ELF $(USERLAND_BUILD)/BBSH.ELF $(USERLAND_BUILD)/TLBSTORM.ELF $(USERLAND_BUILD)/FORKSTORM.ELF $(USERLAND_BUILD)/PTYCHURN.ELF $(USERLAND_BUILD)/SIGSTORM.ELF $(USERLAND_BUILD)/POLLSTORM.ELF $(USERLAND_BUILD)/FAULTFLOOD.ELF $(USERLAND_BUILD)/PTYTEST.ELF $(USERLAND_BUILD)/SMPTEST.ELF $(USERLAND_BUILD)/EVTEST.ELF $(USERLAND_BUILD)/IPCTEST.ELF $(USERLAND_BUILD)/PIPETEST.ELF $(USERLAND_BUILD)/TLSTEST.ELF $(USERLAND_BUILD)/NETTEST.ELF $(USERLAND_BUILD)/MPITEST.ELF $(USERLAND_BUILD)/CWDTEST.ELF $(USERLAND_BUILD)/STATTEST.ELF $(USERLAND_BUILD)/DIRTEST.ELF $(USERLAND_BUILD)/LFNTEST.ELF $(USERLAND_BUILD)/TIER0.ELF $(USERLAND_BUILD)/MUSLHELO.ELF $(USERLAND_BUILD)/MUSLFORK.ELF $(USERLAND_BUILD)/LOGIN.ELF $(USERLAND_BUILD)/TTYTEST.ELF
 	mkdir -p $(DISK_SRC)/dir $(DISK_SRC)/nex
 	printf 'Hello from NeoOS FAT16!\n' > $(DISK_SRC)/hello.txt
 	head -c 8192 /dev/zero | tr '\0' 'N' > $(DISK_SRC)/bigfile.txt
@@ -589,6 +603,10 @@ $(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_B
 	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/nsh.nex ::bin/nsh.nex
 	@./tools/nexify.sh $(USERLAND_BUILD)/NSHTEST.ELF $(DISK_SRC)/nex/nshtest.nex
 	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/nshtest.nex ::usr/tests/nshtest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/LOGINTEST.ELF $(DISK_SRC)/nex/logintest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/logintest.nex ::usr/tests/logintest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/LOGIN.ELF $(DISK_SRC)/nex/login.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/login.nex ::sbin/login.nex
 	@./tools/nexify.sh $(USERLAND_BUILD)/RANDTEST.ELF $(DISK_SRC)/nex/randtest.nex
 	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/randtest.nex ::usr/tests/randtest.nex
 	@./tools/nexify.sh $(USERLAND_BUILD)/PERMTEST.ELF $(DISK_SRC)/nex/permtest.nex
@@ -720,6 +738,7 @@ $(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_B
 	  '# BBSH runs an interactive shell on a pty and claims the active' \
 	  '# tty for it. A wait entry for the same reason PTYCHURN is one.' \
 	  'wait /usr/tests/nshtest.nex' \
+	  'wait /usr/tests/logintest.nex' \
 	  'wait /usr/tests/bbsh.nex' \
 	  'spawn /usr/tests/tlbstorm.nex' \
 	  'spawn /usr/tests/forkstorm.nex' \
@@ -757,6 +776,17 @@ $(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_B
 	  'cat /etc/nsh.logo' \
 	  > $(DISK_SRC)/nshrc
 	@mcopy -o -i $(DISK_IMG) $(DISK_SRC)/nshrc ::etc/nshrc
+	@# /etc/passwd, with REAL hashes: $$6$$ is SHA-512-crypt, a
+	@# rounds-based KDF that musl's crypt() verifies on the other side.
+	@# Generated here rather than checked in, so the file and the
+	@# passwords documented beside it cannot drift apart.
+	@printf '%s\n' \
+	  '# name:uid:gid:home:shell:hash   -- see docs/stdlib.md' \
+	  "god:0:0:/root:/bin/nsh.nex:$$(openssl passwd -6 -salt neoosgod god)" \
+	  "neo:1000:1000:/home/neo:/bin/nsh.nex:$$(openssl passwd -6 -salt neoosusr neo)" \
+	  > $(DISK_SRC)/passwd
+	@mcopy -o -i $(DISK_IMG) $(DISK_SRC)/passwd ::etc/passwd
+	@mmd -i $(DISK_IMG) ::home/neo 2>/dev/null || true
 
 # 64MB, not 32: FAT32 needs at least 65525 clusters, and mkfs.fat warns
 # that a 32MB image falls below that. Depends on $(DISK_IMG) only so
@@ -814,10 +844,13 @@ shell:
 	@$(MAKE) QUIET=1 clean-kernel busybox iso disk-image
 	@printf '%s\n' \
 	  '# generated by `make shell` -- an interactive shell, alone' \
-	  'respawn /bin/term.nex /bin/nsh.nex nsh' \
+	  'respawn /bin/term.nex /sbin/login.nex login' \
 	  > $(BUILD_DIR)/disk-src/INITTAB.shell
 	@mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/disk-src/INITTAB.shell ::etc/inittab
-	@echo "NeoOS: booting to nsh. Run 'busybox sh' for BusyBox's shell."
+	@echo "NeoOS: booting to a login prompt."
+	@echo "       Accounts: god/god (uid 0) and neo/neo (uid 1000)."
+	@echo "       Leaving the shell returns a fresh login, so the machine stays up;"
+	@echo "       close the window to stop it. Serial log: $(BUILD_DIR)/shell.log"
 	@echo "       Type in the QEMU window. 'exit' starts a FRESH shell"
 	@echo "       (respawn), so the machine stays up; close the window to"
 	@echo "       stop it. Serial log: $(BUILD_DIR)/shell.log"
@@ -830,10 +863,10 @@ shell-serial:
 	@$(MAKE) QUIET=1 clean-kernel busybox iso disk-image
 	@printf '%s\n' \
 	  '# generated by `make shell-serial`' \
-	  'respawn /bin/term.nex /bin/nsh.nex nsh' \
+	  'respawn /bin/term.nex /sbin/login.nex login' \
 	  > $(BUILD_DIR)/disk-src/INITTAB.shell
 	@mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/disk-src/INITTAB.shell ::etc/inittab
-	@echo "NeoOS: booting to nsh on the framebuffer; serial is the log."
+	@echo "NeoOS: booting to a login prompt on the framebuffer; serial is the log."
 	qemu-system-x86_64 $(QEMU_COMMON) -serial stdio
 
 # Headless boot with COM1 captured to a file. Fails if any selftest
@@ -884,6 +917,7 @@ REQUIRED_MARKERS := \
 	"[permtest] ALL PASSED" \
 	"[randtest] ALL PASSED" \
 	"[nshtest] ALL PASSED" \
+	"[logintest] ALL PASSED" \
 	"[fdalloc] ALL PASSED" \
 	"[threadmany] ALL PASSED" \
 	"[bbspike] ALL PASSED" \

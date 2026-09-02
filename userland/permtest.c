@@ -80,7 +80,15 @@ static const char *why(int code) {
 
 int main(void) {
     if (getuid() != 0) {
-        printf("[permtest] FAILED: not started as god (uid=%d)\n", getuid());
+        // NOT a failure: this test needs god to have anything to drop
+        // from, and running it as an ordinary user is a wrong context
+        // rather than a wrong kernel. The word FAILED is deliberately
+        // absent -- the boot harness treats any FAILED line as a broken
+        // build, and logintest runs this very binary from a logged-in
+        // shell ON PURPOSE, to prove that shell is not god.
+        //
+        // The non-zero exit is the signal logintest checks.
+        printf("[permtest] not god (uid=%d): nothing to test from here\n", getuid());
         return 1;
     }
     printf("[permtest] running as god (uid 0)\n");

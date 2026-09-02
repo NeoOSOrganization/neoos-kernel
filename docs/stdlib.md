@@ -1284,6 +1284,31 @@ together. Because the logo is ordinary shell output rather than
 something painted outside the terminal, `clear` removes it like any
 other output.
 
+**Login and sessions.** `init` runs `/sbin/login.nex` on the terminal as
+`god`; it authenticates against `/etc/passwd`, drops to the account's
+`gid` then `uid`, sets `USER`/`HOME`/`SHELL`, and execs the shell. The
+entry is `respawn`, so leaving the shell returns a fresh login prompt
+rather than powering the machine off.
+
+`/etc/passwd` is `name:uid:gid:home:shell:hash` — Linux's field order
+for the first five, with the hash in the same file rather than a
+separate `/etc/shadow`. There is no privilege boundary yet that a second
+file would enforce, so splitting them would be security theatre. It
+ships with `god` (uid 0) and `neo` (uid 1000).
+
+Hashes are **`$6$` SHA-512-crypt**, verified by musl's own `crypt()`.
+Nothing was ported and nothing hand-rolled: musl already ships
+SHA-256-crypt, SHA-512-crypt, MD5 and bcrypt back-ends, all pure
+computation with no files and no randomness. That is a rounds-based KDF
+rather than the bare hash an earlier draft of this spec proposed.
+
+Two properties worth stating, because both are easy to get wrong and
+invisible when you do: the password is **never echoed** (login verifies
+the terminal actually disabled echo and refuses to prompt if it did
+not), and an **unknown user is refused exactly as a wrong password is**,
+hashing against a fixed string so the two take the same path — answering
+"no such user" faster tells an attacker which accounts exist.
+
 **`/dev/urandom`, `/dev/random` and `getrandom(2)`** all draw from the
 same kernel CSPRNG (`kernel/lib/rand.c`), and none of them ever block.
 The two devices are identical, as they are on Linux since 5.6 — once the
