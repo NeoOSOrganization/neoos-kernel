@@ -835,11 +835,20 @@ shell-serial:
 #
 # The kernel powers off via ACPI (outw 0x2000 -> 0x604) as soon as the
 # last user process exits (kernel/sched/proc.c:user_proc_exited), so a
-# healthy run exits QEMU in ~15s. BOOT_TIMEOUT is now the HANG detector,
+# healthy run exits QEMU on its own. BOOT_TIMEOUT is the HANG detector,
 # not the normal exit path -- if it fires, something deadlocked. The
 # qemu line keeps its leading `-` so a genuine timeout is still surfaced
 # by the marker check rather than aborting the recipe.
-BOOT_TIMEOUT ?= 60
+#
+# 150s, from a measurement rather than a guess: a healthy solo boot took
+# ~15s when this was written and takes 33s now (timed three times), the
+# suite having grown by the BusyBox track, the ports and the identity
+# work. At 60s the gauntlet was failing runs that were merely SLOW --
+# two CPUs' worth of contention on top of a 33s boot -- and reporting
+# them as missing markers, which reads like a kernel fault and is not
+# one. Raise this when the suite grows again; the number is only ever
+# "several times a healthy boot".
+BOOT_TIMEOUT ?= 150
 BOOT_MARKER  ?= NeoOS: interrupts enabled, starting scheduler
 
 # A suite that never RUNS is not a pass. Grepping only for FAILED lets a
