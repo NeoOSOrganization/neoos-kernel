@@ -273,3 +273,30 @@ make DEBUG_HEAP=1 DEBUG_LOCKSTAT=1 test
 For a stress run where corruption must be *localizable* rather than
 merely detectable — which is the whole reason CS1 precedes CS2's
 regression tests — use `DEBUG_HEAP=1` under the gauntlet.
+
+## `make lock-check` — duplicate ranks and raw acquires, without a boot
+
+`tools/lock_check.py`, wired into `make test` ahead of the boot because
+it costs a second and catches two things a boot cannot.
+
+**Duplicate lock ranks.** Ranks must be strictly ascending along any
+acquire path, so two locks sharing a rank do not merely look untidy —
+they make an inversion *between those two locks* legal, and the kernel's
+runtime checker stops seeing it. This has already happened once: CS0.2
+gave `rand_lock` `LOCK_RANK_SERIAL`, silently sharing a rank with the
+serial port. Re-creating that collision is how the script was verified.
+
+A deliberate shared rank is still allowed, written either as an alias
+(`#define LOCK_RANK_TTY LOCK_RANK_DRIVER`) or as a literal whose comment
+names the constant it shares with. The point is that it be *said*.
+
+**Undocumented `spin_lock_raw`.** A raw acquire skips the rank check
+altogether, so each one is a hole in the discipline. `lock.h` documents
+exactly two exceptions — `serial.c`, which runs before
+`cpu_local_init()`, and the panic paths in `fbcon.c` and `vt.c`, where a
+checked acquire would call `lock_panic()` from inside a panic and
+recurse. Anything else fails the check, and needs an argument in
+`lock.h` before it is added to the allowlist.
+
+Both checks were verified by making them fire and then reverting the
+change that did it.

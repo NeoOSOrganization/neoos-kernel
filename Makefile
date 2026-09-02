@@ -52,7 +52,7 @@ C_HEADERS := $(foreach d,$(KERNEL_DIRS),$(wildcard $(d)/*.h))
 C_OBJECTS := $(patsubst kernel/%.c,$(BUILD_DIR)/%.o,$(C_SOURCES))
 ASM_OBJECTS := $(BUILD_DIR)/boot.o $(BUILD_DIR)/gdt_flush.o $(BUILD_DIR)/isr_stubs.o $(BUILD_DIR)/context_switch.o $(BUILD_DIR)/syscall_entry.o $(BUILD_DIR)/fork_trampoline.o $(BUILD_DIR)/sigframe.o $(BUILD_DIR)/ap_trampoline.o
 
-.PHONY: all build iso run test fresh-disks clean disk-image font-regen font-check render-check
+.PHONY: all build iso run test fresh-disks clean disk-image font-regen font-check render-check lock-check
 
 all: build
 
@@ -637,6 +637,13 @@ font-regen:
 	python3 tools/bdf2c.py $(FONT_BDF) --array term_glyphs \
 	    --header $(FONT_HDR) --source $(FONT_SRC)
 
+# CS5.3 / CS5.4. Host-side, so it runs without a boot: duplicate lock
+# ranks and undocumented spin_lock_raw sites are both invisible to the
+# kernel's own runtime checker -- a collision makes an inversion LEGAL,
+# and a raw acquire skips the check entirely.
+lock-check:
+	@python3 tools/lock_check.py
+
 font-check:
 	@tmp=$$(mktemp -d); rc=0; \
 	python3 tools/bdf2c.py $(FONT_BDF) --array term_glyphs \
@@ -677,7 +684,10 @@ fresh-disks:
 # the machine off, so EVERY `make test` runs the full BOOT_TIMEOUT and
 # is killed by `timeout`. Interrupting one is the easy way to leave a
 # qemu behind.
-test: clean-kernel fresh-disks iso disk-image
+# lock-check runs FIRST and is host-side: it costs a second and catches
+# two classes of mistake a boot cannot, so there is no reason to spend a
+# 150-second boot before hearing about them.
+test: lock-check clean-kernel fresh-disks iso disk-image
 	@mkdir -p $(BUILD_DIR)
 	-@timeout $(BOOT_TIMEOUT) qemu-system-x86_64 $(QEMU_COMMON) \
 		-display gtk -serial file:$(BUILD_DIR)/serial.log \
