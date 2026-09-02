@@ -65,7 +65,6 @@ void fd_table_init(struct fd_table *table) {
         table->buckets[i].slot_count = 0;
     }
 
-    table->next_alloc = 0;
 }
 
 // Lockless, like the flat files[] array it replaces. `slots` is only
@@ -109,12 +108,33 @@ struct file_descriptor *fd_table_get(struct fd_table *table, int fd) {
 int fd_table_alloc(struct fd_table *table) {
     if (!table) return -EMFILE;
 
-    for (int attempt = 0; attempt < FD_TABLE_BUCKETS; attempt++) {
-        unsigned bucket_idx =
-            (unsigned)((table->next_alloc + attempt) % FD_TABLE_BUCKETS);
+    // Strictly lowest-available, from fd 0 upward. Two things used to
+    // break that, and a shell notices both:
+    //
+    //   - the scan started at a hint bucket, the one the LAST allocation
+    //     came from, so an fd freed in a lower bucket was not reused
+    //     until the higher ones filled;
+    //   - bucket 0 skipped slots 0-2 unconditionally, so
+    //     `close(0); open(f)` returned 3 rather than 0.
+    //
+    // The second is how POSIX redirection is built. `sh < file` is
+    // exactly close-then-open, and a program that gets fd 3 back reads
+    // its original stdin instead of the file. Startup is unaffected:
+    // spawn places fds 0/1/2 with fd_table_put before the process is
+    // ever runnable, so this allocator only ever reaches those slots
+    // once the process itself has closed one.
+    //
+    // Full buckets are skipped by their slot_count without a scan, so
+    // the common case does not walk 512 slots to find fd 4.
+    for (unsigned bucket_idx = 0; bucket_idx < FD_TABLE_BUCKETS; bucket_idx++) {
         struct fd_bucket *b = &table->buckets[bucket_idx];
 
         uint64_t flags = spin_lock_irqsave(&b->lock);
+
+        if (b->slot_count >= FD_TABLE_SLOTS) {
+            spin_unlock_irqrestore(&b->lock, flags);
+            continue;                 // full; nothing to scan for
+        }
 
         struct file_descriptor *slots = bucket_slots(b);
         if (!slots) {
@@ -122,19 +142,12 @@ int fd_table_alloc(struct fd_table *table) {
             return -EMFILE;   // OOM
         }
 
-        // Bucket 0's first three slots are fds 0/1/2, handed out by
-        // fd_table_put at process creation and never by this allocator.
-        unsigned first = (bucket_idx == 0) ? FD_STDIO_COUNT : 0;
-        for (unsigned slot_idx = first; slot_idx < FD_TABLE_SLOTS; slot_idx++) {
+        for (unsigned slot_idx = 0; slot_idx < FD_TABLE_SLOTS; slot_idx++) {
             if (slots[slot_idx].in_use) { continue; }
 
             slot_reset(&slots[slot_idx]);
             slots[slot_idx].in_use = 1;   // caller fills in the object
             b->slot_count++;
-
-            // A hint only; a stale value costs a wasted scan, never
-            // correctness, so it needs no lock of its own.
-            table->next_alloc = (int)bucket_idx;
 
             spin_unlock_irqrestore(&b->lock, flags);
             return (int)(bucket_idx * FD_TABLE_SLOTS + slot_idx);

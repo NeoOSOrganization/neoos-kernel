@@ -37,8 +37,10 @@
 #define FD_TABLE_SLOTS         512    // Level 2: slots per bucket
 #define FD_TABLE_MAX           (FD_TABLE_BUCKETS * FD_TABLE_SLOTS)  // 16,384
 
-// fds 0/1/2 are opened on /dev/CONSOLE at process creation and are
-// never handed out by fd_table_alloc.
+// fds 0/1/2 are opened on /dev/CONSOLE at process creation, by
+// fd_table_put rather than by the allocator. Once a process CLOSES one,
+// fd_table_alloc will hand that number straight back -- which is what
+// makes shell redirection work.
 #define FD_STDIO_COUNT         3
 
 // Forward declare file_descriptor (defined in proc.h)
@@ -54,7 +56,6 @@ struct fd_bucket {
 // Level 1: the table itself
 struct fd_table {
     struct fd_bucket buckets[FD_TABLE_BUCKETS];
-    int next_alloc;         // hint: bucket index to start the next scan at
 };
 
 // Forward declare vnode for use in callbacks

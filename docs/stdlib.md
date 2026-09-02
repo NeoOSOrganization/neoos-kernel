@@ -1159,6 +1159,14 @@ powers off once nothing is left to reap. A ported daemon that expects a
 shutdown signal will not get one. If PID 1 itself exits, the kernel
 panics (there is nothing to reap the machine or power it off).
 
+File descriptors are allocated **lowest-available from 0**, as POSIX
+requires — including 0, 1 and 2 once the process has closed them. This
+is what makes `close(0); open(file)` (which is what shell input
+redirection compiles down to) put the file on stdin. It was previously
+lowest-available *from 3*, scanned from a per-bucket hint, so both the
+redirection idiom and the reuse of a freed low descriptor returned the
+wrong number.
+
 `spawnv` is `spawn` with an argument vector, and `execv`/`execve` are
 `exec` with one. Both copy the vector into the kernel before the new
 address space is built — they must, because building it is what stops

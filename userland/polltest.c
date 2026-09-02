@@ -66,15 +66,42 @@ int main(void) {
     int ev = open("/dev/input/event0", O_RDONLY);
     if (ev >= 0) {
         struct pollfd e = { ev, POLLIN, 0 };
-        // Drain any events another test injected before we got here
-        // (activettytest injects KEY_A too). Then the queue is ours.
-        fcntl(ev, F_SETFL, O_NONBLOCK);
         char drain[128];
-        while (read(ev, drain, sizeof drain) > 0) { }
-        fcntl(ev, F_SETFL, 0);
-        if (poll(&e, 1, 30) != 0) {
-            printf("[polltest] FAILED: evdev ready with no input\n");
-            return 1;
+
+        // "Drain, then assert nothing is ready" is not sound on evdev:
+        // the device is GLOBAL, and activettytest and the VT selftests
+        // inject keys of their own. A key arriving between the drain and
+        // the poll made poll correctly report readiness and the test
+        // call it a kernel bug -- roughly one boot in six.
+        //
+        // So the two outcomes are told apart rather than assumed. Ready
+        // with a readable event is somebody else's key: drain it and try
+        // again. Ready with NOTHING to read is the real defect, and is
+        // still a failure. Only a bounded number of retries, or a test
+        // that could be starved forever by a busy injector would hang.
+        int quiet = 0;
+        for (int attempt = 0; attempt < 20 && !quiet; attempt++) {
+            e.revents = 0;
+            if (poll(&e, 1, 30) == 0) { quiet = 1; break; }
+
+            fcntl(ev, F_SETFL, O_NONBLOCK);
+            long got = read(ev, drain, sizeof drain);
+            while (read(ev, drain, sizeof drain) > 0) { }
+            fcntl(ev, F_SETFL, 0);
+
+            if (got <= 0) {
+                printf("[polltest] FAILED: evdev reported ready but read gave %d "
+                       "-- readiness with nothing behind it\n", (int)got);
+                return 1;
+            }
+        }
+        if (!quiet) {
+            // Twenty rounds and another test was still feeding the
+            // device. Not a kernel failure, and not something to assert
+            // through -- say so and move to the part that can be tested
+            // under concurrent injection.
+            printf("[polltest] evdev quiet-window skipped: another test kept "
+                   "injecting\n");
         }
         long rc = neoos_test_inject_key(30 /*KEY_A*/, 1);
         if (rc == 0) {
