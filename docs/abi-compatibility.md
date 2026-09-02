@@ -341,11 +341,10 @@ at least stop the kernel drawing over it. Raw keyboard modes
 7. **No `getuid`/`uname`/`umask`/`chmod`/`rename`/`rmdir`/`ftruncate`**
    — Tier 2 of `docs/porting-coreutils.md`: makes the tools honest
    rather than merely running.
-8. **`execve` ignores `envp`** — argv now crosses `exec` intact
-   (CS4: 1024 arguments, 4096 bytes each, 256 KiB total, `-E2BIG` past
-   any of them), and musl's `execve` reaches it through the shim. The
-   environment does not: the kernel pushes an empty `envp`, so `getenv`
-   in the new image sees nothing the caller passed.
+8. **No `SIGTTIN`/`SIGTTOU` generation.** They are defined, treated as
+   stop signals, and `TIOCSCTTY`/`TIOCSPGRP` let a shell own a terminal
+   and run job control — but a *background* process reading or writing
+   the terminal is not signalled. Nothing exercised so far needs it.
 9. **No shutdown signal** (M2): PID 1 powers off once nothing is left to
    reap, without first `SIGTERM`ing anyone; no sessions, no `/proc`, no
    orphaned-process-group handling.
@@ -383,3 +382,37 @@ What stands between NeoOS and an unmodified multi-threaded binary is now
 constant remains the cheapest outstanding fix. Field *values* in
 `struct stat` — timestamps especially — are the remaining semantic
 divergence, recorded in `docs/stdlib.md`.
+
+## Refresh — end of the concurrency and BusyBox milestones (2026-09-02)
+
+**Closed since the last refresh:**
+
+- `execve`/`spawnve` carry **argv and envp** (1024 arguments, 4096 bytes
+  each, 256 KiB total, `-E2BIG` past any of them). `exec` previously
+  discarded the argument vector entirely.
+- The entry stack is the full SysV shape: `argc`, `argv[]`, NULL,
+  `envp[]`, NULL, auxv.
+- `getppid`, `uname`, `brk`, `getuid`/`geteuid`/`getgid`/`getegid`,
+  `poll` and `select` (the last two had never been mapped in the shim at
+  all), `fcntl(F_DUPFD`/`F_DUPFD_CLOEXEC)`, `TIOCSCTTY`.
+- File descriptors are allocated **lowest-available from 0**, so shell
+  redirection works.
+- `poll()` accepts up to `FD_TABLE_MAX` descriptors, not 16.
+- 1024 threads per process, 256 ptys, PID wraparound.
+- A minimal read-only **`/proc`** (`<pid>/stat`, `<pid>/cmdline`).
+
+**Two ABI-visible bugs fixed, both found by running BusyBox:**
+
+- `fork()` left the child with **no thread pointer** — the trampoline's
+  `mov fs, dx` zeroes `IA32_FS_BASE`. Any libc using thread-local
+  storage died on its first instruction in the child. This is the single
+  most important compatibility fix in the milestone: it is the
+  difference between "fork+exec works" and "fork works".
+- A pty hung up when a **forked child closed its inherited master fd**,
+  delivering EOF to a shell before anything was typed.
+
+**What a ported application would still hit:** no dynamic linking (DL is
+deferred, and everything here is static); no `SIGTTIN`/`SIGTTOU`
+generation; `brk` never grows; `uname` reports `NeoOS`; no users, modes
+or ownership; `/proc` has only the two files `ps` reads; FAT has no
+symlinks. Each is recorded with its reasoning in `docs/stdlib.md`.

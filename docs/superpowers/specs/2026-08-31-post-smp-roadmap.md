@@ -21,24 +21,25 @@ DONE
   M1c-1..3. driver model + kernel VTs   kernel/drivers reorg, fb_device + con_driver,
                                         /dev/tty1..6 with Alt+Fn, VT/KD ioctls
   BB0.   fork inherits the vma list     commits 080ce08, 8401c63
+  CS.    Concurrency hardening & scaling
+         CS0 audit · CS1 instrumentation · CS2 regressions · CS3 stress
+         + chaos · CS4 fixed limits · CS5.2/5.3/5.4 lock architecture.
+         CS5.1 (vfs_lock peel) and CS5.5 (seqlocks) deliberately NOT
+         done -- see the results section of the spec.
+         spec 2026-09-01-concurrency-and-scaling-design.md
+  BB.    BusyBox (static) — BB0..BB6    an interactive ash with job
+         control, pipes and redirection, on a pty. BusyBox 1.37.0 as a
+         submodule, static against NeoOS's musl.
+         plan plans/2026-09-01-busybox-track.md
 
 LIVE
-  CS.    Concurrency hardening & scaling      ← NEXT
-         CS0 audit · CS1 instrumentation · CS2 regressions ·
-         CS3 stress + chaos · CS4 fixed limits · CS5 lock architecture
-         spec 2026-09-01-concurrency-and-scaling-design.md
-
-  C.     ASLR
+  C.     ASLR                                 ← NEXT
          mmap base, stack, brk, PIE load base from the Phase 14 CSPRNG,
-         with a norandmaps off-switch.
+         with a norandmaps off-switch. Untouched: it was sequenced
+         before BusyBox and taken after it, because BusyBox was the
+         milestone the roadmap existed to reach and ASLR is bounded
+         hardening that nothing else waits on.
          spec 2026-08-31-aslr-design.md · plan plans/2026-08-31-aslr.md
-
-  BB.    BusyBox (static) — BB1..BB6            ← last before deferred work
-         BB1 execve + shell-critical ABI · BB2 job control · BB3 minimal
-         /proc · BB4 Tier-2 fs syscalls · BB5 build integration ·
-         BB6 interactive ash on the framebuffer terminal.
-         plan plans/2026-09-01-busybox-track.md (supersedes the roadmap's
-         ordering) · spec 2026-09-01-busybox-and-dynamic-linking-roadmap.md
 
 DEFERRED
   DL.    Dynamic linking — DL1 file-backed mmap, DL2 PT_INTERP + full
@@ -68,6 +69,12 @@ allocator). BB0 already had to fix `fork` losing the vma list — a bug
 the existing tests missed because they only touched pages the parent
 had touched first. That is the class of bug CS exists to stop finding
 by accident.
+
+**ASLR was taken AFTER BusyBox, not before.** The reasoning below still
+holds; the ordering did not survive contact. BusyBox is what the roadmap
+exists to reach, ASLR is bounded hardening nothing else waits on, and
+taking ASLR first risked spending the session without reaching the
+destination. Recorded rather than quietly re-sequenced.
 
 **ASLR after CS, before BusyBox.** It is bounded hardening of code that
 already exists: NX/W^X has landed, and Phase 14 already built the
