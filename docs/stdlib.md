@@ -1159,6 +1159,14 @@ powers off once nothing is left to reap. A ported daemon that expects a
 shutdown signal will not get one. If PID 1 itself exits, the kernel
 panics (there is nothing to reap the machine or power it off).
 
+PIDs are allocated from a bitmap with a **rising cursor that wraps**, so
+a freed pid is not handed out again until the cursor comes back round to
+it. Two consequences worth knowing when porting: pid numbers are not
+dense (they climb, and a short-lived process does not immediately donate
+its number to the next one), and after ~1M process creations they begin
+to repeat. The old allocator did neither — it reused the most recently
+freed pid *first*, and stopped allocating entirely at 2^20.
+
 `poll()` accepts up to `FD_TABLE_MAX` (16,384) descriptors — the size
 of the process's descriptor table, since polling more than it can hold
 open is meaningless. It previously refused anything over **16** with
