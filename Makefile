@@ -354,6 +354,10 @@ $(USERLAND_BUILD)/BBSH.ELF: $(USERLAND_DIR)/bbsh.c $(USERLAND_DIR)/user.ld $(LIB
 	@mkdir -p $(USERLAND_BUILD)
 	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/bbsh.c -L$(LIB_BUILD) -lneoos
 
+$(USERLAND_BUILD)/NEXCHECK.ELF: $(USERLAND_DIR)/nexcheck.c $(USERLAND_DIR)/user.ld $(LIB_BUILD)/crt0.o $(LIB_BUILD)/libneoos.a
+	@mkdir -p $(USERLAND_BUILD)
+	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/nexcheck.c -L$(LIB_BUILD) -lneoos
+
 $(USERLAND_BUILD)/BBSPIKE.ELF: $(USERLAND_DIR)/bbspike.c $(USERLAND_DIR)/user.ld $(LIB_BUILD)/crt0.o $(LIB_BUILD)/libneoos.a
 	@mkdir -p $(USERLAND_BUILD)
 	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/bbspike.c -L$(LIB_BUILD) -lneoos
@@ -422,153 +426,223 @@ $(USERLAND_BUILD)/MPITEST.ELF: $(USERLAND_DIR)/mpitest.c $(USERLAND_DIR)/user.ld
 	mkdir -p $(USERLAND_BUILD)
 	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIB_BUILD)/crt0.o $(USERLAND_DIR)/mpitest.c -L$(LIB_BUILD) -lneoos
 
-$(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_BUILD)/PARENT.ELF $(USERLAND_BUILD)/LOOPER.ELF $(USERLAND_BUILD)/YIELDER.ELF $(USERLAND_BUILD)/FAULTER.ELF $(USERLAND_BUILD)/FILEIO.ELF $(USERLAND_BUILD)/SSE_TEST.ELF $(USERLAND_BUILD)/FORKTEST.ELF $(USERLAND_BUILD)/EXECTARG.ELF $(USERLAND_BUILD)/MOUNTTST.ELF $(USERLAND_BUILD)/VFSTEST.ELF $(USERLAND_BUILD)/VTTEST.ELF $(USERLAND_BUILD)/ACTIVETTYTEST.ELF $(USERLAND_BUILD)/VTSWITCHTEST.ELF $(USERLAND_BUILD)/TERM.ELF $(USERLAND_BUILD)/TERMCHILD.ELF $(USERLAND_BUILD)/THRDTEST.ELF $(USERLAND_BUILD)/SIGTEST.ELF $(USERLAND_BUILD)/AVXTEST.ELF $(USERLAND_BUILD)/MMAPTEST.ELF $(USERLAND_BUILD)/REBTEST.ELF $(USERLAND_BUILD)/ORPHANTEST.ELF $(USERLAND_BUILD)/INIT.ELF $(USERLAND_BUILD)/FBTEST.ELF $(USERLAND_BUILD)/POLLTEST.ELF $(USERLAND_BUILD)/POLLTRUNC.ELF $(USERLAND_BUILD)/ARGVTEST.ELF $(USERLAND_BUILD)/FDALLOC.ELF $(USERLAND_BUILD)/THRDMANY.ELF $(USERLAND_BUILD)/BBSPIKE.ELF $(USERLAND_BUILD)/BBSH.ELF $(USERLAND_BUILD)/TLBSTORM.ELF $(USERLAND_BUILD)/FORKSTORM.ELF $(USERLAND_BUILD)/PTYCHURN.ELF $(USERLAND_BUILD)/SIGSTORM.ELF $(USERLAND_BUILD)/POLLSTORM.ELF $(USERLAND_BUILD)/FAULTFLOOD.ELF $(USERLAND_BUILD)/PTYTEST.ELF $(USERLAND_BUILD)/SMPTEST.ELF $(USERLAND_BUILD)/EVTEST.ELF $(USERLAND_BUILD)/IPCTEST.ELF $(USERLAND_BUILD)/PIPETEST.ELF $(USERLAND_BUILD)/TLSTEST.ELF $(USERLAND_BUILD)/NETTEST.ELF $(USERLAND_BUILD)/MPITEST.ELF $(USERLAND_BUILD)/CWDTEST.ELF $(USERLAND_BUILD)/STATTEST.ELF $(USERLAND_BUILD)/DIRTEST.ELF $(USERLAND_BUILD)/LFNTEST.ELF $(USERLAND_BUILD)/TIER0.ELF $(USERLAND_BUILD)/MUSLHELO.ELF $(USERLAND_BUILD)/MUSLFORK.ELF $(USERLAND_BUILD)/TTYTEST.ELF
-	mkdir -p $(DISK_SRC)/DIR
-	printf 'Hello from NeoOS FAT16!\n' > $(DISK_SRC)/HELLO.TXT
-	head -c 8192 /dev/zero | tr '\0' 'N' > $(DISK_SRC)/BIGFILE.TXT
-	printf 'nested file contents\n' > $(DISK_SRC)/DIR/NESTED.TXT
+$(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_BUILD)/PARENT.ELF $(USERLAND_BUILD)/LOOPER.ELF $(USERLAND_BUILD)/YIELDER.ELF $(USERLAND_BUILD)/FAULTER.ELF $(USERLAND_BUILD)/FILEIO.ELF $(USERLAND_BUILD)/SSE_TEST.ELF $(USERLAND_BUILD)/FORKTEST.ELF $(USERLAND_BUILD)/EXECTARG.ELF $(USERLAND_BUILD)/MOUNTTST.ELF $(USERLAND_BUILD)/VFSTEST.ELF $(USERLAND_BUILD)/VTTEST.ELF $(USERLAND_BUILD)/ACTIVETTYTEST.ELF $(USERLAND_BUILD)/VTSWITCHTEST.ELF $(USERLAND_BUILD)/TERM.ELF $(USERLAND_BUILD)/TERMCHILD.ELF $(USERLAND_BUILD)/THRDTEST.ELF $(USERLAND_BUILD)/SIGTEST.ELF $(USERLAND_BUILD)/AVXTEST.ELF $(USERLAND_BUILD)/MMAPTEST.ELF $(USERLAND_BUILD)/REBTEST.ELF $(USERLAND_BUILD)/ORPHANTEST.ELF $(USERLAND_BUILD)/INIT.ELF $(USERLAND_BUILD)/FBTEST.ELF $(USERLAND_BUILD)/POLLTEST.ELF $(USERLAND_BUILD)/POLLTRUNC.ELF $(USERLAND_BUILD)/ARGVTEST.ELF $(USERLAND_BUILD)/FDALLOC.ELF $(USERLAND_BUILD)/THRDMANY.ELF $(USERLAND_BUILD)/BBSPIKE.ELF $(USERLAND_BUILD)/NEXCHECK.ELF $(USERLAND_BUILD)/BBSH.ELF $(USERLAND_BUILD)/TLBSTORM.ELF $(USERLAND_BUILD)/FORKSTORM.ELF $(USERLAND_BUILD)/PTYCHURN.ELF $(USERLAND_BUILD)/SIGSTORM.ELF $(USERLAND_BUILD)/POLLSTORM.ELF $(USERLAND_BUILD)/FAULTFLOOD.ELF $(USERLAND_BUILD)/PTYTEST.ELF $(USERLAND_BUILD)/SMPTEST.ELF $(USERLAND_BUILD)/EVTEST.ELF $(USERLAND_BUILD)/IPCTEST.ELF $(USERLAND_BUILD)/PIPETEST.ELF $(USERLAND_BUILD)/TLSTEST.ELF $(USERLAND_BUILD)/NETTEST.ELF $(USERLAND_BUILD)/MPITEST.ELF $(USERLAND_BUILD)/CWDTEST.ELF $(USERLAND_BUILD)/STATTEST.ELF $(USERLAND_BUILD)/DIRTEST.ELF $(USERLAND_BUILD)/LFNTEST.ELF $(USERLAND_BUILD)/TIER0.ELF $(USERLAND_BUILD)/MUSLHELO.ELF $(USERLAND_BUILD)/MUSLFORK.ELF $(USERLAND_BUILD)/TTYTEST.ELF
+	mkdir -p $(DISK_SRC)/dir $(DISK_SRC)/nex
+	printf 'Hello from NeoOS FAT16!\n' > $(DISK_SRC)/hello.txt
+	head -c 8192 /dev/zero | tr '\0' 'N' > $(DISK_SRC)/bigfile.txt
+	printf 'nested file contents\n' > $(DISK_SRC)/dir/nested.txt
 	printf 'a long name survived the round trip\n' > "$(DISK_SRC)/A Long File Name.txt"
 	dd if=/dev/zero of=$(DISK_IMG) bs=1M count=32 status=none
 	mkfs.fat -F 16 $(DISK_IMG)
-	mcopy -i $(DISK_IMG) $(DISK_SRC)/HELLO.TXT ::HELLO.TXT
-	mcopy -i $(DISK_IMG) "$(DISK_SRC)/A Long File Name.txt" "::A Long File Name.txt"
-	mcopy -i $(DISK_IMG) $(DISK_SRC)/BIGFILE.TXT ::BIGFILE.TXT
-	mmd -i $(DISK_IMG) ::DIR
-	mcopy -i $(DISK_IMG) $(DISK_SRC)/DIR/NESTED.TXT ::DIR/NESTED.TXT
-	mmd -i $(DISK_IMG) ::BIN
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/SPIN.ELF ::BIN/SPIN.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/CHILD.ELF ::BIN/CHILD.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/PARENT.ELF ::BIN/PARENT.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/LOOPER.ELF ::BIN/LOOPER.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/YIELDER.ELF ::BIN/YIELDER.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/FAULTER.ELF ::BIN/FAULTER.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/FILEIO.ELF ::BIN/FILEIO.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/SSE_TEST.ELF ::BIN/SSE_TEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/FORKTEST.ELF ::BIN/FORKTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/EXECTARG.ELF ::BIN/EXECTARG.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/MOUNTTST.ELF ::BIN/MOUNTTST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/VFSTEST.ELF ::BIN/VFSTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/VTTEST.ELF ::BIN/VTTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/ACTIVETTYTEST.ELF ::BIN/ACTIVETTYTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/VTSWITCHTEST.ELF ::BIN/VTSWITCHTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/TERM.ELF ::BIN/TERM.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/TERMCHILD.ELF ::BIN/TERMCHILD.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/THRDTEST.ELF ::BIN/THRDTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/SIGTEST.ELF ::BIN/SIGTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/AVXTEST.ELF ::BIN/AVXTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/MMAPTEST.ELF ::BIN/MMAPTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/REBTEST.ELF ::BIN/REBTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/ORPHANTEST.ELF ::BIN/ORPHANTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/FBTEST.ELF ::BIN/FBTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/POLLTEST.ELF ::BIN/POLLTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/POLLTRUNC.ELF ::BIN/POLLTRUNC.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/ARGVTEST.ELF ::BIN/ARGVTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/FDALLOC.ELF ::BIN/FDALLOC.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/THRDMANY.ELF ::BIN/THRDMANY.ELF
-	@mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/BBSPIKE.ELF ::BIN/BBSPIKE.ELF
-	@mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/BBSH.ELF ::BIN/BBSH.ELF
+	@# A clean root: directories only, no loose files. Everything below
+	@# has a place -- programs in bin/sbin, the test suite in usr/tests,
+	@# read-only fixtures in usr/share/test, and var/tmp for the tests
+	@# that must write to a REAL filesystem (/tmp is a ramfs).
+	mmd -i $(DISK_IMG) ::bin
+	mmd -i $(DISK_IMG) ::sbin
+	mmd -i $(DISK_IMG) ::etc
+	mmd -i $(DISK_IMG) ::usr
+	mmd -i $(DISK_IMG) ::usr/tests
+	mmd -i $(DISK_IMG) ::usr/share
+	mmd -i $(DISK_IMG) ::usr/share/test
+	mmd -i $(DISK_IMG) ::usr/share/test/dir
+	mmd -i $(DISK_IMG) ::var
+	mmd -i $(DISK_IMG) ::var/tmp
+	mmd -i $(DISK_IMG) ::home
+	mmd -i $(DISK_IMG) ::root
+	mcopy -i $(DISK_IMG) $(DISK_SRC)/hello.txt ::usr/share/test/hello.txt
+	mcopy -i $(DISK_IMG) "$(DISK_SRC)/A Long File Name.txt" "::usr/share/test/A Long File Name.txt"
+	mcopy -i $(DISK_IMG) $(DISK_SRC)/bigfile.txt ::usr/share/test/bigfile.txt
+	mcopy -i $(DISK_IMG) $(DISK_SRC)/dir/nested.txt ::usr/share/test/dir/nested.txt
+	@./tools/nexify.sh $(USERLAND_BUILD)/SPIN.ELF $(DISK_SRC)/nex/spin.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/spin.nex ::usr/tests/spin.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/CHILD.ELF $(DISK_SRC)/nex/child.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/child.nex ::usr/tests/child.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/PARENT.ELF $(DISK_SRC)/nex/parent.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/parent.nex ::usr/tests/parent.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/LOOPER.ELF $(DISK_SRC)/nex/looper.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/looper.nex ::usr/tests/looper.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/YIELDER.ELF $(DISK_SRC)/nex/yielder.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/yielder.nex ::usr/tests/yielder.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/FAULTER.ELF $(DISK_SRC)/nex/faulter.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/faulter.nex ::usr/tests/faulter.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/FILEIO.ELF $(DISK_SRC)/nex/fileio.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/fileio.nex ::usr/tests/fileio.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/SSE_TEST.ELF $(DISK_SRC)/nex/sse_test.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/sse_test.nex ::usr/tests/sse_test.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/FORKTEST.ELF $(DISK_SRC)/nex/forktest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/forktest.nex ::usr/tests/forktest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/EXECTARG.ELF $(DISK_SRC)/nex/exectarg.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/exectarg.nex ::usr/tests/exectarg.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/MOUNTTST.ELF $(DISK_SRC)/nex/mounttst.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/mounttst.nex ::usr/tests/mounttst.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/VFSTEST.ELF $(DISK_SRC)/nex/vfstest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/vfstest.nex ::usr/tests/vfstest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/VTTEST.ELF $(DISK_SRC)/nex/vttest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/vttest.nex ::usr/tests/vttest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/ACTIVETTYTEST.ELF $(DISK_SRC)/nex/activettytest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/activettytest.nex ::usr/tests/activettytest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/VTSWITCHTEST.ELF $(DISK_SRC)/nex/vtswitchtest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/vtswitchtest.nex ::usr/tests/vtswitchtest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/TERM.ELF $(DISK_SRC)/nex/term.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/term.nex ::bin/term.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/TERMCHILD.ELF $(DISK_SRC)/nex/termchild.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/termchild.nex ::usr/tests/termchild.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/THRDTEST.ELF $(DISK_SRC)/nex/thrdtest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/thrdtest.nex ::usr/tests/thrdtest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/SIGTEST.ELF $(DISK_SRC)/nex/sigtest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/sigtest.nex ::usr/tests/sigtest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/AVXTEST.ELF $(DISK_SRC)/nex/avxtest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/avxtest.nex ::usr/tests/avxtest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/MMAPTEST.ELF $(DISK_SRC)/nex/mmaptest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/mmaptest.nex ::usr/tests/mmaptest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/REBTEST.ELF $(DISK_SRC)/nex/rebtest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/rebtest.nex ::usr/tests/rebtest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/ORPHANTEST.ELF $(DISK_SRC)/nex/orphantest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/orphantest.nex ::usr/tests/orphantest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/FBTEST.ELF $(DISK_SRC)/nex/fbtest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/fbtest.nex ::usr/tests/fbtest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/POLLTEST.ELF $(DISK_SRC)/nex/polltest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/polltest.nex ::usr/tests/polltest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/POLLTRUNC.ELF $(DISK_SRC)/nex/polltrunc.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/polltrunc.nex ::usr/tests/polltrunc.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/ARGVTEST.ELF $(DISK_SRC)/nex/argvtest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/argvtest.nex ::usr/tests/argvtest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/FDALLOC.ELF $(DISK_SRC)/nex/fdalloc.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/fdalloc.nex ::usr/tests/fdalloc.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/THRDMANY.ELF $(DISK_SRC)/nex/thrdmany.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/thrdmany.nex ::usr/tests/thrdmany.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/NEXCHECK.ELF $(DISK_SRC)/nex/nexcheck.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/nexcheck.nex ::usr/tests/nexcheck.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/BBSPIKE.ELF $(DISK_SRC)/nex/bbspike.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/bbspike.nex ::usr/tests/bbspike.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/BBSH.ELF $(DISK_SRC)/nex/bbsh.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/bbsh.nex ::usr/tests/bbsh.nex
 	@# BusyBox is optional: `make busybox` builds it, and the image
 	@# picks it up if it is present. A tree that has never built it
 	@# still produces a bootable disk.
 	@if [ -f $(BUSYBOX_BIN) ]; then \
-	    mcopy -i $(DISK_IMG) $(BUSYBOX_BIN) ::BIN/BUSYBOX.ELF && \
+	    ./tools/nexify.sh $(BUSYBOX_BIN) $(DISK_SRC)/nex/busybox.nex && \
+	    mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/busybox.nex ::bin/busybox.nex && \
 	    echo "disk: BusyBox included ($$(stat -c%s $(BUSYBOX_BIN)) bytes)"; \
 	else \
 	    echo "disk: no BusyBox (run 'make busybox')"; \
 	fi
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/TLBSTORM.ELF ::BIN/TLBSTORM.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/FORKSTORM.ELF ::BIN/FORKSTORM.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/PTYCHURN.ELF ::BIN/PTYCHURN.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/SIGSTORM.ELF ::BIN/SIGSTORM.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/POLLSTORM.ELF ::BIN/POLLSTORM.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/FAULTFLOOD.ELF ::BIN/FAULTFLOOD.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/PTYTEST.ELF ::BIN/PTYTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/SMPTEST.ELF ::BIN/SMPTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/EVTEST.ELF ::BIN/EVTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/IPCTEST.ELF ::BIN/IPCTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/PIPETEST.ELF ::BIN/PIPETEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/TLSTEST.ELF ::BIN/TLSTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/NETTEST.ELF ::BIN/NETTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/MPITEST.ELF ::BIN/MPITEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/CWDTEST.ELF ::BIN/CWDTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/STATTEST.ELF ::BIN/STATTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/DIRTEST.ELF ::BIN/DIRTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/LFNTEST.ELF ::BIN/LFNTEST.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/TIER0.ELF ::BIN/TIER0.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/MUSLHELO.ELF ::BIN/MUSLHELO.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/MUSLFORK.ELF ::BIN/MUSLFORK.ELF
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/TTYTEST.ELF ::BIN/TTYTEST.ELF
-	mmd -i $(DISK_IMG) ::SBIN
-	mcopy -i $(DISK_IMG) $(USERLAND_BUILD)/INIT.ELF ::SBIN/INIT.ELF
-	mmd -i $(DISK_IMG) ::ETC
+	@./tools/nexify.sh $(USERLAND_BUILD)/TLBSTORM.ELF $(DISK_SRC)/nex/tlbstorm.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/tlbstorm.nex ::usr/tests/tlbstorm.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/FORKSTORM.ELF $(DISK_SRC)/nex/forkstorm.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/forkstorm.nex ::usr/tests/forkstorm.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/PTYCHURN.ELF $(DISK_SRC)/nex/ptychurn.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/ptychurn.nex ::usr/tests/ptychurn.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/SIGSTORM.ELF $(DISK_SRC)/nex/sigstorm.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/sigstorm.nex ::usr/tests/sigstorm.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/POLLSTORM.ELF $(DISK_SRC)/nex/pollstorm.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/pollstorm.nex ::usr/tests/pollstorm.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/FAULTFLOOD.ELF $(DISK_SRC)/nex/faultflood.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/faultflood.nex ::usr/tests/faultflood.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/PTYTEST.ELF $(DISK_SRC)/nex/ptytest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/ptytest.nex ::usr/tests/ptytest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/SMPTEST.ELF $(DISK_SRC)/nex/smptest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/smptest.nex ::usr/tests/smptest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/EVTEST.ELF $(DISK_SRC)/nex/evtest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/evtest.nex ::usr/tests/evtest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/IPCTEST.ELF $(DISK_SRC)/nex/ipctest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/ipctest.nex ::usr/tests/ipctest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/PIPETEST.ELF $(DISK_SRC)/nex/pipetest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/pipetest.nex ::usr/tests/pipetest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/TLSTEST.ELF $(DISK_SRC)/nex/tlstest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/tlstest.nex ::usr/tests/tlstest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/NETTEST.ELF $(DISK_SRC)/nex/nettest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/nettest.nex ::usr/tests/nettest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/MPITEST.ELF $(DISK_SRC)/nex/mpitest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/mpitest.nex ::usr/tests/mpitest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/CWDTEST.ELF $(DISK_SRC)/nex/cwdtest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/cwdtest.nex ::usr/tests/cwdtest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/STATTEST.ELF $(DISK_SRC)/nex/stattest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/stattest.nex ::usr/tests/stattest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/DIRTEST.ELF $(DISK_SRC)/nex/dirtest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/dirtest.nex ::usr/tests/dirtest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/LFNTEST.ELF $(DISK_SRC)/nex/lfntest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/lfntest.nex ::usr/tests/lfntest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/TIER0.ELF $(DISK_SRC)/nex/tier0.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/tier0.nex ::usr/tests/tier0.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/MUSLHELO.ELF $(DISK_SRC)/nex/muslhelo.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/muslhelo.nex ::usr/tests/muslhelo.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/MUSLFORK.ELF $(DISK_SRC)/nex/muslfork.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/muslfork.nex ::usr/tests/muslfork.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/TTYTEST.ELF $(DISK_SRC)/nex/ttytest.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/ttytest.nex ::usr/tests/ttytest.nex
+	@./tools/nexify.sh $(USERLAND_BUILD)/INIT.ELF $(DISK_SRC)/nex/init.nex
+	@mcopy -i $(DISK_IMG) $(DISK_SRC)/nex/init.nex ::sbin/init.nex
 	printf '%s\n' \
-	  '# NeoOS test workload -- launched by /SBIN/INIT (see userland/init.c)' \
+	  '# NeoOS test workload -- launched by /sbin/init.nex (see userland/init.c)' \
 	  '# TERM runs first as a wait entry: it claims the active tty +' \
 	  '# framebuffer, renders TERMCHILD, self-checks, and exits before the' \
 	  '# key-injecting suites (ttytest, evtest, polltest) start.' \
-	  'wait /BIN/TERM.ELF' \
+	  'wait /bin/term.nex' \
 	  '# VTSWITCHTEST is a wait entry for the same reason: the active VT' \
 	  '# is global state, and /dev/CONSOLE follows it. A concurrent' \
 	  '# ttytest that set ICANON off through /dev/CONSOLE and read it' \
 	  '# back after a switch got two DIFFERENT terminals, and reported' \
 	  '# that the setting had not stuck.' \
-	  'wait /BIN/VTSWITCHTEST.ELF' \
-	  'spawn /BIN/PARENT.ELF' \
-	  'spawn /BIN/LOOPER.ELF' \
-	  'spawn /BIN/LOOPER.ELF' \
-	  'spawn /BIN/YIELDER.ELF' \
-	  'spawn /BIN/VFSTEST.ELF' \
-	  'spawn /BIN/VTTEST.ELF' \
-	  'spawn /BIN/ACTIVETTYTEST.ELF' \
-	  'spawn /BIN/CWDTEST.ELF' \
-	  'spawn /BIN/STATTEST.ELF' \
-	  'spawn /BIN/DIRTEST.ELF' \
-	  'spawn /BIN/LFNTEST.ELF' \
-	  'spawn /BIN/TIER0.ELF' \
-	  'spawn /BIN/MUSLHELO.ELF' \
-	  'spawn /BIN/MUSLFORK.ELF' \
-	  'spawn /BIN/TTYTEST.ELF' \
-	  'spawn /BIN/THRDTEST.ELF' \
-	  'spawn /BIN/SIGTEST.ELF' \
-	  'spawn /BIN/FAULTER.ELF' \
-	  'spawn /BIN/AVXTEST.ELF' \
-	  'spawn /BIN/MMAPTEST.ELF' \
-	  'spawn /BIN/REBTEST.ELF' \
-	  'spawn /BIN/ORPHANTEST.ELF' \
-	  'spawn /BIN/FBTEST.ELF' \
-	  'spawn /BIN/POLLTEST.ELF' \
-	  'spawn /BIN/POLLTRUNC.ELF' \
-	  'spawn /BIN/ARGVTEST.ELF' \
-	  'spawn /BIN/FDALLOC.ELF' \
-	  'spawn /BIN/THRDMANY.ELF' \
+	  'wait /usr/tests/vtswitchtest.nex' \
+	  'spawn /usr/tests/parent.nex' \
+	  'spawn /usr/tests/looper.nex' \
+	  'spawn /usr/tests/looper.nex' \
+	  'spawn /usr/tests/yielder.nex' \
+	  'spawn /usr/tests/vfstest.nex' \
+	  'spawn /usr/tests/vttest.nex' \
+	  'spawn /usr/tests/activettytest.nex' \
+	  'spawn /usr/tests/cwdtest.nex' \
+	  'spawn /usr/tests/stattest.nex' \
+	  'spawn /usr/tests/dirtest.nex' \
+	  'spawn /usr/tests/lfntest.nex' \
+	  'spawn /usr/tests/tier0.nex' \
+	  'spawn /usr/tests/muslhelo.nex' \
+	  'spawn /usr/tests/muslfork.nex' \
+	  'spawn /usr/tests/ttytest.nex' \
+	  'spawn /usr/tests/thrdtest.nex' \
+	  'spawn /usr/tests/sigtest.nex' \
+	  'spawn /usr/tests/faulter.nex' \
+	  'spawn /usr/tests/avxtest.nex' \
+	  'spawn /usr/tests/mmaptest.nex' \
+	  'spawn /usr/tests/rebtest.nex' \
+	  'spawn /usr/tests/orphantest.nex' \
+	  'spawn /usr/tests/fbtest.nex' \
+	  'spawn /usr/tests/polltest.nex' \
+	  'spawn /usr/tests/polltrunc.nex' \
+	  'spawn /usr/tests/argvtest.nex' \
+	  'spawn /usr/tests/nexcheck.nex' \
+	  'spawn /usr/tests/fdalloc.nex' \
+	  'spawn /usr/tests/thrdmany.nex' \
 	  '# BBSPIKE is a wait entry: it is a survey, and its value is a' \
 	  '# readable transcript of what BusyBox did. Interleaved with the' \
 	  '# rest of the suite that transcript is unreadable.' \
-	  'wait /BIN/BBSPIKE.ELF' \
+	  'wait /usr/tests/bbspike.nex' \
 	  '# BBSH runs an interactive shell on a pty and claims the active' \
 	  '# tty for it. A wait entry for the same reason PTYCHURN is one.' \
-	  'wait /BIN/BBSH.ELF' \
-	  'spawn /BIN/TLBSTORM.ELF' \
-	  'spawn /BIN/FORKSTORM.ELF' \
+	  'wait /usr/tests/bbsh.nex' \
+	  'spawn /usr/tests/tlbstorm.nex' \
+	  'spawn /usr/tests/forkstorm.nex' \
 	  '# PTYCHURN is a wait entry: it deliberately holds the ENTIRE pty' \
 	  '# pool (all 16) for the length of a round, so anything opening a' \
 	  '# pty beside it gets -ENFILE. ptytest did exactly that.' \
-	  'wait /BIN/PTYCHURN.ELF' \
-	  'spawn /BIN/SIGSTORM.ELF' \
+	  'wait /usr/tests/ptychurn.nex' \
+	  'spawn /usr/tests/sigstorm.nex' \
 	  '# POLLSTORM is a wait entry: it measures poll-broadcast traffic in' \
 	  '# two windows and compares them, so the background load has to be' \
 	  '# the same in both. Run beside the rest of the suite it swung 4.5x.' \
-	  'wait /BIN/POLLSTORM.ELF' \
-	  'spawn /BIN/PTYTEST.ELF' \
-	  'spawn /BIN/SMPTEST.ELF' \
-	  'spawn /BIN/EVTEST.ELF' \
-	  'spawn /BIN/IPCTEST.ELF' \
-	  'spawn /BIN/PIPETEST.ELF' \
-	  'spawn /BIN/TLSTEST.ELF' \
-	  'spawn /BIN/NETTEST.ELF' \
-	  'spawn /BIN/MPITEST.ELF' \
-	  > $(DISK_SRC)/INITTAB
-	mcopy -i $(DISK_IMG) $(DISK_SRC)/INITTAB ::ETC/INITTAB
+	  'wait /usr/tests/pollstorm.nex' \
+	  'spawn /usr/tests/ptytest.nex' \
+	  'spawn /usr/tests/smptest.nex' \
+	  'spawn /usr/tests/evtest.nex' \
+	  'spawn /usr/tests/ipctest.nex' \
+	  'spawn /usr/tests/pipetest.nex' \
+	  'spawn /usr/tests/tlstest.nex' \
+	  'spawn /usr/tests/nettest.nex' \
+	  'spawn /usr/tests/mpitest.nex' \
+	  > $(DISK_SRC)/inittab
+	mcopy -i $(DISK_IMG) $(DISK_SRC)/inittab ::etc/inittab
 
 # 64MB, not 32: FAT32 needs at least 65525 clusters, and mkfs.fat warns
 # that a 32MB image falls below that. Depends on $(DISK_IMG) only so
@@ -576,11 +650,11 @@ $(DISK_IMG): $(USERLAND_BUILD)/SPIN.ELF $(USERLAND_BUILD)/CHILD.ELF $(USERLAND_B
 $(DISK2_IMG): $(DISK_IMG)
 	dd if=/dev/zero of=$(DISK2_IMG) bs=1M count=64 status=none
 	mkfs.fat -F 32 $(DISK2_IMG)
-	printf 'Hello from the FAT32 volume!\n' > $(DISK_SRC)/FAT32.TXT
-	mcopy -i $(DISK2_IMG) $(DISK_SRC)/FAT32.TXT ::FAT32.TXT
-	mmd -i $(DISK2_IMG) ::SUB
-	printf 'nested on fat32\n' > $(DISK_SRC)/F32NEST.TXT
-	mcopy -i $(DISK2_IMG) $(DISK_SRC)/F32NEST.TXT ::SUB/F32NEST.TXT
+	printf 'Hello from the FAT32 volume!\n' > $(DISK_SRC)/fat32.txt
+	mcopy -i $(DISK2_IMG) $(DISK_SRC)/fat32.txt ::fat32.txt
+	mmd -i $(DISK2_IMG) ::sub
+	printf 'nested on fat32\n' > $(DISK_SRC)/f32nest.txt
+	mcopy -i $(DISK2_IMG) $(DISK_SRC)/f32nest.txt ::sub/f32nest.txt
 
 disk-image: $(DISK_IMG) $(DISK2_IMG)
 
@@ -626,9 +700,9 @@ shell:
 	@$(MAKE) QUIET=1 clean-kernel busybox iso disk-image
 	@printf '%s\n' \
 	  '# generated by `make shell` -- an interactive shell, alone' \
-	  'respawn /BIN/TERM.ELF /BIN/BUSYBOX.ELF busybox sh' \
+	  'respawn /bin/term.nex /bin/busybox.nex busybox sh' \
 	  > $(BUILD_DIR)/disk-src/INITTAB.shell
-	@mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/disk-src/INITTAB.shell ::ETC/INITTAB
+	@mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/disk-src/INITTAB.shell ::etc/inittab
 	@echo "NeoOS: booting to a BusyBox shell."
 	@echo "       Type in the QEMU window. 'exit' starts a FRESH shell"
 	@echo "       (respawn), so the machine stays up; close the window to"
@@ -642,9 +716,9 @@ shell-serial:
 	@$(MAKE) QUIET=1 clean-kernel busybox iso disk-image
 	@printf '%s\n' \
 	  '# generated by `make shell-serial`' \
-	  'respawn /BIN/TERM.ELF /BIN/BUSYBOX.ELF busybox sh' \
+	  'respawn /bin/term.nex /bin/busybox.nex busybox sh' \
 	  > $(BUILD_DIR)/disk-src/INITTAB.shell
-	@mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/disk-src/INITTAB.shell ::ETC/INITTAB
+	@mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/disk-src/INITTAB.shell ::etc/inittab
 	@echo "NeoOS: booting to a BusyBox shell on the framebuffer; serial is the log."
 	qemu-system-x86_64 $(QEMU_COMMON) -serial stdio
 
@@ -683,6 +757,7 @@ REQUIRED_MARKERS := \
 	"[polltest] ALL PASSED" \
 	"[polltrunc] ALL PASSED" \
 	"[argvtest] ALL PASSED" \
+	"[nexcheck] ALL PASSED" \
 	"[fdalloc] ALL PASSED" \
 	"[threadmany] ALL PASSED" \
 	"[bbspike] ALL PASSED" \
@@ -829,9 +904,9 @@ test: lock-check clean-kernel fresh-disks iso disk-image
 faultflood: iso disk-image
 	@printf '%s\n' \
 	  '# generated by `make faultflood` -- this test runs alone' \
-	  'wait /BIN/FAULTFLOOD.ELF' \
+	  'wait /usr/tests/faultflood.nex' \
 	  > $(BUILD_DIR)/disk-src/INITTAB.solo
-	mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/disk-src/INITTAB.solo ::ETC/INITTAB
+	mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/disk-src/INITTAB.solo ::etc/inittab
 	-@timeout $(BOOT_TIMEOUT) qemu-system-x86_64 $(QEMU_COMMON) \
 		-display none -serial file:$(BUILD_DIR)/faultflood.log > /dev/null 2>&1
 	@if grep -qE 'PANIC|\[exception\]' $(BUILD_DIR)/faultflood.log; then \

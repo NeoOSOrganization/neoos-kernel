@@ -20,7 +20,7 @@ static int str_eq(const char *a, const char *b) {
 // Placed on the image by the Makefile with mcopy, so this is a long
 // name written by a REAL VFAT implementation -- the read path is being
 // checked against something other than its own writer.
-#define EXTERNAL_LONG "/A Long File Name.txt"
+#define EXTERNAL_LONG "/usr/share/test/A Long File Name.txt"
 
 static void check_read_external(void) {
     struct stat s;
@@ -43,8 +43,8 @@ static void check_read_external(void) {
 
 // It must also LIST under its full name, not its ~1 alias.
 static void check_listed(void) {
-    DIR *d = opendir("/");
-    if (!d) { fail("opendir(/)", -1); return; }
+    DIR *d = opendir("/usr/share/test");
+    if (!d) { fail("opendir(/usr/share/test)", -1); return; }
     int found = 0;
     struct dirent *e;
     while ((e = readdir(d)) != 0) {
@@ -57,7 +57,7 @@ static void check_listed(void) {
 
 // The round trip that matters: NeoOS writes the name, NeoOS reads it.
 static void check_create_roundtrip(void) {
-    const char *name = "/a rather long file name with spaces.text";
+    const char *name = "/var/tmp/a rather long file name with spaces.text";
     int fd = open(name, O_CREAT | O_RDWR | O_TRUNC);
     if (fd < 0) { fail("create with a long name", fd); return; }
     const char *msg = "roundtrip";
@@ -74,7 +74,7 @@ static void check_create_roundtrip(void) {
     if (n != 9 || !str_eq(buf, "roundtrip")) { fail("contents did not survive", (int)n); return; }
 
     // And it must list under the full name.
-    DIR *d = opendir("/");
+    DIR *d = opendir("/var/tmp");
     int found = 0;
     struct dirent *e;
     while (d && (e = readdir(d)) != 0) {
@@ -88,7 +88,7 @@ static void check_create_roundtrip(void) {
 // Deleting must erase the LFN slots too. If it does not, the orphans
 // get folded onto a later entry and the listing goes wrong.
 static void check_unlink_erases_run(void) {
-    const char *name = "/temporary long name to delete.dat";
+    const char *name = "/var/tmp/temporary long name to delete.dat";
     int fd = open(name, O_CREAT | O_RDWR);
     if (fd < 0) { fail("create for the unlink case", fd); return; }
     close(fd);
@@ -101,7 +101,7 @@ static void check_unlink_erases_run(void) {
     // No listing entry may carry the dead name, and none may be empty
     // (an orphaned LFN run folded onto a later entry shows up as one or
     // the other).
-    DIR *d = opendir("/");
+    DIR *d = opendir("/usr/share/test");
     if (!d) { fail("opendir after unlink", -1); return; }
     struct dirent *e;
     while ((e = readdir(d)) != 0) {
@@ -117,28 +117,41 @@ static void check_unlink_erases_run(void) {
 // A short name must still be stored as a plain 8.3 entry -- no LFN
 // slots -- and must still work.
 static void check_short_names_unaffected(void) {
-    int fd = open("/SHORT.TXT", O_CREAT | O_RDWR | O_TRUNC);
+    int fd = open("/var/tmp/short.txt", O_CREAT | O_RDWR | O_TRUNC);
     if (fd < 0) { fail("create a short name", fd); return; }
     close(fd);
     struct stat s;
-    if (stat("/SHORT.TXT", &s) != 0) { fail("stat a short name", -1); return; }
-    // Case-insensitive lookup, as every FAT driver does.
-    if (stat("/short.txt", &s) != 0) { fail("case-insensitive lookup of a short name", -1); return; }
-    printf("[lfntest] short names and case-insensitive lookup passed\n");
+    if (stat("/var/tmp/short.txt", &s) != 0) { fail("stat a short name", -1); return; }
+    // Lookup is CASE-SENSITIVE. This asserted the opposite until N2 --
+    // "case-insensitive lookup, as every FAT driver does" -- and that is
+    // exactly what changed: the VFS's semantics are NeoOS's, not FAT's,
+    // and the case-sensitive filesystems planned later should not have
+    // to inherit a rule from this one.
+    //
+    // So a name differing only in case must NOT resolve.
+    if (stat("/var/tmp/SHORT.TXT", &s) == 0) {
+        fail("/var/tmp/SHORT.TXT resolved -- lookup is not case-sensitive", 0);
+        return;
+    }
+    if (stat("/var/tmp/Short.txt", &s) == 0) {
+        fail("/var/tmp/Short.txt resolved -- lookup is not case-sensitive", 0);
+        return;
+    }
+    printf("[lfntest] short names and case-SENSITIVE lookup passed\n");
 }
 
 static void check_long_dir(void) {
-    const char *dir = "/a long directory name";
+    const char *dir = "/var/tmp/a long directory name";
     if (mkdir(dir) != 0) { fail("mkdir with a long name", -1); return; }
     struct stat s;
     if (stat(dir, &s) != 0) { fail("stat the long-named directory", -1); return; }
     if (!S_ISDIR(s.st_mode)) { fail("long-named directory is not a directory", (int)s.st_mode); return; }
 
     // And a file inside it, reached by a long path.
-    int fd = open("/a long directory name/inner file.txt", O_CREAT | O_RDWR);
+    int fd = open("/var/tmp/a long directory name/inner file.txt", O_CREAT | O_RDWR);
     if (fd < 0) { fail("create inside a long-named directory", fd); return; }
     close(fd);
-    if (stat("/a long directory name/inner file.txt", &s) != 0) {
+    if (stat("/var/tmp/a long directory name/inner file.txt", &s) != 0) {
         fail("stat a file inside a long-named directory", -1);
         return;
     }

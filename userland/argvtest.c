@@ -27,7 +27,7 @@
 #include <errno.h>
 #include <sys/wait.h>
 
-#define SELF "/BIN/ARGVTEST.ELF"
+#define SELF "/usr/tests/argvtest.nex"
 
 // Deliberately past the OLD ceilings: 11 entries where 8 fit, and a
 // 200-byte argument where 128 fit. Under the previous code this vector

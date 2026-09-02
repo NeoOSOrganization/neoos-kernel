@@ -43,7 +43,7 @@ int getpid(void);
 // an orphan is reparented to init rather than left with a stale number.
 int getppid(void);
 
-// 1 on /dev/CONSOLE and /dev/TTY, 0 on a file, pipe or socket.
+// 1 on /dev/console and /dev/TTY, 0 on a file, pipe or socket.
 int isatty(int fd);
 int ioctl(int fd, unsigned long request, void *arg);
 int set_tid_address(void *ptr);

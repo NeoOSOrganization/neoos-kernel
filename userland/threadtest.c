@@ -131,7 +131,7 @@ static int check_exec_kills_threads(void) {
             if (thread_create(&t[i], exec_sibling, 0) != 0) { exit(1); }
         }
         for (volatile int i = 0; i < 500000; i++) { }   // let them get going
-        exec("/BIN/EXECTARG.ELF");                      // must not return
+        exec("/usr/tests/exectarg.nex");                      // must not return
         exit(2);
     }
     int code = wait(child);

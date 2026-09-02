@@ -278,8 +278,8 @@ rely on a blocking `read`. See `docs/stdlib.md` for the lock-rank reason.
 
 ### 8d. init and shutdown (M2)
 
-The kernel starts `/SBIN/INIT` as PID 1 and nothing else. INIT reads
-`/ETC/INITTAB` (`spawn`/`wait`/`respawn` entries), launches the
+The kernel starts `/sbin/init.nex` as PID 1 and nothing else. INIT reads
+`/etc/inittab` (`spawn`/`wait`/`respawn` entries), launches the
 workload, and reaps children and reparented orphans in a `wait4(-1)`
 loop until `-ECHILD`, then calls `reboot(LINUX_REBOOT_CMD_POWER_OFF)`.
 
@@ -361,7 +361,7 @@ subset (above), and a PTY subsystem (`/dev/ptmx`, `/dev/pts/N`,
 `SIGWINCH`; no `SIGHUP` on master close — session hang-up and job
 control are M2). Full detail and every divergence in `docs/stdlib.md`.
 
-**New in M2 (init):** `/SBIN/INIT` runs as PID 1 from `/ETC/INITTAB`,
+**New in M2 (init):** `/sbin/init.nex` runs as PID 1 from `/etc/inittab`,
 orphans reparent to it, and `reboot(2)` (PID-1-only) is the shutdown
 path (§8d). Job control and session hang-up are still owed.
 

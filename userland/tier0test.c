@@ -17,7 +17,7 @@ static void fail(const char *what, int rc) {
 // misordered result here means a musl program prints nothing or prints
 // garbage.
 static void check_writev(void) {
-    int fd = open("/writev.txt", O_CREAT | O_RDWR | O_TRUNC);
+    int fd = open("/var/tmp/writev.txt", O_CREAT | O_RDWR | O_TRUNC);
     if (fd < 0) { fail("open for writev", fd); return; }
 
     struct iovec v[3];
@@ -42,7 +42,7 @@ static void check_writev(void) {
 }
 
 static void check_readv(void) {
-    int fd = open("/writev.txt", O_RDONLY);
+    int fd = open("/var/tmp/writev.txt", O_RDONLY);
     if (fd < 0) { fail("open for readv", fd); return; }
     char a[3], b[3], c[5];
     struct iovec v[3];
@@ -57,7 +57,7 @@ static void check_readv(void) {
 }
 
 static void check_writev_errors(void) {
-    int fd = open("/writev.txt", O_RDONLY);
+    int fd = open("/var/tmp/writev.txt", O_RDONLY);
     if (fd < 0) { fail("open for writev errors", fd); return; }
     struct iovec v[1];
     v[0].iov_base = (void *)"x"; v[0].iov_len = 1;
@@ -72,7 +72,7 @@ static void check_writev_errors(void) {
 }
 
 // stdio uses this to choose buffering, and isatty() is built on it.
-// /dev/CONSOLE is a real line-discipline terminal, so TIOCGWINSZ on
+// /dev/console is a real line-discipline terminal, so TIOCGWINSZ on
 // stdout succeeds and isatty(1) is true; the -ENOTTY answer is what a
 // non-terminal fd gets.
 static void check_ioctl(void) {

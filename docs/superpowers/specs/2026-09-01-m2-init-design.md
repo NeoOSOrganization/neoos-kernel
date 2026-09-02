@@ -49,8 +49,8 @@ exited. The kernel goes back to knowing nothing about the test list.
 
 - **`reboot(2)`** — a Linux-shaped syscall, `POWER_OFF` / `HALT` /
   `RESTART`, callable only by PID 1 (`-EPERM` otherwise).
-- **`/SBIN/INIT`** — an ordinary libneoos ring-3 program that the
-  kernel starts as PID 1: parse `/ETC/INITTAB`, `spawnv` each entry,
+- **`/sbin/init.nex`** — an ordinary libneoos ring-3 program that the
+  kernel starts as PID 1: parse `/etc/inittab`, `spawnv` each entry,
   `wait4(-1)` in a loop forever (reaping its own children and every
   orphan), and `reboot(POWER_OFF)` once the manifest's entries are all
   gone.
@@ -58,7 +58,7 @@ exited. The kernel goes back to knowing nothing about the test list.
   still-zombie children get `parent_pid = 1`, and PID 1's
   `child_waiters` is woken.
 - **PID 1 exiting is a kernel panic.**
-- `kmain` launches only `/SBIN/INIT`; the kernel-thread selftests stay.
+- `kmain` launches only `/sbin/init.nex`; the kernel-thread selftests stay.
 - The `user_proc_count` poweroff hook is **removed** — `reboot(2)` from
   init is the clean path; `BOOT_TIMEOUT` is the hang backstop.
 - `make test` behaviour unchanged: same ~11s, same per-suite marker
@@ -180,9 +180,9 @@ A crashed init is unrecoverable; halting loudly beats a silent
 
 Replace the block of ~30 `spawn("/BIN/*.ELF")` calls with:
 ```c
-struct process *init = spawn("/SBIN/INIT.ELF");
+struct process *init = spawn("/sbin/init.nex.ELF");
 if (!init || init->pid != 1) {
-    serial_write_string("[init] PANIC: could not start /SBIN/INIT (pid=");
+    serial_write_string("[init] PANIC: could not start /sbin/init.nex (pid=");
     serial_write_hex64(init ? (uint64_t)init->pid : 0);
     serial_write_string(")\n");
     for (;;) __asm__ volatile ("hlt");
@@ -208,10 +208,10 @@ in `kernel.h`. `kernel_shutdown()` stays and is now called only from
 `sys_reboot`. `BOOT_TIMEOUT` in the Makefile stays as the hang
 detector (a test that hangs → init never reaches `reboot` → timeout).
 
-### 6. `/SBIN/INIT` — `userland/init.c`
+### 6. `/sbin/init.nex` — `userland/init.c`
 
 ```c
-// /ETC/INITTAB: one entry per line. '#' to end-of-line is a comment.
+// /etc/inittab: one entry per line. '#' to end-of-line is a comment.
 //   <mode> <path>
 //   mode: spawn   -- launch, keep going
 //         wait    -- launch, block until it exits, then continue
@@ -222,12 +222,12 @@ struct entry { char path[64]; int mode; };  // 0=spawn 1=wait 2=respawn
 static struct entry ents[MAX_ENTRIES];
 static int nents;
 
-static void parse_inittab(void);   // open("/ETC/INITTAB"), read whole file, split lines
+static void parse_inittab(void);   // open("/etc/inittab"), read whole file, split lines
 
 int main(void) {
     parse_inittab();
     if (nents == 0) {
-        printf("[init] no /ETC/INITTAB entries -- powering off\n");
+        printf("[init] no /etc/inittab entries -- powering off\n");
         reboot(LINUX_REBOOT_CMD_POWER_OFF);
     }
 
@@ -272,9 +272,9 @@ int main(void) {
   relaunch it rather than powering off. With no respawn entries, the
   first `-ECHILD` means the workload is done → poweroff.
 
-### 7. `/ETC/INITTAB` for `make test` — `Makefile`
+### 7. `/etc/inittab` for `make test` — `Makefile`
 
-A new `$(BUILD_DIR)/disk-src/ETC/INITTAB` written by the `$(DISK_IMG)`
+A new `$(BUILD_DIR)/disk-src/etc/inittab` written by the `$(DISK_IMG)`
 recipe, `mmd ::ETC` + `mcopy` it in, plus `mmd ::SBIN` + `mcopy
 INIT.ELF ::SBIN/INIT.ELF`. Contents = every binary `kmain` spawns
 today, one `spawn` line each, `PARENT.ELF` first (it forks CHILD.ELF —
@@ -283,7 +283,7 @@ scrape is pid-independent, so any order is fine; keep PARENT first for
 minimal diff to the boot log).
 
 ```
-# NeoOS test suite -- launched by /SBIN/INIT
+# NeoOS test suite -- launched by /sbin/init.nex
 spawn /BIN/PARENT.ELF
 spawn /BIN/LOOPER.ELF
 spawn /BIN/LOOPER.ELF
@@ -316,10 +316,10 @@ prototype. Add `#include <sys/reboot.h>` where `init.c` needs it.
 ## Data flow
 
 ```
-kmain:  spawn("/SBIN/INIT.ELF")  -> pid 1
+kmain:  spawn("/sbin/init.nex.ELF")  -> pid 1
           |
           v
-INIT:   parse /ETC/INITTAB
+INIT:   parse /etc/inittab
         spawnv each entry  ---------------------> ~30 test processes
         for(;;) wait4(-1):                         |  each forks children,
           reap own children + every orphan  <------+  exits when done;
@@ -363,7 +363,7 @@ gauntlet.
   critical path for *every* userland test — highest-blast-radius
   change in the milestone).
 - **Panic paths** (manual, revert after): a deliberately-crashing
-  `/SBIN/INIT` → `[init] PANIC: init exited`; an `INITTAB` naming a
+  `/sbin/init.nex` → `[init] PANIC: init exited`; an `INITTAB` naming a
   missing binary → init logs `spawnv` failure, keeps going, still
   powers off.
 
@@ -385,7 +385,7 @@ gauntlet.
   Makefile already treats a timeout as failure) and the explicit
   `[init]` markers make the failure legible rather than silent.
 - **The manifest is a new file the disk image must carry.** A missing
-  `/ETC/INITTAB` → init powers off immediately → every suite marker
+  `/etc/inittab` → init powers off immediately → every suite marker
   missing → obvious `make test` failure. Low risk, loud symptom.
 - **`RESTART`'s triple-fault fallback** is only exercised by hand.
   `POWER_OFF` is the only command `make test` uses; `HALT` and
@@ -396,7 +396,7 @@ gauntlet.
 
 - **`docs/stdlib.md`:** a `reboot(2)` entry (the three commands, the
   PID-1-only rule as a divergence — Linux uses `CAP_SYS_BOOT`); an
-  `init` / `/ETC/INITTAB` section (format, the three modes, the
+  `init` / `/etc/inittab` section (format, the three modes, the
   "powers off when the workload is done" behaviour, the note that
   `reboot` does not first `SIGTERM` every process). Update the evdev /
   poll notes only if they reference the old boot flow.
@@ -404,8 +404,8 @@ gauntlet.
   PID-1-only). Orphan reparenting now matches Linux. Note that a
   ported service manager still hits: no `SIGTERM`-on-shutdown, no
   sessions, no `/proc`.
-- **`README.md`:** "how it boots" — kernel starts `/SBIN/INIT`, which
-  runs `/ETC/INITTAB`. Move the milestone count.
+- **`README.md`:** "how it boots" — kernel starts `/sbin/init.nex`, which
+  runs `/etc/inittab`. Move the milestone count.
 - **`docs/superpowers/specs/2026-08-31-post-smp-roadmap.md`:** mark M2
   done, M1b next.
 - **This spec** committed under `docs/superpowers/specs/`.

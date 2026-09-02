@@ -113,9 +113,9 @@ int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
     int ok = 1;
-    ok &= roundtrip("/RT.TXT",     "fat16 (/)");
+    ok &= roundtrip("/var/tmp/rt.txt",     "fat16 (/)");
     ok &= roundtrip("/tmp/RT.TXT", "ramfs (/tmp)");
-    ok &= roundtrip("/mnt/RT.TXT", "fat32 (/mnt)");
+    ok &= roundtrip("/mnt/rt.txt", "fat32 (/mnt)");
     ok &= fd_lifecycle();
 
     // Two fds on one path must share a vnode: the write through `a`

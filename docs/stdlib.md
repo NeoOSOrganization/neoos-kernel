@@ -1137,10 +1137,10 @@ any other caller gets `-1`. An unknown `cmd` returns `-1`
 (kernel `-EINVAL`). NeoOS also has no `LINUX_REBOOT_CMD_CAD_ON/OFF`,
 no `SW_SUSPEND`, and no `kexec`.
 
-### `/SBIN/INIT` and `/ETC/INITTAB`
+### `/sbin/init.nex` and `/etc/inittab`
 
-The kernel starts `/SBIN/INIT` as PID 1 and nothing else. INIT reads
-`/ETC/INITTAB` — one `<mode> <path>` entry per line, `#` comments and
+The kernel starts `/sbin/init.nex` as PID 1 and nothing else. INIT reads
+`/etc/inittab` — one `<mode> <path>` entry per line, `#` comments and
 blank lines ignored — and:
 
 | mode | behaviour |
@@ -1207,6 +1207,44 @@ arrangement is the parent that set the pty up. `setsid()` followed by
 `ioctl(fd, TIOCSCTTY, 0)` on the inherited descriptor is the standard
 sequence, and without it `ash` sees a foreground process group that is
 not its own and signals itself with `SIGTTIN` until it stops.
+
+**Path lookup is CASE-SENSITIVE.** `Foo` and `foo` are different names,
+on every filesystem including FAT. FAT itself is a case-insensitive
+format, and NeoOS used to inherit that; the VFS's semantics are NeoOS's,
+and the case-sensitive filesystems planned later should not have to
+fight a rule taken from FAT.
+
+Two consequences:
+
+- **FAT can only store one of `foo` and `FOO`.** They collide in the
+  same 8.3 slot, so creating the second on a FAT volume fails even
+  though the VFS considers them distinct names. That is FAT's limit
+  surfacing through a VFS that no longer hides it.
+- **VFAT's case flags are honoured on read.** A lowercase name that fits
+  8.3 is stored uppercase with two bits of the NT-reserved byte marking
+  it (`0x08` base, `0x10` extension) and *no* long-name entry — that is
+  what `mcopy` writes. Ignoring those bits would make every lowercase
+  path read back uppercase and fail to resolve. Names NeoOS creates take
+  the long-name path instead, since `fits_83` rejects lowercase, so case
+  round-trips by a single mechanism.
+
+**Executables are `.nex`, with magic `\x7fNOX`** — ELF's shape with
+three characters changed; everything from `e_ident[4]` on is unchanged
+ELF64. The loader accepts **both** `ELF` and `NOX` and records which it
+saw on the process, so `NOX` is a marker meaning "built for NeoOS"
+rather than a rename. `tools/nexify.sh` stamps a copy at disk-image
+time; the linker output in `build/` stays valid ELF so `objdump`,
+`readelf` and `gdb` keep working.
+
+**`/dev/tty` is the caller's controlling terminal**, not an alias for
+the console. A session leader claims one with `TIOCSCTTY`; it is
+inherited across `fork` and `spawn` and kept across `exec`. A process
+with none gets `-ENXIO` from `open("/dev/tty")`, as on Linux.
+
+**The filesystem layout** is `/bin` `/sbin` `/etc` `/dev` `/proc` `/tmp`
+`/mnt` `/home` `/root` `/usr/tests` `/usr/share/test` `/var/tmp`. The
+root holds directories only. `/tmp` is a ramfs, so tests that must write
+to a real filesystem use `/var/tmp`.
 
 `getuid`/`geteuid`/`getgid`/`getegid` all return **0**. NeoOS is
 single-user with no credentials, and FAT has no ownership, so root is
@@ -1477,7 +1515,7 @@ deliberately outside Linux's `0x54xx` TIOC range). On a pty **master**,
 claiming does two things: cooked keyboard input is routed to this
 master's slave line discipline instead of `/dev/CONSOLE`, and the
 kernel stops painting the framebuffer for its own console output
-(serial output is unaffected). A userland terminal (`/BIN/TERM`) claims
+(serial output is unaffected). A userland terminal (`/bin/term.nex`) claims
 it on startup so keystrokes reach the shell it hosts and it owns the
 pixels.
 

@@ -12,6 +12,12 @@
 struct elf_info {
     uint64_t entry;         // AT_ENTRY
 
+    // 1 if the image carried NeoOS's own NOX magic rather than ELF's.
+    // Nothing reads it yet: it exists so the first behaviour that should
+    // apply only to NeoOS-native binaries has somewhere to hang, without
+    // having to re-read the file to find out.
+    int is_nox;
+
     // The program header table AS MAPPED, not as it sits in the file.
     // Computed from the PT_LOAD segment that contains e_phoff, because
     // that is the only thing that relates a file offset to a virtual

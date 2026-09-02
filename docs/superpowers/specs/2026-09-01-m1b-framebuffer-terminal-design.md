@@ -24,7 +24,7 @@ a re-litigation of them.
                                     │
                                     └──(cooked bytes)──► the ACTIVE pty master
                                                               │
- /SBIN/INIT ──spawns──► /BIN/TERM ◄──── read / write ─────────┘
+ /sbin/init.nex ──spawns──► /bin/term.nex ◄──── read / write ─────────┘
                           │  (userland VT engine, plain C)
                           │  opens /dev/ptmx → gets /dev/pts/N
                           │  execs a child on pts/N as fd 0/1/2
@@ -34,7 +34,7 @@ a re-litigation of them.
                              is not a real terminal
 ```
 
-- **`/BIN/TERM`** is a new userland program (`userland/term/`). On
+- **`/bin/term.nex`** is a new userland program (`userland/term/`). On
   start it:
   1. opens `/dev/ptmx`, reads its slave index via `TIOCGPTN`, opens
      `/dev/pts/N`;
@@ -43,7 +43,7 @@ a re-litigation of them.
      `FBIOGET_VSCREENINFO`;
   4. `fork`s; the child sets pts/N as fd 0/1/2, `setsid`, and
      `exec`s (syscall 13 — no argv needed) the target program (a
-     build-time-configured path — `/BIN/TERMCHILD.ELF` for the
+     build-time-configured path — `/usr/tests/termchild.nex` for the
      milestone's own test). BB6 repoints this at `/BIN/BUSYBOX` and,
      needing argv/env by then, switches to `execve`;
   5. loops: `poll({master_fd, event0_fd}, …)` →
@@ -205,7 +205,7 @@ title-setting OSC (`\e]0;…` accepted and discarded).
   `::BIN/TERMCHILD.ELF`, the `font_term.c` regeneration rule
   (`tools/bdf2c.py` on `third_party/spleen/spleen-12x24.bdf`),
   `REQUIRED_MARKERS` additions.
-- `/ETC/INITTAB`: a `respawn /BIN/TERM.ELF` entry. During the
+- `/etc/inittab`: a `respawn /bin/term.nex` entry. During the
   milestone TERM's child is `TERMCHILD`; a later BB milestone
   repoints it at the shell. The existing `spawn /BIN/*` test entries
   stay — they still run and exit; TERM runs alongside them.
@@ -250,7 +250,7 @@ M1b-1 and M1b-2 are independent. M1b-3 needs both. M1b-4 needs M1b-3.
 
 | Question | Decision |
 |---|---|
-| Terminal in kernel or userland | **Userland** process (`/BIN/TERM`). |
+| Terminal in kernel or userland | **Userland** process (`/bin/term.nex`). |
 | VT scope | **xterm-ish / broad** (§4). |
 | Font | **Spleen 12×24** (BSD-2-Clause) — native bitmap, converted to a checked-in `.c` table by `tools/bdf2c.py`. NokiaPure (the brainstorm pick) dropped: proprietary, not redistributable as a rasterized derivative. |
 | Cell size | **12×24** → 106×33 at 1280×800. |

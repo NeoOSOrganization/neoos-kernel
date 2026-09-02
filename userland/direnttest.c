@@ -37,7 +37,7 @@ static void check_layout(void) {
 // Walk the raw buffer by d_reclen, exactly as a ported program does,
 // rather than through readdir().
 static void check_raw_walk(void) {
-    int fd = open("/DIR", O_RDONLY);
+    int fd = open("/usr/share/test/dir", O_RDONLY);
     if (fd < 0) { fail("open(/DIR)", fd); return; }
 
     char buf[512] __attribute__((aligned(8)));
@@ -52,23 +52,23 @@ static void check_raw_walk(void) {
         if (e->d_reclen % 8 != 0) { fail("d_reclen not 8-byte aligned", e->d_reclen); return; }
         if (off + (int)e->d_reclen > n) { fail("record runs past the buffer", e->d_reclen); return; }
         if (e->d_ino == 0) { fail("d_ino should be a real inode", 0); return; }
-        if (str_eq(e->d_name, "NESTED.TXT")) {
+        if (str_eq(e->d_name, "nested.txt")) {
             found_nested = 1;
-            if (e->d_type != DT_REG) { fail("NESTED.TXT d_type should be DT_REG", e->d_type); return; }
+            if (e->d_type != DT_REG) { fail("nested.txt d_type should be DT_REG", e->d_type); return; }
         }
         off += e->d_reclen;
         entries++;
     }
     if (off != n) { fail("records did not exactly fill the returned bytes", off); return; }
-    if (!found_nested) { fail("NESTED.TXT missing from /DIR", entries); return; }
+    if (!found_nested) { fail("nested.txt missing from /usr/share/test/dir", entries); return; }
     printf("[direnttest] raw getdents64 walk passed (%d entries, %d bytes)\n", entries, n);
 }
 
 // readdir() over the same directory must agree, and must report a
 // directory as DT_DIR.
 static void check_readdir(void) {
-    DIR *d = opendir("/");
-    if (!d) { fail("opendir(/)", -1); return; }
+    DIR *d = opendir("/usr/share/test");
+    if (!d) { fail("opendir(/usr/share/test)", -1); return; }
 
     int saw_dir = 0, saw_reg = 0, entries = 0;
     struct dirent *e;
@@ -80,21 +80,21 @@ static void check_readdir(void) {
     }
     closedir(d);
     if (!saw_dir) { fail("no DT_DIR entry in /", entries); return; }
-    if (!saw_reg) { fail("no DT_REG entry in /", entries); return; }
+    if (!saw_reg) { fail("no DT_REG entry in /usr/share/test", entries); return; }
     printf("[direnttest] readdir passed (%d entries)\n", entries);
 }
 
 // d_ino must be the same inode stat() reports, or a program pairing
 // the two sees two different files.
 static void check_ino_matches_stat(void) {
-    DIR *d = opendir("/DIR");
-    if (!d) { fail("opendir(/DIR)", -1); return; }
+    DIR *d = opendir("/usr/share/test/dir");
+    if (!d) { fail("opendir(/usr/share/test/dir)", -1); return; }
     struct dirent *e;
     int checked = 0;
     while ((e = readdir(d)) != 0) {
-        if (!str_eq(e->d_name, "NESTED.TXT")) { continue; }
+        if (!str_eq(e->d_name, "nested.txt")) { continue; }
         struct stat s;
-        if (stat("/DIR/NESTED.TXT", &s) != 0) { fail("stat for d_ino comparison", -1); break; }
+        if (stat("/usr/share/test/dir/nested.txt", &s) != 0) { fail("stat for d_ino comparison", -1); break; }
         if (s.st_ino != e->d_ino) {
             printf("[direnttest] FAILED: d_ino %d != st_ino %d\n",
                    (int)e->d_ino, (int)s.st_ino);
@@ -105,14 +105,14 @@ static void check_ino_matches_stat(void) {
         break;
     }
     closedir(d);
-    if (!checked && !failures) { fail("never found NESTED.TXT to compare", 0); return; }
+    if (!checked && !failures) { fail("never found nested.txt to compare", 0); return; }
     if (!failures) { printf("[direnttest] d_ino matches st_ino passed\n"); }
 }
 
 static void check_errors(void) {
     // A buffer too small for even one record is -EINVAL, not 0 -- 0
     // would look like an empty directory and truncate a listing.
-    int fd = open("/DIR", O_RDONLY);
+    int fd = open("/usr/share/test/dir", O_RDONLY);
     if (fd < 0) { fail("open for the small-buffer case", fd); return; }
     char tiny[8];
     int rc = getdents(fd, tiny, sizeof(tiny));
@@ -120,7 +120,7 @@ static void check_errors(void) {
     if (rc != -EINVAL) { fail("undersized buffer should be -EINVAL", rc); return; }
 
     // getdents on a regular file is -ENOTDIR.
-    fd = open("/HELLO.TXT", O_RDONLY);
+    fd = open("/usr/share/test/hello.txt", O_RDONLY);
     if (fd >= 0) {
         char buf[256] __attribute__((aligned(8)));
         rc = getdents(fd, buf, sizeof(buf));

@@ -32,7 +32,7 @@ static void child_body(void) {
     if (write(p[1], "x", 1) != 1) { exit(12); }
     char c = 0;
     if (read(p[0], &c, 1) != 1 || c != 'x') { exit(13); }
-    int f = open("/ETC/INITTAB", O_RDONLY);
+    int f = open("/etc/inittab", O_RDONLY);
     if (f >= 0) { close(f); }
     close(p[0]);
     close(p[1]);

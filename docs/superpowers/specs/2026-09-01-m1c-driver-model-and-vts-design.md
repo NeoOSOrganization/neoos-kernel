@@ -272,7 +272,7 @@ keyboard modes, `frsig` accepted-ignored, 6 VTs not 63).
 
 ---
 
-## 6. `/BIN/TERM` reworked as a VT client (M1c-4)
+## 6. `/bin/term.nex` reworked as a VT client (M1c-4)
 
 M1b-3's TERM is rewritten to be a well-behaved VT client instead of
 grabbing the whole framebuffer:
@@ -375,7 +375,7 @@ layout. M1c-3 needs M1c-2's `con_driver`. M1c-4 needs M1c-3.
 
 | Question | Decision |
 |---|---|
-| VT multiplexing | **Kernel VT layer**; `/BIN/TERM` is a `VT_PROCESS` client, not a wholesale fb grab. |
+| VT multiplexing | **Kernel VT layer**; `/bin/term.nex` is a `VT_PROCESS` client, not a wholesale fb grab. |
 | Driver reorg scope | **Everything hardware-facing** → `kernel/drivers/{video,input,block,char,irq,acpi}/`; `tty`/`pty`/`console` → `kernel/tty/`; `kernel/dev/` deleted. |
 | Display abstraction | **Two interfaces**: `fb_device` (linear-fb provider, DRM-lite) and `con_driver` (text-grid painter). Matches Linux's fbdev-vs-con_driver split. |
 | Switch protocol | **Linux `VT_SETMODE`/`VT_RELDISP`/`KDSETMODE` + `SIGUSR1`/`SIGUSR2`** — ABI-compatible with real Linux console clients. |

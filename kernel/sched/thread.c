@@ -90,7 +90,7 @@ struct thread *thread_alloc(struct process *p) {
     // LESS kernel thread, though, never enters a thread table and is
     // never joined by tid -- taking a pid-allocator number for it would
     // permanently burn PID 1..N, and PID 1 must stay free for
-    // /SBIN/INIT. Give it a private descending id instead, the same
+    // /sbin/init.nex. Give it a private descending id instead, the same
     // negative space the idle threads already use.
     int tid;
     if (p) {

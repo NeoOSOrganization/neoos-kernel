@@ -216,7 +216,7 @@ static void ptm_close(struct file_descriptor *f) {
     // slave. The child's read returned 0 IMMEDIATELY -- before anything
     // was typed -- so an interactive BusyBox ash saw end-of-input at
     // startup and sat echoing keystrokes it would never act on.
-    // /BIN/TERM never noticed, because its child only ever writes.
+    // /bin/term.nex never noticed, because its child only ever writes.
     if (pt->master_refs <= 1) {
         uint64_t fl = spin_lock_irqsave(&pt->slave.lock);
         pt->slave.hung_up = 1;

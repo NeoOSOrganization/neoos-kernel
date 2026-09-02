@@ -685,7 +685,7 @@ static int find_in_directory_cluster(struct fat_volume *v, uint32_t dir_cluster,
 // Defined further down, with the vnode layer; needed here because the
 // long-name code is the FIRST thing that reads an 8.3 name back or
 // erases a slot.
-static void from_fat_name(const uint8_t *raw, char *out);
+static void from_fat_name(const uint8_t *raw, uint8_t nt_reserved, char *out);
 static int  mark_dirent_deleted(struct fat_volume *v, uint32_t lba, uint16_t offset);
 static void write_dirent(struct fat_volume *v, struct fat16_dirent *entry,
                          const uint8_t *fat_name, uint8_t attr,
@@ -959,7 +959,7 @@ static int fat_dir_next(struct fat_slots *it, struct fat_entry *out) {
             out->run_off   = run_off;
             out->run_slots = highest + 1;
         } else {
-            from_fat_name(de.name, out->name);
+            from_fat_name(de.name, de.nt_reserved, out->name);
             out->run_lba   = lba;
             out->run_off   = off;
             out->run_slots = 1;
@@ -973,14 +973,21 @@ static int fat_dir_next(struct fat_slots *it, struct fat_entry *out) {
 // is upper-case by construction, so a case-sensitive compare would
 // make "readme.txt" and "README.TXT" different files on a filesystem
 // that cannot tell them apart.
+// EXACT comparison. This used to uppercase both sides, because FAT is a
+// case-insensitive format -- but the VFS's semantics are NeoOS's, not
+// FAT's, and the case-sensitive filesystems planned later should not
+// have to inherit a rule from this one. `Foo` and `foo` are different
+// names.
+//
+// The consequence, recorded in docs/stdlib.md: FAT can still only store
+// ONE of them, since the two collide in the same 8.3 slot. That is
+// FAT's limitation surfacing through a VFS that no longer hides it.
 static int fat_name_eq(const char *a, const char *b) {
-    for (;;) {
-        char ca = *a++, cb = *b++;
-        if (ca >= 'a' && ca <= 'z') { ca = (char)(ca - 'a' + 'A'); }
-        if (cb >= 'a' && cb <= 'z') { cb = (char)(cb - 'a' + 'A'); }
-        if (ca != cb) { return 0; }
-        if (ca == '\0') { return 1; }
+    int i = 0;
+    for (; a[i] && b[i]; i++) {
+        if (a[i] != b[i]) { return 0; }
     }
+    return a[i] == b[i];
 }
 
 // Finds `name` in a directory, matching against the long name when the
@@ -1621,7 +1628,7 @@ void fat16_selftest(void) {
         return;
     }
 
-    if (!fat16_find("/HELLO.TXT", &cluster, &size, NULL, NULL)) {
+    if (!fat16_find("/usr/share/test/hello.txt", &cluster, &size, NULL, NULL)) {
         serial_write_string("[fat16] selftest FAILED: /HELLO.TXT not found\n");
         return;
     }
@@ -1631,7 +1638,7 @@ void fat16_selftest(void) {
         return;
     }
 
-    if (!fat16_find("/BIGFILE.TXT", &cluster, &size, NULL, NULL) || size != 8192) {
+    if (!fat16_find("/usr/share/test/bigfile.txt", &cluster, &size, NULL, NULL) || size != 8192) {
         serial_write_string("[fat16] selftest FAILED: /BIGFILE.TXT not found or wrong size\n");
         return;
     }
@@ -1648,7 +1655,7 @@ void fat16_selftest(void) {
         }
     }
 
-    if (!fat16_find("/DIR/NESTED.TXT", &cluster, &size, NULL, NULL)) {
+    if (!fat16_find("/usr/share/test/dir/nested.txt", &cluster, &size, NULL, NULL)) {
         serial_write_string("[fat16] selftest FAILED: /DIR/NESTED.TXT not found\n");
         return;
     }
@@ -1658,7 +1665,7 @@ void fat16_selftest(void) {
         return;
     }
 
-    if (fat16_find("/DIR/MISSING.TXT", &cluster, &size, NULL, NULL)) {
+    if (fat16_find("/usr/share/test/dir/missing.txt", &cluster, &size, NULL, NULL)) {
         serial_write_string("[fat16] selftest FAILED: /DIR/MISSING.TXT should not be found\n");
         return;
     }
@@ -1711,51 +1718,51 @@ void fat16_write_selftest(void) {
     }
 
     uint32_t size;
-    if (fat16_find("/NEWFILE.TXT", &cluster, &size, NULL, NULL)) {
+    if (fat16_find("/var/tmp/newfile.txt", &cluster, &size, NULL, NULL)) {
         serial_write_string("[fat16] write selftest FAILED: /NEWFILE.TXT already exists before creation\n");
         return;
     }
-    if (fat16_create_file("/NEWFILE.TXT", NULL, NULL) != 0) {
+    if (fat16_create_file("/var/tmp/newfile.txt", NULL, NULL) != 0) {
         serial_write_string("[fat16] write selftest FAILED: fat16_create_file(/NEWFILE.TXT) failed\n");
         return;
     }
-    if (!fat16_find("/NEWFILE.TXT", &cluster, &size, NULL, NULL) || cluster != 0 || size != 0) {
+    if (!fat16_find("/var/tmp/newfile.txt", &cluster, &size, NULL, NULL) || cluster != 0 || size != 0) {
         serial_write_string("[fat16] write selftest FAILED: /NEWFILE.TXT not found or not empty after creation\n");
         return;
     }
-    if (fat16_create_file("/NEWFILE.TXT", NULL, NULL) != -EEXIST) {
+    if (fat16_create_file("/var/tmp/newfile.txt", NULL, NULL) != -EEXIST) {
         serial_write_string("[fat16] write selftest FAILED: creating /NEWFILE.TXT again did not return -EEXIST\n");
         return;
     }
-    if (fat16_delete_entry("/NEWFILE.TXT") != 0) {
+    if (fat16_delete_entry("/var/tmp/newfile.txt") != 0) {
         serial_write_string("[fat16] write selftest FAILED: fat16_delete_entry(/NEWFILE.TXT) failed\n");
         return;
     }
-    if (fat16_find("/NEWFILE.TXT", &cluster, &size, NULL, NULL)) {
+    if (fat16_find("/var/tmp/newfile.txt", &cluster, &size, NULL, NULL)) {
         serial_write_string("[fat16] write selftest FAILED: /NEWFILE.TXT still found after deletion\n");
         return;
     }
-    if (fat16_delete_entry("/NEWFILE.TXT") != -ENOENT) {
+    if (fat16_delete_entry("/var/tmp/newfile.txt") != -ENOENT) {
         serial_write_string("[fat16] write selftest FAILED: deleting /NEWFILE.TXT again did not return -ENOENT\n");
         return;
     }
 
-    if (fat16_mkdir("/NEWDIR") != 0) {
+    if (fat16_mkdir("/var/tmp/newdir") != 0) {
         serial_write_string("[fat16] write selftest FAILED: fat16_mkdir(/NEWDIR) failed\n");
         return;
     }
-    if (fat16_create_file("/NEWDIR/INNER.TXT", NULL, NULL) != 0) {
+    if (fat16_create_file("/var/tmp/newdir/inner.txt", NULL, NULL) != 0) {
         serial_write_string("[fat16] write selftest FAILED: fat16_create_file(/NEWDIR/INNER.TXT) failed\n");
         return;
     }
-    if (!fat16_find("/NEWDIR/INNER.TXT", &cluster, &size, NULL, NULL)) {
+    if (!fat16_find("/var/tmp/newdir/inner.txt", &cluster, &size, NULL, NULL)) {
         serial_write_string("[fat16] write selftest FAILED: /NEWDIR/INNER.TXT not found after creation\n");
         return;
     }
 
     uint32_t dir_lba;
     uint16_t dir_offset;
-    if (fat16_create_file("/WDATA.TXT", &dir_lba, &dir_offset) != 0) {
+    if (fat16_create_file("/var/tmp/wdata.txt", &dir_lba, &dir_offset) != 0) {
         serial_write_string("[fat16] write selftest FAILED: fat16_create_file(/WDATA.TXT) failed\n");
         return;
     }
@@ -1813,7 +1820,7 @@ void fat16_write_selftest(void) {
         return;
     }
 
-    fat16_delete_entry("/WDATA.TXT");
+    fat16_delete_entry("/var/tmp/wdata.txt");
 
     serial_write_string("[fat16] write selftest passed\n");
 }
@@ -1884,16 +1891,47 @@ static uint64_t inode_id_of(uint32_t lba, uint16_t offset) {
     return ((uint64_t)lba << 16) | offset;
 }
 
-// Inverse of to_fat_name: "FILE    TXT" -> "FILE.TXT".
-static void from_fat_name(const uint8_t *raw, char *out) {
+// Inverse of to_fat_name: "FILE    TXT" -> "FILE.TXT", honouring VFAT's
+// case flags.
+//
+// The 8.3 name is stored UPPERCASE always. VFAT records that the real
+// name was lowercase in two bits of the NT-reserved byte -- 0x08 for the
+// base, 0x10 for the extension -- rather than spending a long-name entry
+// on it. Ignoring them means every lowercase name reads back uppercase.
+//
+// This is not a detail that can be skipped: `mcopy` writes
+// `busybox.nex` as `BUSYBOX NEX` with nt_reserved 0x18 and NO long-name
+// entry at all (verified by dumping a test image). With a case-sensitive
+// VFS, ignoring those bits makes every lowercase path fail to resolve.
+#define FAT_NT_LOWER_BASE 0x08
+#define FAT_NT_LOWER_EXT  0x10
+
+static void from_fat_name(const uint8_t *raw, uint8_t nt_reserved, char *out) {
+    int lower_base = (nt_reserved & FAT_NT_LOWER_BASE) != 0;
+    int lower_ext  = (nt_reserved & FAT_NT_LOWER_EXT) != 0;
     int o = 0;
-    for (int i = 0; i < 8 && raw[i] != ' '; i++) { out[o++] = (char)raw[i]; }
+    for (int i = 0; i < 8 && raw[i] != ' '; i++) {
+        char c = (char)raw[i];
+        if (lower_base && c >= 'A' && c <= 'Z') { c = (char)(c - 'A' + 'a'); }
+        out[o++] = c;
+    }
     if (raw[8] != ' ') {
         out[o++] = '.';
-        for (int i = 8; i < 11 && raw[i] != ' '; i++) { out[o++] = (char)raw[i]; }
+        for (int i = 8; i < 11 && raw[i] != ' '; i++) {
+            char c = (char)raw[i];
+            if (lower_ext && c >= 'A' && c <= 'Z') { c = (char)(c - 'A' + 'a'); }
+            out[o++] = c;
+        }
     }
     out[o] = '\0';
 }
+
+// Only the READ path needs these bits. A lowercase name created by
+// NeoOS takes the long-name path instead -- fat_char_ok_in_83 rejects
+// lowercase, so `fits_83` is false and an LFN entry carries the case
+// exactly. That costs one extra directory slot per file and keeps a
+// single mechanism for preserving case, rather than two that have to
+// agree.
 
 // Marks a directory entry deleted in place by writing 0xE5 over the
 // first name byte -- the same thing fat16_delete_entry does inline;

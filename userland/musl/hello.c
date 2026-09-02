@@ -47,7 +47,7 @@ int main(int argc, char **argv)
 
     // stat, through the shim's path reshaping.
     struct stat st;
-    if (stat("/HELLO.TXT", &st) != 0) { fail("stat"); }
+    if (stat("/usr/share/test/hello.txt", &st) != 0) { fail("stat"); }
     else {
         printf("[musl] stat /HELLO.TXT size=%d isreg=%d\n",
                (int)st.st_size, S_ISREG(st.st_mode) ? 1 : 0);
@@ -55,7 +55,7 @@ int main(int argc, char **argv)
     }
 
     // open/read through musl's fd layer.
-    int fd = open("/HELLO.TXT", O_RDONLY);
+    int fd = open("/usr/share/test/hello.txt", O_RDONLY);
     if (fd < 0) { fail("open"); }
     else {
         char fbuf[64];
@@ -66,12 +66,12 @@ int main(int argc, char **argv)
     }
 
     // A long name, written by NeoOS's VFAT layer and opened by musl.
-    fd = open("/A Long File Name.txt", O_RDONLY);
+    fd = open("/usr/share/test/A Long File Name.txt", O_RDONLY);
     if (fd < 0) { fail("open a long name"); }
     else { close(fd); printf("[musl] opened a VFAT long name\n"); }
 
     // opendir/readdir over the Linux getdents64 records.
-    DIR *d = opendir("/");
+    DIR *d = opendir("/usr/share/test");
     if (!d) { fail("opendir"); }
     else {
         int entries = 0, saw_dir = 0, saw_long = 0;
@@ -88,7 +88,7 @@ int main(int argc, char **argv)
     }
 
     // fopen/fgets: stdio's read path, buffering and all.
-    FILE *f = fopen("/HELLO.TXT", "r");
+    FILE *f = fopen("/usr/share/test/hello.txt", "r");
     if (!f) { fail("fopen"); }
     else {
         char line[64];

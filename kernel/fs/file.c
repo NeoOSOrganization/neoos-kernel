@@ -166,7 +166,7 @@ const struct file_ops vnode_file_ops = {
 // vnode gets its per-device file_ops (and the chance to set up f->priv
 // via dev->open); everything else keeps vnode_file_ops. Both sys_open
 // and the standard-stream setup that runs through fd_table_put go
-// through here, so /dev/CONSOLE behaves the same however it was opened.
+// through here, so /dev/console behaves the same however it was opened.
 // Returns 0, or a negative errno if dev->open failed.
 int64_t file_bind_vnode_ops(struct file_descriptor *f) {
     f->ops = &vnode_file_ops;

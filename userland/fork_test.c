@@ -41,7 +41,7 @@ int main(int argc, char **argv) {
         }
         printf("[fork_test child pid=%d] passed\n", getpid());
 
-        int exec_result = exec("/BIN/EXECTARG.ELF");
+        int exec_result = exec("/usr/tests/exectarg.nex");
         printf("[fork_test child pid=%d] exec FAILED, result=%d\n", getpid(), exec_result);
         return 1; // only reached if exec() failed
     }

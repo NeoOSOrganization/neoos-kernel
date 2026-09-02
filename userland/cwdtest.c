@@ -31,24 +31,24 @@ static void check_inherited_cwd(void) {
 }
 
 static void check_chdir_and_getcwd(void) {
-    int rc = chdir("/DIR");
-    if (rc != 0) { fail("chdir(/DIR)", rc); return; }
+    int rc = chdir("/usr/share/test/dir");
+    if (rc != 0) { fail("chdir(/usr/share/test/dir)", rc); return; }
 
     char buf[128];
     if (!getcwd(buf, sizeof(buf))) { fail("getcwd after chdir", -1); return; }
-    if (!str_eq(buf, "/DIR")) {
-        printf("[cwdtest] FAILED: cwd is \"%s\", expected \"/DIR\"\n", buf);
+    if (!str_eq(buf, "/usr/share/test/dir")) {
+        printf("[cwdtest] FAILED: cwd is \"%s\", expected \"/usr/share/test/dir\"\n", buf);
         failures++;
         return;
     }
     printf("[cwdtest] chdir + getcwd passed\n");
 }
 
-// The point of the cwd: a bare name resolves against it. /DIR/NESTED.TXT
+// The point of the cwd: a bare name resolves against it. /usr/share/test/dir/nested.txt
 // is placed on the FAT16 image by the Makefile.
 static void check_relative_open(void) {
-    int fd = open("NESTED.TXT", O_RDONLY);
-    if (fd < 0) { fail("open(NESTED.TXT) relative to /DIR", fd); return; }
+    int fd = open("nested.txt", O_RDONLY);
+    if (fd < 0) { fail("open(nested.txt) relative to /usr/share/test/dir", fd); return; }
     char buf[8];
     int64_t n = read(fd, buf, 6);
     close(fd);
@@ -59,19 +59,27 @@ static void check_relative_open(void) {
 static void check_dot_and_dotdot(void) {
     if (chdir("./") != 0) { fail("chdir(./)", -1); return; }
     char buf[128];
-    if (!getcwd(buf, sizeof(buf)) || !str_eq(buf, "/DIR")) {
+    if (!getcwd(buf, sizeof(buf)) || !str_eq(buf, "/usr/share/test/dir")) {
         fail("\".\" changed the cwd", -1);
         return;
     }
 
+    // ".." from /usr/share/test/dir is its PARENT, not the root. The
+    // test used to sit in /DIR and could not tell the two apart -- one
+    // level up from a top-level directory is the root either way. The
+    // clean layout gives it a real parent to check against.
     if (chdir("..") != 0) { fail("chdir(..)", -1); return; }
-    if (!getcwd(buf, sizeof(buf)) || !str_eq(buf, "/")) {
-        printf("[cwdtest] FAILED: after \"..\" cwd is \"%s\", expected \"/\"\n", buf);
+    if (!getcwd(buf, sizeof(buf)) || !str_eq(buf, "/usr/share/test")) {
+        printf("[cwdtest] FAILED: after \"..\" cwd is \"%s\", expected \"/usr/share/test\"\n", buf);
         failures++;
         return;
     }
 
-    // ".." at the root stays at the root rather than escaping it.
+    // ".." at the root stays at the root rather than escaping it. Go
+    // there explicitly first: the test now starts three levels down
+    // (/usr/share/test/dir), so a single ".." no longer arrives at the
+    // root the way it did when the fixture sat in /DIR.
+    if (chdir("/") != 0) { fail("chdir(/)", -1); return; }
     if (chdir("..") != 0) { fail("chdir(..) at root", -1); return; }
     if (!getcwd(buf, sizeof(buf)) || !str_eq(buf, "/")) {
         fail("\"..\" escaped the root", -1);
@@ -81,12 +89,12 @@ static void check_dot_and_dotdot(void) {
 }
 
 static void check_errors(void) {
-    int rc = chdir("/NO_SUCH_DIR");
+    int rc = chdir("/no_such_dir");
     if (rc != -ENOENT) { fail("chdir to a missing directory should be -ENOENT", rc); return; }
 
     // A FILE is not a directory, and chdir must refuse it rather than
     // leave the process with a cwd nothing can resolve against.
-    rc = chdir("/HELLO.TXT");
+    rc = chdir("/usr/share/test/hello.txt");
     if (rc != -ENOTDIR) { fail("chdir to a file should be -ENOTDIR", rc); return; }
 
     char buf[128];
@@ -115,13 +123,13 @@ static void check_errors(void) {
 
 // The cwd is inherited across fork, as on Linux.
 static void check_fork_inherits(void) {
-    if (chdir("/DIR") != 0) { fail("chdir(/DIR) before fork", -1); return; }
+    if (chdir("/usr/share/test/dir") != 0) { fail("chdir(/usr/share/test/dir) before fork", -1); return; }
 
     int pid = fork();
     if (pid < 0) { fail("fork", pid); return; }
     if (pid == 0) {
         char buf[128];
-        if (!getcwd(buf, sizeof(buf)) || !str_eq(buf, "/DIR")) { exit(1); }
+        if (!getcwd(buf, sizeof(buf)) || !str_eq(buf, "/usr/share/test/dir")) { exit(1); }
         // A child's chdir must not reach back into the parent.
         chdir("/");
         exit(0);
@@ -135,7 +143,7 @@ static void check_fork_inherits(void) {
     }
 
     char buf[128];
-    if (!getcwd(buf, sizeof(buf)) || !str_eq(buf, "/DIR")) {
+    if (!getcwd(buf, sizeof(buf)) || !str_eq(buf, "/usr/share/test/dir")) {
         printf("[cwdtest] FAILED: child's chdir changed the parent's cwd to \"%s\"\n", buf);
         failures++;
         return;

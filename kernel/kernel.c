@@ -283,13 +283,13 @@ void kmain(void *multiboot_info) {
     // pmm seeded, CPU probed, every AP online.
     banner_show();
 
-    // PID 1. /SBIN/INIT reads /ETC/INITTAB, launches the workload, reaps
+    // PID 1. /sbin/init.nex reads /etc/inittab, launches the workload, reaps
     // every child and orphan, and powers the machine off via reboot(2)
     // when they have all exited. The kernel no longer knows the test
-    // list -- it lives in the disk image's /ETC/INITTAB (see Makefile).
-    struct process *init_task = spawn("/SBIN/INIT.ELF");
+    // list -- it lives in the disk image's /etc/inittab (see Makefile).
+    struct process *init_task = spawn("/sbin/init.nex");
     if (!init_task || init_task->pid != 1) {
-        serial_write_string("[init] PANIC: /SBIN/INIT did not start as PID 1 (pid=");
+        serial_write_string("[init] PANIC: /sbin/init.nex did not start as PID 1 (pid=");
         serial_write_hex64(init_task ? (uint64_t)init_task->pid : 0);
         serial_write_string(")\n");
         for (;;) { __asm__ volatile ("hlt"); }

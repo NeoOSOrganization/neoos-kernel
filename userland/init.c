@@ -1,6 +1,6 @@
-// /SBIN/INIT -- NeoOS PID 1.
+// /sbin/init.nex -- NeoOS PID 1.
 //
-// Parses /ETC/INITTAB, launches every entry, then reaps children
+// Parses /etc/inittab, launches every entry, then reaps children
 // forever. When wait4() reports -ECHILD -- every launched process and
 // every orphan reparented to us has exited -- it powers the machine
 // off with reboot(2).
@@ -60,13 +60,13 @@ static int mode_of(const char *w, int len) {
     return -1;
 }
 
-// Bytes actually read from /ETC/INITTAB, reported alongside the entry
+// Bytes actually read from /etc/inittab, reported alongside the entry
 // count so a boot that parsed less than the whole file says so.
 static int inittab_bytes;
 
 static void parse_inittab(void) {
-    int fd = open("/ETC/INITTAB", O_RDONLY);
-    if (fd < 0) { printf("[init] no /ETC/INITTAB (%d)\n", fd); return; }
+    int fd = open("/etc/inittab", O_RDONLY);
+    if (fd < 0) { printf("[init] no /etc/inittab (%d)\n", fd); return; }
 
     // A SHORT read here used to be indistinguishable from end-of-file,
     // and init would go on to launch a prefix of the system in silence
@@ -79,8 +79,8 @@ static void parse_inittab(void) {
     while (n < (int)sizeof buf && (r = read(fd, buf + n, sizeof buf - n)) > 0) {
         n += r;
     }
-    if (r < 0) { printf("[init] FAILED: read error %d on /ETC/INITTAB after %d bytes\n", r, n); }
-    if (n == (int)sizeof buf) { printf("[init] FAILED: /ETC/INITTAB is larger than %d bytes\n", n); }
+    if (r < 0) { printf("[init] FAILED: read error %d on /etc/inittab after %d bytes\n", r, n); }
+    if (n == (int)sizeof buf) { printf("[init] FAILED: /etc/inittab is larger than %d bytes\n", n); }
     close(fd);
     inittab_bytes = n;
 

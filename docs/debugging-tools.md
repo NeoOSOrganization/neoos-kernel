@@ -203,7 +203,7 @@ see the CS3 section of the concurrency spec. Behaviour after those fixes:
 | 1-in-1000 | clean; failures surface as errors (`fork FAILED: out of memory for kernel stack`) |
 | 1-in-200 | clean, boots, no panic |
 | 1-in-100 | clean (2 of 4 runs faulted before the fixes) |
-| 1-in-50 | `/SBIN/INIT` cannot load, so the kernel panics deliberately rather than run without PID 1 — intended |
+| 1-in-50 | `/sbin/init.nex` cannot load, so the kernel panics deliberately rather than run without PID 1 — intended |
 
 **Tests failing under injection is expected and correct.** They do not
 tolerate allocation failure and are not meant to; what matters is that
@@ -311,10 +311,10 @@ the shell, and because it is the only entry the machine then powers off.
 
 The INITTAB it writes is:
 
-    wait /BIN/TERM.ELF /BIN/BUSYBOX.ELF busybox sh
+    wait /bin/term.nex /bin/busybox.nex busybox sh
 
 which reads as: run the framebuffer terminal, and inside it run the
-program at `/BIN/BUSYBOX.ELF` with `argv = {"busybox", "sh"}`. The path
+program at `/bin/busybox.nex` with `argv = {"busybox", "sh"}`. The path
 and `argv[0]` are separate on purpose — BusyBox picks its applet from
 `argv[0]`, and the FAT path's basename (`BUSYBOX.ELF`) is not an applet
 name, so passing the path as `argv[0]` gets "applet not found" and exit

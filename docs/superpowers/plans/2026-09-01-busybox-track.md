@@ -116,7 +116,7 @@ and both tests were confirmed to fail before the fix.
 Two pieces of collateral, each its own commit: `vtswitchtest` became a
 `wait` entry (`3a3b7dd`) because the active VT is global state and
 `/dev/CONSOLE` follows it, which made `ttytest` flaky; and `init` now
-reports how much of `/ETC/INITTAB` it actually parsed (`8982891`), after
+reports how much of `/etc/inittab` it actually parsed (`8982891`), after
 a run booted a silent prefix of the system on a short read.
 
 - Copy the vma list in `fork_task()`: allocate a `struct vma` per
@@ -162,7 +162,7 @@ is knowledge.
 ### BB1 result — **DONE** (2026-09-02)
 
 BusyBox 1.37.0, static against NeoOS's musl, 324 KB, 76 config options,
-`/BIN/BUSYBOX.ELF`. `userland/bbspike.c` runs nine invocations at boot
+`/bin/busybox.nex`. `userland/bbspike.c` runs nine invocations at boot
 and prints how each ended. **All nine now succeed:**
 
 | invocation | result |
@@ -172,7 +172,7 @@ and prints how each ended. **All nine now succeed:**
 | `busybox uname -a` | exit 0, prints a **blank line** |
 | `busybox pwd` | prints `/`, exit 0 |
 | `busybox ls /` | lists the volume, exit 0 |
-| `busybox cat /ETC/INITTAB` | prints the file, exit 0 |
+| `busybox cat /etc/inittab` | prints the file, exit 0 |
 | `busybox sh -c :` | exit 0 |
 | `busybox sh -c 'echo shell works'` | prints, exit 0 |
 | `busybox sh -c 'busybox echo external'` | prints, exit 0 — **ash forks and execs** |
@@ -276,7 +276,7 @@ pattern: `/proc/<pid>/{stat,cmdline,status}`, `/proc/self`,
 
 ## BB6 — interactive shell bring-up
 
-- `/ETC/INITTAB` gains a shell entry. With M1c-3's VTs in place the
+- `/etc/inittab` gains a shell entry. With M1c-3's VTs in place the
   natural home is a VT: init runs the shell on `/dev/tty1`. The
   PTY-hosted `TERM` remains the alternative.
 - init sets `PATH=/bin`, `HOME=/`, `TERM=`, `PS1` and `execve`s the
@@ -371,7 +371,7 @@ in its own session, commands written into the master, output read back.
 It answers variable expansion, arithmetic, `pwd`, a pipeline, and a
 redirection round trip through a file. That is the milestone's goal —
 an interactive `ash` on a terminal — reached over a pty rather than the
-framebuffer, which `/BIN/TERM` already renders.
+framebuffer, which `/bin/term.nex` already renders.
 
 Two kernel bugs stood in the way, both invisible to every existing test:
 fork left the child with no thread pointer, and a pty hung up when a

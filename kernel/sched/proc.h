@@ -121,11 +121,20 @@ struct process {
     // and then reads through the filesystem, and because such a fault
     // can sleep. Must NOT be held across schedule().
     struct spinlock mm_lock;
-    // Indexed DIRECTLY by fd -- /dev/CONSOLE is a real vnode opened on
+    // Indexed DIRECTLY by fd -- /dev/console is a real vnode opened on
     // 0, 1 and 2 at process creation, so the fd IS the index. The table
     // belongs to the PROCESS: threads share it. See fd_table.h for the
     // 2-level layout and the 16,384-fd ceiling.
     struct fd_table *fd_table;
+    // The CONTROLLING TERMINAL, or 0 for a process that has none.
+    // Claimed with TIOCSCTTY by a session leader, inherited across fork
+    // and kept across exec. This is what /dev/tty resolves to.
+    //
+    // A bare pointer is safe here: ttys are either static (the console,
+    // the VTs) or pool entries that are reused but never freed
+    // (kernel/tty/pty.c keeps its structs deliberately, see the note
+    // there), so one can never dangle.
+    struct tty *ctty;
     // Current working directory: always absolute, always canonical
     // (no "." or ".."), never empty, and never with a trailing slash
     // except at the root. EVERY process has one from the moment

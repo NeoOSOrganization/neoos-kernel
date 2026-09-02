@@ -89,7 +89,7 @@ static int check_exec_forgets_mappings(void) {
                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED);
         if (a < 0 || (unsigned long)a != STALE_PROBE_ADDR) { exit(50); }
         *(volatile unsigned char *)STALE_PROBE_ADDR = 0x77;   // populate it
-        exec("/BIN/EXECTARG.ELF");                            // must not return
+        exec("/usr/tests/exectarg.nex");                            // must not return
         exit(51);
     }
     int code = wait(child);

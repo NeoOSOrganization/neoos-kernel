@@ -227,7 +227,7 @@ int fd_table_put(struct fd_table *table, int fd, struct vnode *vn, int writable)
         slots[slot_idx].in_use   = 1;
         slots[slot_idx].vn       = vn;
         slots[slot_idx].writable = writable;
-        // A device vnode (e.g. /dev/CONSOLE for the standard streams)
+        // A device vnode (e.g. /dev/console for the standard streams)
         // needs its per-device file_ops, not the plain vnode ops --
         // devfs's own read/write paths no longer serve device I/O.
         file_bind_vnode_ops(&slots[slot_idx]);

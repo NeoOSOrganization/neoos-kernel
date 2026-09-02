@@ -18,7 +18,7 @@
 #include <stdio.h>
 #include <fcntl.h>
 
-#define PROBE "/ETC/INITTAB"
+#define PROBE "/etc/inittab"
 
 // Past FD_TABLE_SLOTS (512), so allocation moves into the second bucket
 // and the per-bucket hint has somewhere wrong to point.
@@ -86,7 +86,7 @@ int main(void) {
     // Leave fd 0 occupied again. It is not stdin any more -- nothing in
     // this process reads it -- but a process exiting with 0 closed is a
     // shape the rest of the suite need not be exposed to.
-    int restore = open("/dev/CONSOLE", O_RDONLY);
+    int restore = open("/dev/console", O_RDONLY);
     if (restore != 0) { return fail("restoring fd 0", restore, 0); }
 
     printf("[fdalloc] lowest-available honoured across %d descriptors "

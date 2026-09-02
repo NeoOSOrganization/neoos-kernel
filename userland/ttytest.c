@@ -34,7 +34,7 @@ static void check_isatty(void) {
 
     // A regular file is NOT a terminal, which is the half that makes
     // the answer meaningful.
-    int fd = open("/HELLO.TXT", O_RDONLY);
+    int fd = open("/usr/share/test/hello.txt", O_RDONLY);
     if (fd < 0) { fail("open for the non-tty case", fd); return; }
     int r = isatty(fd);
     close(fd);
@@ -107,7 +107,7 @@ static void check_pgrp(void) {
 
 static void check_errors(void) {
     // Not a terminal -> -ENOTTY, which is how isatty knows.
-    int fd = open("/HELLO.TXT", O_RDONLY);
+    int fd = open("/usr/share/test/hello.txt", O_RDONLY);
     if (fd >= 0) {
         struct winsize ws;
         int r = ioctl(fd, TIOCGWINSZ, &ws);

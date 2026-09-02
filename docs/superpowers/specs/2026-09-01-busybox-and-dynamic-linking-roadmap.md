@@ -248,7 +248,7 @@ Today NeoOS `mmap` is anonymous-only (`docs/abi-compatibility.md` §3).
 
 ### BB6 — interactive shell bring-up
 
-- `/ETC/INITTAB` gains a shell entry. If M1b's terminal is a
+- `/etc/inittab` gains a shell entry. If M1b's terminal is a
   PTY-hosted userland VT, init launches the terminal and the terminal
   starts the shell on its PTY slave; otherwise init runs
   `respawn /bin/busybox sh` on `/dev/CONSOLE` as the fallback.

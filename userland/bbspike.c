@@ -22,7 +22,7 @@
 #include <sys/utsname.h>
 #include <auxv.h>
 
-#define BB "/BIN/BUSYBOX.ELF"
+#define BB "/bin/busybox.nex"
 
 static int run(const char *label, char *const argv[]) {
     // spawnVE, not spawnv: the environment is the point of half these
@@ -62,7 +62,7 @@ int main(void) {
     char *a_uname[] = { (char *)"busybox", (char *)"uname", (char *)"-a", 0 };
     char *a_pwd[]   = { (char *)"busybox", (char *)"pwd", 0 };
     char *a_ls[]    = { (char *)"busybox", (char *)"ls", (char *)"/", 0 };
-    char *a_cat[]   = { (char *)"busybox", (char *)"cat", (char *)"/ETC/INITTAB", 0 };
+    char *a_cat[]   = { (char *)"busybox", (char *)"cat", (char *)"/etc/inittab", 0 };
     char *a_shc[]   = { (char *)"busybox", (char *)"sh", (char *)"-c", (char *)":", 0 };
     char *a_shec[]  = { (char *)"busybox", (char *)"sh", (char *)"-c",
                         (char *)"echo shell works", 0 };
@@ -152,14 +152,14 @@ int main(void) {
     // code alone would pass against an empty /proc.
     char *p_ps[] = { (char *)"busybox", (char *)"ps", 0 };
     char *p_ps1[] = { (char *)"busybox", (char *)"sh", (char *)"-c",
-                      (char *)"busybox ps | grep -q INIT.ELF && echo PS-FOUND-INIT", 0 };
+                      (char *)"busybox ps | grep -q init.nex && echo PS-FOUND-INIT", 0 };
     run("ps",              p_ps);
     // This one IS asserted: `grep -q` exits non-zero when it finds
     // nothing, and ps exits 0 whether or not it listed anything, so the
     // exit status of the pipeline is the only thing that distinguishes
     // a working /proc from an empty one.
     if (run("ps | grep init", p_ps1) != 0) {
-        printf("[bbspike] FAILED: ps did not list init -- /proc is empty "
+        printf("[bbspike] FAILED: ps did not list init.nex -- /proc is empty "
                "or unreadable\n");
         return 1;
     }

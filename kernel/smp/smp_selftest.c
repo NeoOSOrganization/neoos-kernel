@@ -235,14 +235,14 @@ void smp_steal_selftest_start(void) {
     }
 
     // The pass condition is "a USER thread migrated since boot". Since
-    // /SBIN/INIT became PID 1 the kernel no longer floods CPU 0 with
+    // /sbin/init.nex became PID 1 the kernel no longer floods CPU 0 with
     // user processes at boot, so give this test its own migratable
     // user workload: a handful of short-lived LOOPERs, all enqueued on
     // CPU 0 with idle APs ready to steal them. They are parented to no
     // one (spawned from the boot path) and exit on their own; the
     // struct each leaves behind is reclaimed at power-off.
 #ifndef NEOOS_QUIET_BOOT
-    for (int i = 0; i < 6; i++) { spawn("/BIN/LOOPER.ELF"); }
+    for (int i = 0; i < 6; i++) { spawn("/usr/tests/looper.nex"); }
 #else
     // Quiet boot: these six processes print "[looper] tick" for as long
     // as they live, and an interactive session is not the place for

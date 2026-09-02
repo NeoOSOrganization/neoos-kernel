@@ -16,7 +16,7 @@ DONE
   SMP.   lifetime + lock detangle       refcounting in, kernel/sync/rcu.c deleted
   Ph14.  input + solidity               evdev, keyboard decoder, CSPRNG AT_RANDOM
   M1a.   console plumbing               /dev/fb0 + fbcon, poll/select, PTY, devfs_register
-  M2.    init (PID 1)                   /SBIN/INIT from /ETC/INITTAB, reboot(2), reparenting
+  M2.    init (PID 1)                   /sbin/init.nex from /etc/inittab, reboot(2), reparenting
   M1b-1..3. framebuffer terminal        Spleen font, VT engine, TERM process
   M1c-1..3. driver model + kernel VTs   kernel/drivers reorg, fb_device + con_driver,
                                         /dev/tty1..6 with Alt+Fn, VT/KD ioctls

@@ -37,7 +37,7 @@ nothing changes shipping behaviour.
   before this rule; CS2 found that a *deterministic* injection often
   cannot discriminate, so prefer injecting the **real** failure mode.
 - **Stress selftests that need other CPUs run before
-  `spawn("/SBIN/INIT.ELF")`** in `kmain`, beside `vt_stress_selftest`
+  `spawn("/sbin/init.nex.ELF")`** in `kmain`, beside `vt_stress_selftest`
   and `waitq_churn_selftest`. Running them after it makes them race the
   userland workload — CS2 hit exactly that, with `vt_stress` clearing
   the screen under TERM's render check.

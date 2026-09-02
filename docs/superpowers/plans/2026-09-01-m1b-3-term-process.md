@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** `/BIN/TERM` — a userland process that owns a PTY, runs a child
+**Goal:** `/bin/term.nex` — a userland process that owns a PTY, runs a child
 on the slave, `mmap`s `/dev/fb0`, and paints the VT grid with the
 Spleen glyph table. The kernel hands cooked keyboard input and the
 framebuffer to whichever pty master claims them, stops touching
@@ -14,11 +14,11 @@ on a panic or on master close.
  keyboard IRQ ─► input_key_event ─► active_input_tty  (default tty_console,
                                     │                   set to a pts slave
                                     │                   by NEOOS_TIOCSACTIVE)
- /SBIN/INIT ─spawn─► /BIN/TERM      ▼
+ /sbin/init.nex ─spawn─► /bin/term.nex      ▼
    open /dev/ptmx ─► master fd; TIOCGPTN ─► /dev/pts/N
    ioctl(master, NEOOS_TIOCSACTIVE, 1)   → route keys to pts/N, fb_owned=1
    open /dev/fb0; FBIOGET_VSCREENINFO; mmap MAP_SHARED
-   fork: child close 0/1/2, open pts/N ×3, setsid, exec /BIN/TERMCHILD
+   fork: child close 0/1/2, open pts/N ×3, setsid, exec /bin/term.nexCHILD
    loop: poll(master) → read → vt_feed → vt_take_dirty → render_span(fb,…)
    child exits → self-check fb pixels → "[term] render ALL PASSED"
    ioctl(master, NEOOS_TIOCSACTIVE, 0); exit
@@ -478,7 +478,7 @@ exits 0 so a text-mode boot still passes):
 6. `fork()`:
    - child: `close(0); close(1); close(2);`
      `open("/dev/pts/N", O_RDWR)` ×3 (→ 0,1,2); `setsid();`
-     `exec("/BIN/TERMCHILD.ELF");` `_exit(127)` if it returns.
+     `exec("/usr/tests/termchild.nex");` `_exit(127)` if it returns.
    - parent: continue.
 7. Loop:
    ```c
@@ -516,7 +516,7 @@ exits 0 so a text-mode boot still passes):
 - `TERMCHILD.ELF` rule: `userland/termchild.c` (plain, like `looper`).
 - Both added to `$(DISK_IMG)` prereqs; `mcopy … ::BIN/TERM.ELF` and
   `::BIN/TERMCHILD.ELF`.
-- INITTAB: add `spawn /BIN/TERM.ELF` (near the end, after the noisy
+- INITTAB: add `spawn /bin/term.nex` (near the end, after the noisy
   suites, so its render is the last thing on screen).
 - `REQUIRED_MARKERS += "[term] render ALL PASSED"`.
 
@@ -548,7 +548,7 @@ reclaims). Note it is a NeoOS extension with no Linux equivalent.
 - [ ] **Step 7: gauntlet ×3, commit**
 
 `for i in 1 2 3; do bash .superpowers/sdd/2026-08-31-phase14-input-and-solidity/pgauntlet.sh 15 2 || break; done`
-→ 45/45. Commit `"M1b-3: /BIN/TERM renders a PTY child to the framebuffer"`.
+→ 45/45. Commit `"M1b-3: /bin/term.nex renders a PTY child to the framebuffer"`.
 
 ---
 

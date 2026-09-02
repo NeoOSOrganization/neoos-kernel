@@ -322,7 +322,7 @@ recorded against that milestone.
 call site in `kernel.c` was never committed. CS0 Task 5 added it, then
 reverted `kernel.c` to remove a temporary fault injection and took the
 call with it — so the VT stress test had not run since. Both stress
-selftests are now wired, and placed **before** `spawn("/SBIN/INIT.ELF")`
+selftests are now wired, and placed **before** `spawn("/sbin/init.nex.ELF")`
 rather than after: run alongside the userland workload, `vt_stress`
 cleared the screen under TERM and failed its render check.
 

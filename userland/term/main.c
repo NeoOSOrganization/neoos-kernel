@@ -1,4 +1,4 @@
-// /BIN/TERM -- the userland framebuffer terminal.
+// /bin/term.nex -- the userland framebuffer terminal.
 //
 // Owns a PTY, runs a child on the slave, mmaps /dev/fb0, and paints the
 // VT grid with the Spleen glyph table. M1b-3 scope: render the child's
@@ -69,7 +69,7 @@ static unsigned fb_px(const struct term_fb *fb, int x, int y) {
     return *p;
 }
 
-// With no arguments TERM runs /BIN/TERMCHILD.ELF and finishes with the
+// With no arguments TERM runs /usr/tests/termchild.nex and finishes with the
 // render self-check that makes it a test. Given arguments it runs those
 // instead and skips the self-check, because the check looks for
 // TERMCHILD's red 'R' at cell (0,0) and any other program would rightly
@@ -78,11 +78,11 @@ static unsigned fb_px(const struct term_fb *fb, int x, int y) {
 // The shape is execve's, deliberately: argv[1] is the PATH and argv[2..]
 // is the child's whole argv, argv[0] included.
 //
-//   wait /BIN/TERM.ELF /BIN/BUSYBOX.ELF busybox sh
+//   wait /bin/term.nex /bin/busybox.nex busybox sh
 //                      ^path            ^argv[0] ^argv[1]
 //
 // Separating them is not ceremony. BusyBox chooses its applet from
-// argv[0], and the path on a FAT volume is `/BIN/BUSYBOX.ELF`, whose
+// argv[0], and the path on a FAT volume is `/bin/busybox.nex`, whose
 // basename is not an applet name -- given the path as argv[0] it prints
 // "applet not found" and exits 127, which is exactly what the first
 // version of `make shell` did. With argv[2..] supplied, argv[0] can be
@@ -131,7 +131,7 @@ static int logo_draw(const struct term_fb *fb) {
 }
 
 int main(int argc, char **argv) {
-    char *default_child[] = { (char *)"/BIN/TERMCHILD.ELF", 0 };
+    char *default_child[] = { (char *)"/usr/tests/termchild.nex", 0 };
     char *path_only[]     = { 0, 0 };
     const char *child_path;
     char **child_argv;

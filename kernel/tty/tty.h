@@ -146,7 +146,13 @@ int64_t tty_obj_write(struct tty *t, const void *buf, uint32_t len);
 int64_t tty_obj_ioctl(struct tty *t, uint64_t request, void *arg);
 int     tty_obj_poll(struct tty *t, int events);
 
-// File operations for /dev/CONSOLE and /dev/TTY (bound to tty_console()).
+struct file_descriptor;
+
+// /dev/tty -- the callers CONTROLLING terminal, not the console.
+extern const struct file_ops ctty_file_ops;
+int ctty_open(struct file_descriptor *f);
+
+// File operations for /dev/console (bound to tty_console()).
 struct file_ops;
 extern const struct file_ops tty_file_ops;
 

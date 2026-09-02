@@ -188,7 +188,7 @@ int main(int argc, char **argv) {
     if (argc >= 3) { return rank_main(argc, argv); }
 
     int pids[RANKS];
-    if (MPI_Launch("/BIN/MPITEST.ELF", RANKS, pids) != MPI_SUCCESS) {
+    if (MPI_Launch("/usr/tests/mpitest.nex", RANKS, pids) != MPI_SUCCESS) {
         printf("[mpitest] FAILED: MPI_Launch\n");
         printf("[mpitest] SOME CHECKS FAILED\n");
         return 1;

@@ -6,7 +6,7 @@ milestones toward a userspace terminal and PID 1:
 
 - **M1a (this spec):** kernel plumbing — `/dev/fb0`, an in-kernel
   framebuffer boot console, `poll`/`select`, and a PTY subsystem.
-- **M2:** `init` as PID 1 (ring 3), an `/ETC/INITTAB` manifest, orphan
+- **M2:** `init` as PID 1 (ring 3), an `/etc/inittab` manifest, orphan
   reaping, `reboot(2)`, the test suite run through init.
 - **M1b:** the userspace `terminal` process — a broad (xterm-ish) VT
   emulator with scrollback, rendering the NokiaPure font (rasterised to
@@ -89,7 +89,7 @@ that replaces the VGA-text path for boot and panic output.
 - **The VT/ANSI emulator, scrollback, alternate screen** — M1b, in the
   userspace terminal. M1a's in-kernel console is deliberately dumb.
 - **The NokiaPure → PSF pipeline** — M1b.
-- **`init` / PID 1 / `/ETC/INITTAB` / `reboot(2)`** — M2. M1a does not
+- **`init` / PID 1 / `/etc/inittab` / `reboot(2)`** — M2. M1a does not
   touch `kmain`'s spawn list.
 - **`SIGWINCH` delivery, `TIOCSWINSZ` semantics.** The framebuffer
   terminal is a fixed size; the slave `winsize` is set once at

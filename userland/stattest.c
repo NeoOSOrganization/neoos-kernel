@@ -49,7 +49,7 @@ static void check_layout(void) {
 
 static void check_stat_file(void) {
     struct stat s;
-    int rc = stat("/HELLO.TXT", &s);
+    int rc = stat("/usr/share/test/hello.txt", &s);
     if (rc != 0) { fail("stat(/HELLO.TXT)", rc); return; }
 
     if (!S_ISREG(s.st_mode)) { fail("HELLO.TXT is not reported as a regular file", (int)s.st_mode); return; }
@@ -66,23 +66,23 @@ static void check_stat_file(void) {
 
 static void check_stat_dir(void) {
     struct stat s;
-    int rc = stat("/DIR", &s);
+    int rc = stat("/usr/share/test/dir", &s);
     if (rc != 0) { fail("stat(/DIR)", rc); return; }
-    if (!S_ISDIR(s.st_mode)) { fail("/DIR is not reported as a directory", (int)s.st_mode); return; }
-    if (S_ISREG(s.st_mode))  { fail("/DIR reported as a regular file", (int)s.st_mode); return; }
+    if (!S_ISDIR(s.st_mode)) { fail("/usr/share/test/dir is not reported as a directory", (int)s.st_mode); return; }
+    if (S_ISREG(s.st_mode))  { fail("/usr/share/test/dir reported as a regular file", (int)s.st_mode); return; }
     if (s.st_nlink != 2)     { fail("st_nlink for a directory", (int)s.st_nlink); return; }
     printf("[stattest] stat on a directory passed\n");
 }
 
 static void check_fstat(void) {
-    int fd = open("/HELLO.TXT", O_RDONLY);
+    int fd = open("/usr/share/test/hello.txt", O_RDONLY);
     if (fd < 0) { fail("open for fstat", fd); return; }
 
     struct stat byfd, bypath;
     int rc = fstat(fd, &byfd);
     close(fd);
     if (rc != 0) { fail("fstat", rc); return; }
-    if (stat("/HELLO.TXT", &bypath) != 0) { fail("stat for comparison", -1); return; }
+    if (stat("/usr/share/test/hello.txt", &bypath) != 0) { fail("stat for comparison", -1); return; }
 
     // The same file by two routes must agree on identity and size.
     if (byfd.st_ino != bypath.st_ino || byfd.st_dev != bypath.st_dev ||
@@ -95,10 +95,10 @@ static void check_fstat(void) {
 
 // stat resolves through the cwd like every other path call.
 static void check_relative(void) {
-    if (chdir("/DIR") != 0) { fail("chdir(/DIR)", -1); return; }
+    if (chdir("/usr/share/test/dir") != 0) { fail("chdir(/usr/share/test/dir)", -1); return; }
     struct stat rel, abs;
-    if (stat("NESTED.TXT", &rel) != 0) { fail("stat on a relative path", -1); return; }
-    if (stat("/DIR/NESTED.TXT", &abs) != 0) { fail("stat on the absolute path", -1); return; }
+    if (stat("nested.txt", &rel) != 0) { fail("stat on a relative path", -1); return; }
+    if (stat("/usr/share/test/dir/nested.txt", &abs) != 0) { fail("stat on the absolute path", -1); return; }
     if (rel.st_ino != abs.st_ino || rel.st_size != abs.st_size) {
         fail("relative and absolute stat disagree", 0);
         return;
@@ -110,8 +110,8 @@ static void check_relative(void) {
 // lstat is identical to stat here: nothing NeoOS mounts holds a symlink.
 static void check_lstat(void) {
     struct stat a, b;
-    if (lstat("/HELLO.TXT", &a) != 0) { fail("lstat", -1); return; }
-    if (stat("/HELLO.TXT", &b) != 0)  { fail("stat for lstat comparison", -1); return; }
+    if (lstat("/usr/share/test/hello.txt", &a) != 0) { fail("lstat", -1); return; }
+    if (stat("/usr/share/test/hello.txt", &b) != 0)  { fail("stat for lstat comparison", -1); return; }
     if (a.st_ino != b.st_ino || a.st_mode != b.st_mode) {
         fail("lstat and stat disagree", 0);
         return;
@@ -121,15 +121,15 @@ static void check_lstat(void) {
 
 static void check_fstatat(void) {
     struct stat s;
-    int rc = fstatat(AT_FDCWD, "/HELLO.TXT", &s, 0);
+    int rc = fstatat(AT_FDCWD, "/usr/share/test/hello.txt", &s, 0);
     if (rc != 0) { fail("fstatat(AT_FDCWD)", rc); return; }
     if (!S_ISREG(s.st_mode)) { fail("fstatat mode", (int)s.st_mode); return; }
 
     // A real directory fd is refused rather than quietly treated as the
     // cwd -- there is no openat family to produce one yet.
-    int fd = open("/DIR", O_RDONLY);
+    int fd = open("/usr/share/test/dir", O_RDONLY);
     if (fd >= 0) {
-        rc = fstatat(fd, "NESTED.TXT", &s, 0);
+        rc = fstatat(fd, "nested.txt", &s, 0);
         close(fd);
         if (rc != -EBADF) { fail("fstatat with a real dirfd should be -EBADF", rc); return; }
     }
@@ -138,7 +138,7 @@ static void check_fstatat(void) {
 
 static void check_errors(void) {
     struct stat s;
-    int rc = stat("/NO_SUCH_FILE", &s);
+    int rc = stat("/no_such_file", &s);
     if (rc != -ENOENT) { fail("stat on a missing file should be -ENOENT", rc); return; }
 
     rc = fstat(4096, &s);
@@ -155,7 +155,7 @@ static void check_errors(void) {
 }
 
 static void check_mtime_is_real(void) {
-    int fd = open("/MTIME.TMP", 1 | 0x40);   // O_WRONLY|O_CREAT (Linux value)
+    int fd = open("/var/tmp/mtime.tmp", 1 | 0x40);   // O_WRONLY|O_CREAT (Linux value)
     if (fd < 0) { fail("open for mtime", fd); return; }
     if (write(fd, "x", 1) != 1) { fail("write for mtime", -1); close(fd); return; }
     close(fd);
@@ -164,8 +164,8 @@ static void check_mtime_is_real(void) {
     if (clock_gettime(CLOCK_REALTIME, &now) != 0) { fail("clock_gettime", -1); return; }
 
     struct stat st;
-    if (stat("/MTIME.TMP", &st) != 0) { fail("stat MTIME.TMP", -1); return; }
-    unlink("/MTIME.TMP");
+    if (stat("/var/tmp/mtime.tmp", &st) != 0) { fail("stat MTIME.TMP", -1); return; }
+    unlink("/var/tmp/mtime.tmp");
 
     long long skew = (long long)now.tv_sec - (long long)st.st_mtime_sec;
     if (skew < 0) skew = -skew;

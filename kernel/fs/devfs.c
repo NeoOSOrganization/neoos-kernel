@@ -171,10 +171,10 @@ static int vt_dev_open(struct file_descriptor *f) {
 static const struct devfs_dev devices[] = {
     // Format: { name, type, fops, open }
     // Note: index 0 is reserved for root "/"
-    { "CONSOLE", VNODE_DEVICE, &tty_file_ops, tty_open },
-    { "TTY",     VNODE_DEVICE, &tty_file_ops, tty_open },
-    { "NULL",    VNODE_DEVICE, &null_file_ops, null_open },
-    { "ZERO",    VNODE_DEVICE, &zero_file_ops, zero_open },
+    { "console", VNODE_DEVICE, &tty_file_ops, tty_open },
+    { "tty",     VNODE_DEVICE, &ctty_file_ops, ctty_open },
+    { "null",    VNODE_DEVICE, &null_file_ops, null_open },
+    { "zero",    VNODE_DEVICE, &zero_file_ops, zero_open },
     { "input",   VNODE_DIR,    NULL,           NULL },
     { "input/event0", VNODE_DEVICE, &evdev_file_ops, evdev_devfs_open },
     // Appended AFTER input/* so the hardcoded inode ids in devfs_lookup /

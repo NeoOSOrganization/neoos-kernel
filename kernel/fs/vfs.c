@@ -638,7 +638,7 @@ void vfs_selftest(void) {
 
     // Read a file that exists on the FAT16 root volume, proving the
     // driver works through the same interface ramfs just did.
-    struct vnode *hello = vfs_resolve("/HELLO.TXT", &err);
+    struct vnode *hello = vfs_resolve("/usr/share/test/hello.txt", &err);
     if (!hello) {
         serial_write_string("[vfs] selftest FAILED: resolve /HELLO.TXT\n");
         return;
@@ -652,7 +652,7 @@ void vfs_selftest(void) {
     vnode_put(hello);
 
     // And one in a subdirectory, proving multi-component resolution.
-    struct vnode *nested = vfs_resolve("/DIR/NESTED.TXT", &err);
+    struct vnode *nested = vfs_resolve("/usr/share/test/dir/nested.txt", &err);
     if (!nested) {
         serial_write_string("[vfs] selftest FAILED: resolve /DIR/NESTED.TXT\n");
         return;
@@ -662,9 +662,9 @@ void vfs_selftest(void) {
     // Read a file that exists only on the FAT32 volume. Reaching it
     // proves variant detection, 32-bit FAT entries, and the
     // cluster-chained root all work.
-    struct vnode *f32 = vfs_resolve("/mnt/FAT32.TXT", &err);
+    struct vnode *f32 = vfs_resolve("/mnt/fat32.txt", &err);
     if (!f32) {
-        serial_write_string("[vfs] selftest FAILED: resolve /mnt/FAT32.TXT\n");
+        serial_write_string("[vfs] selftest FAILED: resolve /mnt/fat32.txt\n");
         return;
     }
     char f32buf[8] = {0};
@@ -676,9 +676,9 @@ void vfs_selftest(void) {
     vnode_put(f32);
 
     // And one in a FAT32 subdirectory.
-    struct vnode *f32n = vfs_resolve("/mnt/SUB/F32NEST.TXT", &err);
+    struct vnode *f32n = vfs_resolve("/mnt/sub/f32nest.txt", &err);
     if (!f32n) {
-        serial_write_string("[vfs] selftest FAILED: resolve /mnt/SUB/F32NEST.TXT\n");
+        serial_write_string("[vfs] selftest FAILED: resolve /mnt/sub/f32nest.txt\n");
         return;
     }
     vnode_put(f32n);

@@ -272,7 +272,7 @@ int64_t vt_ioctl(int vt_index, uint64_t request, void *arg) {
 // active right now", re-resolved on every call rather than bound at
 // open, exactly like Linux's.
 //
-// Only ioctl differs from /dev/CONSOLE: the VT_*/KD* set is tried
+// Only ioctl differs from /dev/console: the VT_*/KD* set is tried
 // first, and vt_ioctl returns -ENOTTY for anything outside it so the
 // ordinary terminal ioctls (TCGETS, TIOCGWINSZ, ...) still work on the
 // same fd.

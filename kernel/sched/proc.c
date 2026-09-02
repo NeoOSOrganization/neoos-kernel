@@ -440,7 +440,7 @@ struct process *spawn_argv(const char *path, const struct spawn_args *args) {
     // A spawn from a running process inherits its cwd, as a fork does.
     // The FIRST process has no caller and keeps proc_alloc's "/".
     struct process *spawner = current_proc();
-    if (spawner) { cwd_copy(p->cwd, spawner->cwd); }
+    if (spawner) { cwd_copy(p->cwd, spawner->cwd); p->ctty = spawner->ctty; }
     p->parent_pid  = current_proc() ? current_proc()->pid : 0;
     if (current_proc()) { p->pgid = current_proc()->pgid; p->sid = current_proc()->sid; }
 
@@ -486,13 +486,13 @@ struct process *spawn_argv(const char *path, const struct spawn_args *args) {
     t->kernel_stack_top  = kstack_top;
     t->kernel_stack_phys = kstack_phys;
 
-    // Standard streams as real /dev/CONSOLE vnodes. stdin is opened
+    // Standard streams as real /dev/console vnodes. stdin is opened
     // read-only and always returns EOF; stdout and stderr both write
     // to the console. The table belongs to the process, so every
     // thread of it shares these.
-    vfs_open_into("/dev/CONSOLE", p, 0, 0);
-    vfs_open_into("/dev/CONSOLE", p, 1, 1);
-    vfs_open_into("/dev/CONSOLE", p, 2, 1);
+    vfs_open_into("/dev/console", p, 0, 0);
+    vfs_open_into("/dev/console", p, 1, 1);
+    vfs_open_into("/dev/console", p, 2, 1);
 
     enqueue_ready(t);
     spawn_args_free(&local);
@@ -827,6 +827,11 @@ struct thread *fork_task(struct syscall_frame *frame) {
 
     child_proc->pml4_phys   = child_pml4_phys;
     child_proc->parent_pid  = parent->pid;
+    // The controlling terminal is INHERITED, like the pgid and session
+    // beside it. Without this a shell's forked child had no /dev/tty,
+    // and BusyBox's ash reported "can't set tty process group" for every
+    // command it ran -- tcsetpgrp on a terminal the child could not name.
+    child_proc->ctty        = parent->ctty;
     // fork does not change the program, so the child keeps the name.
     for (unsigned i = 0; i < sizeof(child_proc->comm); i++) {
         child_proc->comm[i] = parent->comm[i];

@@ -3,7 +3,7 @@
 // Everything before this ran BusyBox with `sh -c`, which is a shell
 // reading a string. This runs a shell reading a TERMINAL: a pty, with
 // the shell on the slave in its own session, commands typed into the
-// master, and its output read back. That is the arrangement /BIN/TERM
+// master, and its output read back. That is the arrangement /bin/term.nex
 // uses for a real session, minus the framebuffer rendering, and it is
 // what an interactive prompt actually depends on -- line discipline,
 // canonical mode, job-control signals, the tty's foreground pgid.
@@ -88,7 +88,7 @@ int main(void) {
     // Held across the fork so the pty never momentarily looks hung up
     // (slave_refs == 0) while the child is still setting up -- the
     // first poll would return POLLHUP and this would give up before the
-    // shell said anything. /BIN/TERM learned the same lesson.
+    // shell said anything. /bin/term.nex learned the same lesson.
     int slave = open(pts, O_RDWR);
     if (slave < 0) { printf("[bbsh] FAILED: %s\n", pts); return 1; }
 
@@ -110,7 +110,7 @@ int main(void) {
         // sequence for exactly this reason.
         ioctl(0, TIOCSCTTY, 0);
         char *argv[] = { (char *)"sh", (char *)"-i", 0 };
-        execve("/BIN/BUSYBOX.ELF", argv, environ);
+        execve("/bin/busybox.nex", argv, environ);
         exit(127);
     }
     close(slave);
@@ -177,7 +177,7 @@ int main(void) {
     // Redirection into a file and back out, which is close(0)/open()
     // territory -- the lowest-available fd rule CS4 fixed.
     before = tlen;
-    type(m, "echo BBSH-REDIR > /TMPFILE.TXT; cat < /TMPFILE.TXT\n");
+    type(m, "echo BBSH-REDIR > /var/tmp/tmpfile.txt; cat < /var/tmp/tmpfile.txt\n");
     drain(m, 2000);
     if (!saw("BBSH-REDIR")) {
         printf("[bbsh] FAILED: redirection round trip (%d new bytes)\n", tlen - before);

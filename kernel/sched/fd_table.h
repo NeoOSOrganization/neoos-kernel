@@ -37,7 +37,7 @@
 #define FD_TABLE_SLOTS         512    // Level 2: slots per bucket
 #define FD_TABLE_MAX           (FD_TABLE_BUCKETS * FD_TABLE_SLOTS)  // 16,384
 
-// fds 0/1/2 are opened on /dev/CONSOLE at process creation, by
+// fds 0/1/2 are opened on /dev/console at process creation, by
 // fd_table_put rather than by the allocator. Once a process CLOSES one,
 // fd_table_alloc will hand that number straight back -- which is what
 // makes shell redirection work.

@@ -37,10 +37,29 @@ struct elf64_phdr {
 #define ELF_PF_W    2
 #define ELF_PF_R    4
 
-static int is_valid_elf64(const struct elf64_header *hdr) {
-    return hdr->e_ident[0] == 0x7F && hdr->e_ident[1] == 'E' &&
-           hdr->e_ident[2] == 'L' && hdr->e_ident[3] == 'F' &&
-           hdr->e_ident[4] == 2; // ELFCLASS64
+// Two magics are accepted: ELF's, and NeoOS's own NOX
+// (0x7F 'N' 'O' 'X') -- ELF's shape with three characters changed.
+// Everything from e_ident[4] on is identical ELF64, so a .nex file IS
+// an ELF file with four bytes rewritten (see tools/nexify.sh).
+//
+// Accepting BOTH is deliberate. NOX is not a rename: it is a marker
+// saying "this was built for NeoOS", recorded on the process so that
+// NeoOS-only behaviour can key off it later. Refusing plain ELF would
+// have made the magic a cosmetic change and broken every foreign
+// binary for nothing.
+//
+// Returns 1 if the header is loadable, and sets *is_nox.
+static int is_valid_image(const struct elf64_header *hdr, int *is_nox) {
+    if (hdr->e_ident[0] != 0x7F || hdr->e_ident[4] != 2) { return 0; }  // ELFCLASS64
+    if (hdr->e_ident[1] == 'E' && hdr->e_ident[2] == 'L' && hdr->e_ident[3] == 'F') {
+        *is_nox = 0;
+        return 1;
+    }
+    if (hdr->e_ident[1] == 'N' && hdr->e_ident[2] == 'O' && hdr->e_ident[3] == 'X') {
+        *is_nox = 1;
+        return 1;
+    }
+    return 0;
 }
 
 int elf_load(const uint8_t *data, uint32_t size, uint64_t *pml4,
@@ -52,10 +71,16 @@ int elf_load(const uint8_t *data, uint32_t size, uint64_t *pml4,
     }
 
     const struct elf64_header *hdr = (const struct elf64_header *)data;
-    if (!is_valid_elf64(hdr)) {
-        serial_write_string("[elf] load FAILED: not a valid ELF64 image\n");
+    int is_nox = 0;
+    if (!is_valid_image(hdr, &is_nox)) {
+        // "rejected", not "FAILED": refusing an image that is not an
+        // executable is this function working, and the test harness
+        // treats any line containing FAILED as a broken build.
+        // userland/nexcheck.c triggers this on purpose.
+        serial_write_string("[elf] rejected: not a valid ELF64 or NOX image\n");
         return 0;
     }
+    out->is_nox = is_nox;
 
     for (uint16_t i = 0; i < hdr->e_phnum; i++) {
         const struct elf64_phdr *ph =

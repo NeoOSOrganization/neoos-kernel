@@ -336,6 +336,9 @@ int64_t tty_obj_ioctl(struct tty *t, uint64_t request, void *arg) {
         t->sid     = p->sid;
         t->fg_pgid = p->pgid;
         spin_unlock_irqrestore(&t->lock, f);
+        // ...and this is now the process's controlling terminal, which
+        // is what /dev/tty must resolve to for it.
+        p->ctty = t;
         return 0;
     }
     case TIOCSPGRP: {
@@ -453,7 +456,7 @@ void tty_selftest(void) {
     serial_write_string("[tty] selftest passed\n");
 }
 
-// File operations for /dev/CONSOLE and /dev/TTY -- always the console tty.
+// File operations for /dev/console and /dev/tty -- always the console tty.
 static int64_t tty_fop_read(struct file_descriptor *f, void *buf, uint64_t len) {
     return tty_obj_read(tty_console(), buf, (uint32_t)len, f->nonblock);
 }
@@ -517,3 +520,82 @@ const struct file_ops tty_file_ops = {
     .dup      = tty_fop_dup,
     .close    = tty_fop_close,
 };
+
+// ---- /dev/tty ---------------------------------------------------------
+//
+// "The controlling terminal of the calling process" -- NOT an alias for
+// the console, which is what it used to be. The distinction matters as
+// soon as anything runs on a pty: BusyBox's ash opens /dev/tty first
+// when setting up job control, and reading the CONSOLE's foreground
+// process group there told it that some other group was in front. It
+// then signalled itself with SIGTTIN until it stopped -- no prompt, no
+// error, nothing.
+//
+// That bug was invisible while the device was registered as "TTY" and
+// lookups were case-insensitive-but-uppercase: ash's open("/dev/tty")
+// failed outright and it fell back to fd 2, which happened to be the
+// right terminal. Making lookup case-sensitive turned a failing open
+// into a succeeding one that returned the wrong device.
+static struct tty *ctty_of(void) {
+    struct process *p = current_proc();
+    return p ? p->ctty : 0;
+}
+
+static int64_t ctty_read(struct file_descriptor *f, void *buf, uint64_t len) {
+    struct tty *t = ctty_of();
+    if (!t) { return -ENXIO; }
+    return tty_obj_read(t, buf, (uint32_t)len, f->nonblock);
+}
+static int64_t ctty_write(struct file_descriptor *f, const void *buf, uint64_t len) {
+    (void)f;
+    struct tty *t = ctty_of();
+    if (!t) { return -ENXIO; }
+    return tty_obj_write(t, buf, (uint32_t)len);
+}
+static int64_t ctty_ioctl(struct file_descriptor *f, uint64_t request, void *arg) {
+    (void)f;
+    struct tty *t = ctty_of();
+    if (!t) { return -ENXIO; }
+    return tty_obj_ioctl(t, request, arg);
+}
+static int ctty_poll(struct file_descriptor *f, int events) {
+    (void)f;
+    struct tty *t = ctty_of();
+    if (!t) { return POLLERR; }
+    return tty_obj_poll(t, events);
+}
+static struct poll_head *ctty_poll_head(struct file_descriptor *f) {
+    (void)f;
+    struct tty *t = ctty_of();
+    return t ? &t->poll : 0;
+}
+static int64_t ctty_lseek(struct file_descriptor *f, int64_t o, int w) {
+    (void)f; (void)o; (void)w; return -ESPIPE;
+}
+static int64_t ctty_getdents(struct file_descriptor *f, void *b, int n) {
+    (void)f; (void)b; (void)n; return -ENOTDIR;
+}
+static void ctty_dup(struct file_descriptor *f) { (void)f; }
+static void ctty_close(struct file_descriptor *f) { (void)f; }
+
+const struct file_ops ctty_file_ops = {
+    .name     = "ctty",
+    .read     = ctty_read,
+    .write    = ctty_write,
+    .lseek    = ctty_lseek,
+    .getdents = ctty_getdents,
+    .ioctl    = ctty_ioctl,
+    .poll     = ctty_poll,
+    .poll_head = ctty_poll_head,
+    .dup      = ctty_dup,
+    .close    = ctty_close,
+};
+
+// A process with no controlling terminal gets -ENXIO, as on Linux,
+// rather than silently being handed the console.
+int ctty_open(struct file_descriptor *f) {
+    if (!ctty_of()) { return -ENXIO; }
+    f->ops  = &ctty_file_ops;
+    f->priv = 0;
+    return 0;
+}

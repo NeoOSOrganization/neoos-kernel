@@ -19,7 +19,7 @@ int main(int argc, char **argv) {
     (void)argv;
 
     // Create, write, close.
-    int fd = open("/FILEIO.TXT", O_CREAT | O_WRONLY | O_TRUNC);
+    int fd = open("/var/tmp/fileio.txt", O_CREAT | O_WRONLY | O_TRUNC);
     if (fd < 0) {
         printf("[fileio] open for write FAILED: %d\n", fd);
         return 1;
@@ -34,7 +34,7 @@ int main(int argc, char **argv) {
 
     // Reopen for read+write, lseek back, overwrite mid-file:
     // "from f" (position 6, 6 bytes) -> "FILEIO".
-    fd = open("/FILEIO.TXT", O_RDWR);
+    fd = open("/var/tmp/fileio.txt", O_RDWR);
     if (fd < 0) {
         printf("[fileio] reopen for rdwr FAILED: %d\n", fd);
         return 1;
@@ -51,7 +51,7 @@ int main(int argc, char **argv) {
     close(fd);
 
     // Reopen for read, verify the overwrite landed correctly.
-    fd = open("/FILEIO.TXT", O_RDONLY);
+    fd = open("/var/tmp/fileio.txt", O_RDONLY);
     if (fd < 0) {
         printf("[fileio] reopen for read FAILED: %d\n", fd);
         return 1;
@@ -66,11 +66,11 @@ int main(int argc, char **argv) {
     }
 
     // mkdir + create/write/read a file inside it.
-    if (mkdir("/FIODIR") != 0) {
+    if (mkdir("/var/tmp/fiodir") != 0) {
         printf("[fileio] mkdir FAILED\n");
         return 1;
     }
-    fd = open("/FIODIR/INNER.TXT", O_CREAT | O_WRONLY);
+    fd = open("/var/tmp/fiodir/inner.txt", O_CREAT | O_WRONLY);
     if (fd < 0) {
         printf("[fileio] create nested file FAILED: %d\n", fd);
         return 1;
@@ -83,7 +83,7 @@ int main(int argc, char **argv) {
     }
     close(fd);
 
-    fd = open("/FIODIR/INNER.TXT", O_RDONLY);
+    fd = open("/var/tmp/fiodir/inner.txt", O_RDONLY);
     if (fd < 0) {
         printf("[fileio] reopen nested file FAILED: %d\n", fd);
         return 1;
@@ -96,11 +96,11 @@ int main(int argc, char **argv) {
     }
 
     // unlink and verify it's gone.
-    if (unlink("/FILEIO.TXT") != 0) {
+    if (unlink("/var/tmp/fileio.txt") != 0) {
         printf("[fileio] unlink FAILED\n");
         return 1;
     }
-    fd = open("/FILEIO.TXT", O_RDONLY);
+    fd = open("/var/tmp/fileio.txt", O_RDONLY);
     if (fd >= 0) {
         printf("[fileio] FILEIO.TXT still openable after unlink\n");
         return 1;
@@ -109,18 +109,18 @@ int main(int argc, char **argv) {
     // O_CREAT must be Linux's 0x40: a program compiled against Linux
     // headers passes exactly this.
 #define LINUX_O_CREAT 0x40
-    fd = open("/OCREAT.TMP", 1 /*O_WRONLY*/ | LINUX_O_CREAT);
+    fd = open("/var/tmp/ocreat.tmp", 1 /*O_WRONLY*/ | LINUX_O_CREAT);
     if (fd < 0) {
         printf("[fileio] FAILED: O_CREAT 0x40 did not create, rc=%d\n", fd);
         return 1;
     }
     close(fd);
     struct stat st;
-    if (stat("/OCREAT.TMP", &st) != 0) {
+    if (stat("/var/tmp/ocreat.tmp", &st) != 0) {
         printf("[fileio] FAILED: created file not stat-able\n");
         return 1;
     }
-    unlink("/OCREAT.TMP");
+    unlink("/var/tmp/ocreat.tmp");
     printf("[fileio] O_CREAT=0x40 passed\n");
 
     printf("[fileio] all checks passed\n");

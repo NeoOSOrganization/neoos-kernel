@@ -1,7 +1,7 @@
 #ifndef NEOOS_LOGO_H
 #define NEOOS_LOGO_H
 
-// The butterfly-N boot logo, shared by the KERNEL banner
+// The boot logo, shared by the KERNEL banner
 // (kernel/tty/banner.c) and the USERLAND terminal (userland/term), which
 // repaints it as a static header so the logo survives the terminal
 // taking over the framebuffer.
@@ -13,45 +13,42 @@
 // kernel and a userland program to include the same file.
 //
 // `neoos_logo_art` is the glyph rows; `neoos_logo_col` is the per-cell
-// colour, same shape: 'P' = purple (the N strokes, body and antennae),
-// anything else = red (the wings). Keep the two arrays the same length
-// row for row.
+// colour, same shape: 'P' = purple (the @ accents), anything else = red
+// (the rest of the wing/body strokes). Keep the two arrays the same
+// length row for row.
+// artist : Lorrie , https://www.asciiart.eu/art/4b04b264e7cfb9ca
 
 static const char *const neoos_logo_art[] = {
-    "  \\.                    ./  ",
-    "   \\`.      .--.      .`/   ",
-    " |  \\ `.   /    \\   .` /  | ",
-    " |   \\  `-'  ()  '-`  /   | ",
-    " |    \\      .--.     /    | ",
-    " |  () \\    ( ## )   / ()  | ",
-    " |      \\    '--'    /      |",
-    " |   .-. \\    ||    / .-.   |",
-    " |  ( ) ) \\   ||   / ( ( )  |",
-    " |   `-'   \\  ||  /   `-'   |",
-    " |  ()      \\ || /      ()  |",
-    " |    .--.   \\||/   .--.    |",
-    " |   ( () )   \\/   ( () )   |",
-    "  \\.  '--'    /\\    '--'  ./ ",
-    "   `/        /  \\        \\`  ",
+    " / `._      .       .      _.' \\",
+    "'.@ = `.     \\     /     .' = @.'",
+    " \\ @`.@ `.    \\   /    .' @.'@ /",
+    "  \\;`@`.@ `.   \\ /   .' @.'@`;/",
+    "   \\`.@ `.@ `'.(\").'` @.' @.'/",
+    "    \\ '=._`. @ :=: @ .'_.=' /",
+    "     \\ @  '.'..'='..'.'  @ /",
+    "      \\_@_.==.: = :.==._@_/",
+    "      /  @ @_.: = :._@ @  \\",
+    "     /@ _.-'  : = :  '-._ @\\",
+    "    /`'@ @ .-': = :'-.@ @`'`\\",
+    "    \\.@_.=` .-: = :-. `=._@./",
+    "      \\._.-'   '.'   '-._./  lc",
     0,
 };
 
 static const char *const neoos_logo_col[] = {
-    "  PP                    PP  ",
-    "   PPP      RRRR      PPP   ",
-    " P  PP PP   RRRRRR   PP PP P ",
-    " P   PP  PPP  RR  PPP  PP   P ",
-    " P    PP      RRRR     PP    P ",
-    " P  RR PP    RRRRRR   PP RR  P ",
-    " P      PP    RRRR    PP      P",
-    " P   RRR PP    PP    PP RRR   P",
-    " P  RRRRRR PP   PP   PP RRRRR  P",
-    " P   RRR   PP  PP  PP   RRR   P",
-    " P  RR      PP PP PP      RR  P",
-    " P    RRRR   PPPP   RRRR    P",
-    " P   RRRRRR   PP   RRRRRR   P",
-    "  PP  RRRR    PP    RRRR  PP ",
-    "   PP        P  P        PP  ",
+    " R RRR      R       R      RRR R",
+    "RRP R RR     R     R     RR R PRR",
+    " R PRRP RR    R   R    RR PRRP R",
+    "  RRRPRRP RR   R R   RR PRRPRRR",
+    "   RRRP RRP RRRRRRRRR PRR PRRR",
+    "    R RRRRRR P RRR P RRRRRR R",
+    "     R P  RRRRRRRRRRRRR  P R",
+    "      RRPRRRRRR R RRRRRRPRR",
+    "      R  P PRRR R RRRP P  R",
+    "     RP RRRR  R R R  RRRR PR",
+    "    RRRP P RRRR R RRRRP PRRRR",
+    "    RRPRRRR RRR R RRR RRRRPRR",
+    "      RRRRRR   RRR   RRRRRR  RR",
     0,
 };
 
