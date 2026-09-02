@@ -263,7 +263,19 @@ static int vma_fault_locked(struct process *p, uint64_t addr, int write) {
     if (!(v->prot & PROT_EXEC)) { pf |= PAGE_NO_EXECUTE; }
 
     uint64_t *pml4 = (uint64_t *)phys_to_virt(p->pml4_phys);
-    paging_map_into(pml4, page_down(addr), frame, pf);
+    if (paging_map_into(pml4, page_down(addr), frame, pf) != 0) {
+        // The mapping needs page-table frames of its own, and near
+        // exhaustion those are exactly what is missing. Ignoring this
+        // return leaked the frame just allocated AND reported the fault
+        // handled, so the process re-faulted on the same address and
+        // leaked another -- 2344 frames gone in one faultflood run,
+        // after which unrelated tests failed to fork.
+        //
+        // Only reachable since paging_map_into started reporting failure
+        // instead of installing a present entry pointing at physical 0.
+        pmm_free(frame, 0);
+        return 0;                                          // -> SIGSEGV
+    }
     return 1;
 }
 

@@ -54,6 +54,9 @@ void kernel_shutdown(void) {
         // ambient traffic here makes meaningless (see pollstorm.c).
         uint64_t pev = 0, pwk = 0;
         waitq_poll_stats(&pev, &pwk);
+        serial_write_string("[pmm] free frames at shutdown=");
+        serial_write_hex64(pmm_free_frame_count());
+        serial_write_string("\n");
         serial_write_string("[poll] broadcasts=");
         serial_write_hex64(pev);
         serial_write_string(" wakeups=");
