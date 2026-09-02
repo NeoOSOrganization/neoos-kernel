@@ -1,6 +1,6 @@
 # Debugging tools
 
-Three instruments built in CS1, all **debug-build only** — none of them
+Five instruments — three from CS1, two from CS3 — all **debug-build only** — none of them
 exists in a shipping kernel, and with their flags off the generated
 code is unchanged.
 
@@ -166,6 +166,55 @@ exercise what ships, and it deliberately builds without
 
 ---
 
+## 4. Faster preemption — `make DEBUG_HZ=N`
+
+Fires the LAPIC timer N times more often **without moving the clock**.
+
+The obvious implementation breaks everything: `timer_ticks()` is the
+kernel's time base — `rtc_boot_epoch() + ticks/100` anchors
+`CLOCK_REALTIME`, `deadline_from_ms` divides it for poll timeouts,
+`nanosleep` blocks on it, `TICKS_PER_LOG` assumes one log per second.
+Multiply the tick rate and every one of those silently mis-measures time.
+
+So the interrupt fires N times more often while the tick **counter**
+advances once per N interrupts. Only `cpus[0]` advances the wall clock,
+so the divider lives inside that branch and needs no per-CPU state; the
+timeslice countdown below it is deliberately *not* gated, because running
+it on every interrupt on every core is the entire point.
+
+Evidence it does what it claims, at `DEBUG_HZ=8`: `tier0test`'s
+`clock_gettime` and `nanosleep` checks still pass, and
+`LOCK_RANK_RUNQUEUE` acquisitions rise 6,177,817 → 11,358,588. Not 8×,
+and it should not be — that lock is taken by wakeups and enqueues too,
+not only by timeslice expiry.
+
+## 5. Allocation failure injection — `make DEBUG_PMMFAIL=N`
+
+Fails one `pmm_alloc` in N, deterministically by count. Deterministic
+rather than random on purpose: a failure that cannot be reproduced from
+the build flag alone is a bug report nobody can act on.
+
+It exists to run the `if (!frame) ...` paths that never execute in a
+128 MiB VM, and it found three real bugs the first time it was used —
+see the CS3 section of the concurrency spec. Behaviour after those fixes:
+
+| rate | result |
+|---|---|
+| 1-in-1000 | clean; failures surface as errors (`fork FAILED: out of memory for kernel stack`) |
+| 1-in-200 | clean, boots, no panic |
+| 1-in-100 | clean (2 of 4 runs faulted before the fixes) |
+| 1-in-50 | `/SBIN/INIT` cannot load, so the kernel panics deliberately rather than run without PID 1 — intended |
+
+**Tests failing under injection is expected and correct.** They do not
+tolerate allocation failure and are not meant to; what matters is that
+the kernel neither panics nor faults.
+
+Related: `make faultflood` boots a kernel whose INITTAB contains only
+`faultflood`, which touches far more pages than the machine can back so
+the out-of-frames path runs under genuine exhaustion. It gets its own
+boot because it consumes a global resource every other test needs — in
+the shared suite it starved whatever was still running.
+
 ## Running faster: `KVM=1`
 
 ```bash
@@ -200,6 +249,19 @@ seriously rather than dismissing as an accelerator artifact.
 Requires access to `/dev/kvm` (group membership or a POSIX ACL).
 
 ## Combining them
+
+`DEBUG_HEAP=1 DEBUG_HZ=8` is the most searching combination and also the
+slowest: every allocation is poisoned and checked while the timer fires
+eight times as often. With the full CS3 suite it regularly exceeds the
+default 60-second boot timeout and needs a bigger one:
+
+```bash
+make DEBUG_HEAP=1 DEBUG_HZ=8 BOOT_TIMEOUT=400 test
+```
+
+A run that ends mid-boot on `[timer] tick=` lines with no panic is that
+timeout, not a hang — check the tick count before concluding anything.
+
 
 The heap poisoner and the lock statistics are independent flags and can
 be combined with each other and with `DEBUG_STOP_WINDOW`:

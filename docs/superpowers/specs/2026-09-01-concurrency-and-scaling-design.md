@@ -334,114 +334,113 @@ the streaming character-at-a-time console API from before M1b/M1c, plus
 `thread_table_alloc_tid`/`thread_table_lookup` superseded by refcounted
 lookups.
 
-## CS3 — Stress matrix and chaos harness
+## CS3 — Stress matrix and chaos harness — **DONE**
 
-### SOLVED: one extra file on the disk corrupted an executable
+Landed 2026-09-01/02. Two chaos knobs, five stress binaries, and a
+generalised rank check. Full usage in `docs/debugging-tools.md`.
 
-**Root cause: `fat16_truncate_v` updated the directory entry through the
-legacy, drive-0-only wrapper.**
+### What it found
 
-```c
-void fat16_truncate_v(struct fat_volume *v, ...) {
-    if (first_cluster != 0) { fat16_free_chain(v, first_cluster); }  // uses v
-    *out_first_cluster = 0;
-    fat16_update_entry_size(dir_lba, dir_offset, 0, 0);   // hardcodes &legacy_volume
-}
+**Three real bugs, all from `DEBUG_PMMFAIL`, all on paths that had never
+executed:**
+
+1. **`alloc_table_frame` ignored `pmm_alloc`'s return.** On failure
+   `phys` was 0, and `phys_to_virt(0)` is the **physmap base** — so it
+   zeroed 512 entries at the start of physical memory. Silent, wholesale
+   corruption on every failed table allocation, and considerably worse
+   than the crash that eventually followed it.
+2. **`table_entry` then wrote `0 | create_flags`** — an entry marked
+   `PAGE_PRESENT` pointing at physical 0. Every later walk followed it;
+   `free_address_space` died on one with a `#GP` while tearing down a
+   half-built address space, having passed its `PAGE_PRESENT` check
+   honestly. `paging_map_into` chained three such calls with no null
+   checks, unlike the read-only walkers a few lines below.
+3. **`vma_fault_locked` ignored `paging_map_into`'s return** — leaking
+   the frame it had just allocated *and* reporting the fault handled, so
+   the process re-faulted and leaked another. **2344 frames in one
+   `faultflood` run**, after which unrelated tests could not fork. Only
+   reachable *because* fix 2 made that call able to fail at all: one fix
+   uncovered the next layer.
+
+### The pieces
+
+- **`DEBUG_HZ=N`** — N× the interrupt rate, same clock. Verified both
+  ways: `tier0test`'s clock checks still pass, and runqueue acquisitions
+  rise 6.18M → 11.36M at N=8.
+- **`DEBUG_PMMFAIL=N`** — one allocation in N fails, deterministically.
+- **`forkstorm`** — 40 generations × 8 processes; no live pid issued
+  twice, every child reaped exactly once.
+- **`ptychurn`** — 40 rounds across the pty ceiling (peak exactly 16),
+  slots reclaimed with out-of-order closes.
+- **`sigstorm`** — 120 rounds of kills racing child exit; the regression
+  suite for the SMP-lifetime refcounting.
+- **`pollstorm`** — the thundering herd, demonstrated. See below.
+- **`faultflood`** — `make faultflood`, its own boot.
+- **`rankinvert`** — the rank checker over all 28 distinct ranks, with a
+  count assertion so a new rank cannot be added without extending it.
+
+### CS5.2's baseline: **82% of poll wakeups are wasted**
+
+`[poll] broadcasts=4443 wakeups=64 wasted=53` at shutdown; four runs
+spanned 75–99%. A "wasted" wakeup is a poller woken by the global
+broadcast that re-scanned, found nothing, and slept again. CS5.2 should
+drive that toward 0%, measured over the same suite.
+
+Getting a *trustworthy* number took five failed designs, recorded in
+`userland/pollstorm.c` so nobody repeats them: pollers that consume
+events are awake not asleep; a guessed settle delay measures an empty
+queue; a readiness handshake is not enough because "about to block" is
+not "blocked"; attributing wakeups to self-fired events fails against
+~1500 unrelated broadcasts per window; and an A/B differential assumes
+stationary background traffic that is not stationary (1710 broadcasts in
+one window, 67 in the next). The fix was to stop measuring a ratio in
+userland and count *wasted* wakeups in `poll_core`, which is the only
+code that knows whether a wake produced anything.
+
+### Test-isolation lessons, all learned the hard way
+
+Three CS3 binaries had to be moved out of the concurrent suite because
+they monopolise a **global** resource, and a `wait` entry does not stop
+tests already spawned:
+
+- `ptychurn` holds all 16 ptys → `ptytest` got `-ENFILE`.
+- `pollstorm` compares traffic between two windows → needs a quiet system.
+- `faultflood` exhausts frames → `forkstorm` watched free frames go
+  29377 → 319. Moving it last did not help; it needed its own boot.
+
+Also fixed: a `sigstorm` assertion that would have **failed once CS5.2
+succeeded**, and a `pollstorm` rate computed from a single sample that
+printed a confident "0%".
+
+### Open, and now the top item: the socktable panic
+
+```
+[lock] PANIC: schedule() with a spinlock held acquiring=schedule holding=socktable
 ```
 
-It takes a volume, frees the chain on that volume, then stamps the
-directory entry on **drive 0** regardless. Truncating a file on any
-other mount wrote that mount's directory LBA onto disk.img.
+This is the Phase 13.6 residual the gauntlet has carried in its
+`KNOWN_RE` list for a long time: a blocked reader in `socket.c:recv_one`
+holds no reference on its socket, so a concurrent close can free the
+lock it is about to re-acquire. The roadmap records milestone A ("net
+socket-lifetime fix", commit `a66e5f7`) as DONE, yet it still fires --
+so either that fix was incomplete or this is a second instance.
 
-That update writes exactly six contiguous bytes -- the 2-byte
-first-cluster field at dirent offset 26 and the 4-byte size at 28 -- and
-a truncate writes both as zero. Six zero bytes therefore landed at a
-fixed sector of drive 0. On this test volume that sector belongs to
-`STATTEST.ELF`, six bytes into a function prologue. The zeros decode as
-`add %al,(%rax)`, so the process died with SIGSEGV writing through
-whatever `%rax` last held.
+**CS3's load has made it materially more likely.** It used to be rare
+enough to be background noise; with the five new stress binaries running
+it hit two consecutive 15-run gauntlets, once on the solo retry as well.
+That is the milestone working -- more process and signal churn reaching a
+race that was always there -- but it means **the gauntlet bar is not
+currently met**, and this is the next thing to fix rather than a note to
+file. `make test` and `make faultflood` are green; the 15-run gauntlet
+fails roughly 1 run in 15 on this and nothing else.
 
-`vfstest` truncates a file on `/mnt` (the FAT32 volume, drive 1).
-`stattest` never touches the filesystem. Nothing in any log connected
-them.
+### Not done, deliberately
 
-**Why one extra file was the trigger:** the damaged LBA is fixed, so
-which file it hits depends on where the allocator placed things. Adding
-`FORKSTORM.ELF` moved `STATTEST.ELF` onto that sector. The corruption
-happened on every boot before and after -- only its victim changed.
+`mmapracer` — CS2's `tlbstorm` already runs 4 processes × 150 rounds of
+mmap/touch/mprotect/verify/munmap against the shootdown. A separate
+binary would add overlapping-range cases only; fold those into
+`tlbstorm` if CS5's `vma` work makes them interesting.
 
-**Why it looked intermittent:** the file on disk was corrupt in *every*
-run. Whether `stattest` crashed depended only on whether it was loaded
-before or after `vfstest` ran.
-
-**Verified:** 8/8 runs with the on-disk executable byte-identical to the
-build (corrupt in 8/8 before), and `tools/gauntlet.sh 15 3` returning
-**15/15 with zero retries and no flaky markers** -- the first completely
-clean gauntlet in this track. The long-standing "missing marker with no
-hard signature" flakes are very likely this bug.
-
-**What made it expensive to find, both now fixed:**
-
-1. `signal_terminate()` records the signal then calls `process_exit(0)`,
-   so the log printed `code=0x0` -- byte for byte what a clean exit
-   prints. A process dying on SIGSEGV was indistinguishable from one
-   returning 0. The exit line now names the signal.
-2. Four fixes were attempted and all four failed, because the evidence
-   was read as a concurrency problem: a FAT read-error path, two
-   block-cache races, and a shared FAT walk cursor. Each is a genuine
-   defect and each is fixed, but none was this. The measurement that
-   broke it open was mundane and should have come first: extract the
-   file from the disk image after a boot and compare it against the
-   build. It was corrupt *on disk*, which ruled out every in-memory
-   theory at a stroke.
-
-**Hardening kept from the failed hypotheses.** All four are real
-unsynchronised or unchecked windows; none of them was this bug:
-
-- `fat16_read_at_v` ignored `blkcache_read`'s result and copied
-  uninitialised stack bytes into file data on a failed read, while
-  `fatfs_read` reported a complete read.
-- `blkcache_read` could install bytes fetched before a concurrent write
-  completed, leaving the cache stale against the disk until eviction.
-- `blkcache_write` installed rather than invalidated, so two writers to
-  one sector could leave the cache holding the loser's bytes.
-- `cluster_at_offset`'s forward-walk cursor lived in `struct fat_volume`
-  and was read/written unsynchronised, so one caller could validate
-  `first` against its own chain and then adopt another caller's
-  `index`/`cluster`. It is caller-local now.
-
-
-Reusable userland binaries under `userland/`, each with its own
-`[xxxtest] ALL PASSED` marker in `REQUIRED_MARKERS`:
-
-| Binary | Targets | Method |
-|---|---|---|
-| `forkstorm` | `pid_alloc`, `proc_table`, `fd_table`, `thread_table` | N processes forking+execing tightly across all CPUs for a fixed window; verify PID reuse never collides a live PID (`wait4` every child) and `fd_table_count` returns to 0 after each exit |
-| `mmapracer` | `vma.c`, `tlb.c`, paging | Threads sharing one address space (kernel threads until `clone()`) hammering `mmap`/`mprotect`/`munmap`/faults on overlapping and adjacent ranges; no `SIGSEGV` on addresses that should be valid, no corruption of a canary written after each fault |
-| `faultflood` | demand paging, `pmm_alloc` under pressure | Touch far more distinct pages than physical memory allows, across CPUs at once, forcing `vma_fault_locked`'s allocation-failure paths under real contention rather than single-threaded OOM |
-| `pollstorm` | `waitq.c` poll broadcast, `sys_poll.c` | M threads polling disjoint fd sets while a driver thread pushes unrelated readiness at rate R; record wakeups vs. events to **quantify** the O(M) thundering herd, giving CS5.2 a baseline |
-| `ptychurn` | PTY pool, the now-checked `pty.c` locks | Open/close ptys crossing `PTY_MAX` repeatedly from multiple CPUs, racing master/slave open+close against read/write to pressure `pty_unref`'s `gone` check |
-| `sigstorm` | signal delivery atop the landed lifetime work | `kill`/`tkill` storms overlapping process/thread exit from other CPUs — a regression suite for already-landed refcounting, not a test blocked on future work |
-| `rankinvert` | the rank checker itself | Deliberately-wrong-order acquisitions across every defined rank pair (27 today), as a kernel selftest that expects `lock_panic` and treats *not* panicking as the failure |
-
-Chaos knobs, all debug-build only:
-
-- **`NEOOS_DEBUG_HZ`** — raise the LAPIC timer frequency so preemption
-  windows that are rare at the normal tick become common. Run the full
-  suite at both rates; CS2.4 and CS2.6 are exactly the shape of bug
-  that only appears when the window widens.
-- **`pmm_alloc` failure injection** — deterministic Nth-allocation
-  failure, plus seeded-random failure so a hit is reproducible from the
-  seed printed to serial. Every `if (!frame)` / `-ENOMEM` path in
-  `vma.c`, `tlb.c` and `fd_table.c` should be hit at least once per
-  run.
-- **Concurrent teardown injection** — `SIGKILL` from another CPU at a
-  randomized point relative to the target's own syscall progress
-  (a `PAUSE` loop of random small count at a designated fuzz point in a
-  debug build). This is what actually exercises the refcounting; a
-  scripted single-shot kill does not.
-
----
 
 ## CS4 — Fixed-size limits
 
