@@ -133,6 +133,15 @@ int main(void) {
     run("env via ash-exec", p_ashex);
     run("nested exports",  p_expo);
 
+    // fork WITHOUT exec, which is what BusyBox does to run an applet in
+    // a child (FEATURE_SH_STANDALONE). fork+exec is already known to
+    // work -- `busybox echo external` above proves it -- so if this
+    // fails the difference is the child continuing to run musl code in
+    // the inherited address space rather than replacing it.
+    char *p_pipe[] = { (char *)"busybox", (char *)"sh", (char *)"-c",
+                       (char *)"echo one two three | wc -w", 0 };
+    run("pipeline",        p_pipe);
+
     int ek = fork();
     if (ek == 0) {
         execve(BB, p_exec, environ);

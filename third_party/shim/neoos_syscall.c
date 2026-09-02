@@ -78,6 +78,12 @@
 #define NEO_GETPPID         73
 #define NEO_UNAME           74
 #define NEO_BRK             75
+#define NEO_GETUID          76
+#define NEO_GETEUID         77
+#define NEO_GETGID          78
+#define NEO_GETEGID         79
+#define NEO_POLL            67
+#define NEO_SELECT          68
 
 // ---- Linux x86-64 numbers, as musl issues them ----------------------
 #define LX_READ              0
@@ -87,6 +93,12 @@
 #define LX_GETPPID         110
 #define LX_UNAME            63
 #define LX_BRK              12
+#define LX_POLL              7
+#define LX_SELECT           23
+#define LX_GETUID          102
+#define LX_GETGID          104
+#define LX_GETEUID         107
+#define LX_GETEGID         108
 #define LX_CLOSE             3
 #define LX_STAT              4
 #define LX_FSTAT             5
@@ -279,6 +291,17 @@ long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a
     // BB2: the three numbers BusyBox actually reached for. All three
     // are straight forwards -- same arguments, same shapes.
     case LX_GETPPID:         return neo(NEO_GETPPID, 0, 0, 0, 0, 0, 0);
+    case LX_GETUID:          return neo(NEO_GETUID, 0, 0, 0, 0, 0, 0);
+    case LX_GETEUID:         return neo(NEO_GETEUID, 0, 0, 0, 0, 0, 0);
+    case LX_GETGID:          return neo(NEO_GETGID, 0, 0, 0, 0, 0, 0);
+    case LX_GETEGID:         return neo(NEO_GETEGID, 0, 0, 0, 0, 0, 0);
+
+    // poll and select were never mapped at all, so every musl program
+    // that waited on a descriptor got -ENOSYS -- which is how BusyBox's
+    // interactive shell came to echo the commands typed at it and then
+    // do nothing with them. Same arguments on both sides.
+    case LX_POLL:            return neo(NEO_POLL, a1, a2, a3, 0, 0, 0);
+    case LX_SELECT:          return neo(NEO_SELECT, a1, a2, a3, a4, a5, 0);
     case LX_UNAME:           return neo(NEO_UNAME, a1, 0, 0, 0, 0, 0);
     case LX_BRK:             return neo(NEO_BRK, a1, 0, 0, 0, 0, 0);
 

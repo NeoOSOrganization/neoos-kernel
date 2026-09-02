@@ -790,13 +790,20 @@ struct thread *fork_task(struct syscall_frame *frame) {
     uint64_t kstack_top = (uint64_t)(uintptr_t)phys_to_virt(kstack_phys) + (PMM_FRAME_SIZE << KERNEL_STACK_ORDER);
 
     // Memory layout, lowest address first (i.e. pop order):
-    //   r15, r14, r13, r12, rbx, rbp, fork_trampoline, rcx, r11, user_rsp
+    //   r15, r14, r13, r12, rbx, rbp, fork_trampoline,
+    //   fs_base, rcx, r11, user_rsp
     // The first six are consumed by context_switch's own epilogue, the
-    // seventh by its `ret`, and only the last three by fork_trampoline.
+    // seventh by its `ret`, and the last four by fork_trampoline.
+    //
+    // fs_base is planted here rather than read from the thread in the
+    // trampoline because the trampoline's `mov fs, dx` ZEROES
+    // IA32_FS_BASE and it has to be put back with no C call available
+    // -- see the comment there.
     uint64_t *sp = (uint64_t *)kstack_top;
     *(--sp) = frame->user_rsp;
     *(--sp) = frame->r11;   // user RFLAGS
     *(--sp) = frame->rcx;   // user RIP
+    *(--sp) = current_thread()->fs_base;   // the child's thread pointer
     *(--sp) = (uint64_t)fork_trampoline; // context_switch's `ret` lands here
     *(--sp) = frame->rbp;
     *(--sp) = frame->rbx;
@@ -836,6 +843,19 @@ struct thread *fork_task(struct syscall_frame *frame) {
     child->kernel_stack_top = kstack_top;
     child->kernel_stack_phys = kstack_phys;
     child->stack_slot = current_thread()->stack_slot;
+    // The THREAD POINTER. fork copied the address space, the fds, the
+    // extended CPU state and the stack slot, and left %fs at zero -- so
+    // the child resumed with no thread pointer at all, in an address
+    // space where its TLS block is present and correct.
+    //
+    // Any C library reaching for thread-local storage in the child dies
+    // instantly, before it can run a single line of the program: musl's
+    // fork() calls __pthread_self() as its first act after the clone
+    // returns, which dereferences %fs. That is why `busybox echo one |
+    // wc -w` segfaulted while `busybox echo external` did not -- a
+    // pipeline forks WITHOUT exec, and exec is what would have built a
+    // fresh thread pointer.
+    child->fs_base = current_thread()->fs_base;
     for (uint32_t i = 0; i < cpu_state_size(); i++) {
         ((uint8_t *)child->xstate)[i] = ((uint8_t *)current_thread()->xstate)[i];
     }

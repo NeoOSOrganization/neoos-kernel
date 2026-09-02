@@ -1182,6 +1182,16 @@ its number to the next one), and after ~1M process creations they begin
 to repeat. The old allocator did neither — it reused the most recently
 freed pid *first*, and stopped allocating entirely at 2^20.
 
+`getuid`/`geteuid`/`getgid`/`getegid` all return **0**. NeoOS is
+single-user with no credentials, and FAT has no ownership, so root is
+the honest answer rather than a placeholder; BusyBox's shell asks for
+all four at startup.
+
+`poll` and `select` are reachable from musl. They had never been mapped
+in the shim at all, so every musl program that waited on a descriptor
+got `-ENOSYS` — which is how an interactive BusyBox `ash` came to echo
+the commands typed at it and then do nothing with them.
+
 `getppid`, `uname` and `brk` exist (syscalls 73–75), added because
 BusyBox measurably asked for them and nothing else did.
 

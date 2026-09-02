@@ -111,6 +111,20 @@ int64_t sys_brk(struct syscall_args *a) {
     return (int64_t)current_proc()->brk;
 }
 
+// getuid / geteuid / getgid / getegid, all four the same function.
+//
+// NeoOS is single-user and has no credentials at all, so 0 -- root -- is
+// the honest answer rather than a placeholder, and it is what makes
+// BusyBox's shell stop complaining at startup. FAT has no ownership
+// either, so there is nothing for a non-zero value to mean.
+//
+// One handler behind four numbers on purpose: four identical functions
+// would invite one of them to drift. Recorded in docs/stdlib.md.
+int64_t sys_getuid(struct syscall_args *a) {
+    (void)a;
+    return 0;
+}
+
 int64_t sys_yield(struct syscall_args *a) {
     (void)a;
     schedule();

@@ -143,7 +143,17 @@
 #define SYS_UNAME           74
 #define SYS_BRK             75
 
+// BB6, measured the same way: BusyBox's interactive shell asks for
+// these four at startup. NeoOS is single-user with no notion of
+// credentials, so all four answer 0 -- which is root, and is the honest
+// answer rather than a placeholder. They are KERNEL calls rather than
+// shim constants because the shim translates and never emulates.
+#define SYS_GETUID          76
+#define SYS_GETEUID         77
+#define SYS_GETGID          78
+#define SYS_GETEGID         79
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX             76
+#define SYS_MAX             80
 
 #endif

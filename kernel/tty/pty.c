@@ -204,13 +204,29 @@ static void ptm_close(struct file_descriptor *f) {
         console_set_fb_owned(0);
         pt->owns_active = 0;
     }
-    uint64_t fl = spin_lock_irqsave(&pt->slave.lock);
-    pt->slave.hung_up = 1;
-    spin_unlock_irqrestore(&pt->slave.lock, fl);
-    // No SIGHUP: close() runs from process teardown, an unsafe place to
-    // take the proc-table locks signal delivery needs. The EOF is enough
-    // for M1a; M2's init hangs sessions up properly. See docs/stdlib.md.
-    tty_wake_readers(&pt->slave);
+    // Hang the slave up only when the LAST master fd closes, for exactly
+    // the reason the active-tty release above is guarded the same way: a
+    // fork() duplicates the master fd, and the child closing its
+    // inherited copy must not deliver EOF to a terminal the parent is
+    // still driving.
+    //
+    // This was unconditional, and the arrangement it breaks is the
+    // standard one for running a program on a pty: open the pty, fork,
+    // and let the child close the master it does not need and read the
+    // slave. The child's read returned 0 IMMEDIATELY -- before anything
+    // was typed -- so an interactive BusyBox ash saw end-of-input at
+    // startup and sat echoing keystrokes it would never act on.
+    // /BIN/TERM never noticed, because its child only ever writes.
+    if (pt->master_refs <= 1) {
+        uint64_t fl = spin_lock_irqsave(&pt->slave.lock);
+        pt->slave.hung_up = 1;
+        spin_unlock_irqrestore(&pt->slave.lock, fl);
+        // No SIGHUP: close() runs from process teardown, an unsafe place
+        // to take the proc-table locks signal delivery needs. The EOF is
+        // enough for M1a; M2's init hangs sessions up properly. See
+        // docs/stdlib.md.
+        tty_wake_readers(&pt->slave);
+    }
     f->priv = 0;
     pty_unref(pt, &pt->master_refs);
 }
