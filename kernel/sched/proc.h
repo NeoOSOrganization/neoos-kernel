@@ -106,6 +106,11 @@ struct process {
     struct elf_info elf;
     struct vma *vmas;               // sorted by start, non-overlapping
     uint64_t    mmap_next;          // bump hint for unhinted mmap
+    // The program break. Never grows -- sys_brk reports it unchanged,
+    // which is Linux's way of saying the heap cannot be extended, and
+    // sends callers to mmap. Kept per-process so the value a program
+    // reads back is stable across calls, as brk's contract requires.
+    uint64_t    brk;
     // Guards `vmas`, `mmap_next` and this process's page tables. Rank
     // LOCK_RANK_MM (3) -- low, because a demand-paging fault takes it
     // and then reads through the filesystem, and because such a fault

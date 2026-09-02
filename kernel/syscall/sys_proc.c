@@ -34,6 +34,83 @@ int64_t sys_getpid(struct syscall_args *a) {
     return current_proc()->pid;
 }
 
+// BB2. BusyBox's ash asks for this at startup.
+//
+// The parent pid is recorded at spawn/fork and is NOT re-read from the
+// parent process, which is the point: an orphan's parent is gone, and
+// Linux answers 1 for it rather than something stale. p->parent_pid is
+// already reset to 1 when a parent exits (see the orphan reparenting in
+// proc.c), so this reads correctly for both cases.
+int64_t sys_getppid(struct syscall_args *a) {
+    (void)a;
+    return current_proc()->parent_pid;
+}
+
+// BB2. `uname -a` printed a blank line before this existed: the shim
+// returned -ENOSYS, and BusyBox printed the (zeroed) struct anyway.
+//
+// The layout is Linux's exactly -- six fields of UTSNAME_LEN bytes,
+// NUL-terminated, no padding -- because a program compiled against
+// Linux's <sys/utsname.h> indexes into it directly and no shim can
+// retrofit a struct layout.
+#define UTSNAME_LEN 65
+struct utsname_k {
+    char sysname[UTSNAME_LEN];
+    char nodename[UTSNAME_LEN];
+    char release[UTSNAME_LEN];
+    char version[UTSNAME_LEN];
+    char machine[UTSNAME_LEN];
+    char domainname[UTSNAME_LEN];
+};
+
+static void uts_put(char *dst, const char *src) {
+    int i = 0;
+    while (src[i] && i < UTSNAME_LEN - 1) { dst[i] = src[i]; i++; }
+    while (i < UTSNAME_LEN) { dst[i++] = '\0'; }
+}
+
+int64_t sys_uname(struct syscall_args *a) {
+    uint64_t uptr = a->a1;
+    if (!user_range_writable(uptr, sizeof(struct utsname_k))) { return -EFAULT; }
+
+    struct utsname_k u;
+    // `sysname` is "NeoOS", not "Linux". A program that switches on it
+    // will take its non-Linux path, which is the honest answer -- NeoOS
+    // is Linux-SHAPED, not Linux, and claiming otherwise would send
+    // configure scripts down paths this kernel does not implement.
+    // Recorded as a divergence in docs/stdlib.md.
+    uts_put(u.sysname,  "NeoOS");
+    uts_put(u.nodename, "neoos");
+    uts_put(u.release,  "0.1.0");
+    uts_put(u.version,  "NeoOS x86_64");
+    uts_put(u.machine,  "x86_64");
+    uts_put(u.domainname, "(none)");
+
+    uint8_t *dst = (uint8_t *)(uintptr_t)uptr;
+    const uint8_t *src = (const uint8_t *)&u;
+    for (uint64_t i = 0; i < sizeof u; i++) { dst[i] = src[i]; }
+    return 0;
+}
+
+// BB2. musl's allocator probes brk before falling back to mmap.
+//
+// Deliberately a STUB that reports failure the way Linux does: brk
+// returns the resulting break, and a request that cannot be satisfied
+// returns the CURRENT one unchanged. Returning the current break for
+// every request is therefore a valid "cannot grow the heap", and every
+// caller that matters -- musl's included -- reads that and uses mmap
+// instead, which NeoOS implements properly.
+//
+// This is not laziness dressed up: a real brk would be a second heap
+// mechanism beside mmap, with its own vma, for the sake of an interface
+// Linux itself treats as legacy. If something turns up that genuinely
+// needs a growable break, it should get one; nothing has yet. Recorded
+// in docs/stdlib.md.
+int64_t sys_brk(struct syscall_args *a) {
+    (void)a;
+    return (int64_t)current_proc()->brk;
+}
+
 int64_t sys_yield(struct syscall_args *a) {
     (void)a;
     schedule();

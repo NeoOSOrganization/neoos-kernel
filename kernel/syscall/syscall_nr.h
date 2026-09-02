@@ -136,7 +136,14 @@
 #define SYS_DUP2            71
 #define SYS_DUP3            72
 
+// BB2, measured rather than predicted: these are the three numbers
+// BusyBox actually reached for that NeoOS did not have (see
+// docs/superpowers/plans/2026-09-01-busybox-track.md).
+#define SYS_GETPPID         73
+#define SYS_UNAME           74
+#define SYS_BRK             75
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX             73
+#define SYS_MAX             76
 
 #endif

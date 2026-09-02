@@ -10,6 +10,7 @@
 #include "sys/stat.h"
 #include "sys/uio.h"
 #include "termios.h"
+#include "sys/utsname.h"
 #include "time.h"
 
 #define SYS_EXIT   0
@@ -59,6 +60,8 @@
 #define SYS_DUP           70
 #define SYS_DUP2          71
 #define SYS_DUP3          72
+#define SYS_GETPPID       73
+#define SYS_UNAME         74
 
 #define SYS_CHDIR         53
 #define SYS_GETCWD        54
@@ -246,6 +249,14 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
     // a divergence in docs/stdlib.md.
     (void)envp;
     return execv(path, argv);
+}
+
+int getppid(void) {
+    return (int)syscall0(SYS_GETPPID);
+}
+
+int uname(struct utsname *u) {
+    return (int)syscall1(SYS_UNAME, (int64_t)(uint64_t)u);
 }
 
 int wait(int pid) {

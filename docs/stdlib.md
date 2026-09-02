@@ -1182,6 +1182,25 @@ its number to the next one), and after ~1M process creations they begin
 to repeat. The old allocator did neither — it reused the most recently
 freed pid *first*, and stopped allocating entirely at 2^20.
 
+`getppid`, `uname` and `brk` exist (syscalls 73–75), added because
+BusyBox measurably asked for them and nothing else did.
+
+**Divergence: `uname` reports `sysname = "NeoOS"`, not `"Linux"`.** The
+struct layout is Linux's exactly — six 65-byte NUL-terminated fields, no
+padding — because a program compiled against Linux's `<sys/utsname.h>`
+indexes into it directly. The *contents* are honest: a program that
+switches on `sysname` takes its non-Linux path, which is the correct
+outcome, since NeoOS is Linux-shaped rather than Linux and a configure
+script told otherwise would choose paths this kernel does not implement.
+
+**Divergence: `brk` never grows the break.** It returns the current
+break for every request, which is exactly how Linux reports "the heap
+cannot be extended", so callers fall back to `mmap` — which NeoOS
+implements properly. musl's allocator does precisely this. A real `brk`
+would be a second heap mechanism beside `mmap`, with its own vma, for an
+interface Linux itself treats as legacy; if something turns up that
+genuinely needs a growable break it should get one, and nothing has yet.
+
 `poll()` and `select()` register on **each polled object** rather than
 on one global queue, so a readiness change wakes only the callers that
 asked about the object it happened to. This used to be a broadcast:

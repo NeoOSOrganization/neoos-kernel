@@ -75,12 +75,18 @@
 #define NEO_DUP             70
 #define NEO_DUP2            71
 #define NEO_DUP3            72
+#define NEO_GETPPID         73
+#define NEO_UNAME           74
+#define NEO_BRK             75
 
 // ---- Linux x86-64 numbers, as musl issues them ----------------------
 #define LX_READ              0
 #define LX_WRITE             1
 #define LX_OPEN              2
 #define LX_EXECVE           59
+#define LX_GETPPID         110
+#define LX_UNAME            63
+#define LX_BRK              12
 #define LX_CLOSE             3
 #define LX_STAT              4
 #define LX_FSTAT             5
@@ -270,6 +276,12 @@ long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a
     // pipe(fds) is pipe2(fds, 0). Supplying the flags word is argument
     // translation; NeoOS deliberately has only the two-argument form,
     // exactly as Linux does on newer architectures.
+    // BB2: the three numbers BusyBox actually reached for. All three
+    // are straight forwards -- same arguments, same shapes.
+    case LX_GETPPID:         return neo(NEO_GETPPID, 0, 0, 0, 0, 0, 0);
+    case LX_UNAME:           return neo(NEO_UNAME, a1, 0, 0, 0, 0, 0);
+    case LX_BRK:             return neo(NEO_BRK, a1, 0, 0, 0, 0, 0);
+
     case LX_PIPE:            return neo(NEO_PIPE2, a1, 0, 0, 0, 0, 0);
     case LX_PIPE2:           return neo(NEO_PIPE2, a1, a2, 0, 0, 0, 0);
 

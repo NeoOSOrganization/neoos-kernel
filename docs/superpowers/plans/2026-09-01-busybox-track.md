@@ -82,8 +82,8 @@ which is BB2's job.
 ```
 BB0.  fork duplicates the address-space bookkeeping   <- BLOCKER, first
 BB1.  Build-and-run spike: /bin/busybox to first -ENOSYS   <- DONE
-BB2.  The measured syscall set (was BB1 + BB4)
-BB3.  execve(path, argv, envp)
+BB2.  The measured syscall set (was BB1 + BB4)             <- DONE
+BB3.  execve(path, argv, envp)                            <- argv DONE (CS4); envp remains
 BB4.  Job control                                     (was BB2)
 BB5.  Minimal /proc                                   (was BB3)
 BB6.  Interactive shell bring-up

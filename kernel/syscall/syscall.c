@@ -267,6 +267,9 @@ static const struct syscall_desc syscall_table[SYS_MAX] = {
     [SYS_DUP]             = { sys_dup,             "dup" },
     [SYS_DUP2]            = { sys_dup2,            "dup2" },
     [SYS_DUP3]            = { sys_dup3,            "dup3" },
+    [SYS_GETPPID]         = { sys_getppid,         "getppid" },
+    [SYS_UNAME]           = { sys_uname,           "uname" },
+    [SYS_BRK]             = { sys_brk,             "brk" },
 };
 
 // Asserts what the table's shape is supposed to guarantee. Cheap, and

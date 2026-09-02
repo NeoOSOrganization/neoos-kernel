@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <sys/wait.h>
+#include <sys/utsname.h>
 
 #define BB "/BIN/BUSYBOX.ELF"
 
@@ -69,6 +70,27 @@ int main(void) {
     run("sh -c :",       a_shc);
     run("sh -c echo",    a_shec);
     run("sh -c external",a_shext);
+
+    // BB2's three, asserted rather than eyeballed. uname is the one
+    // with a visible symptom: before it existed the shim returned
+    // -ENOSYS and BusyBox printed a blank line rather than an error.
+    struct utsname u;
+    if (uname(&u) != 0) {
+        printf("[bbspike] FAILED: uname returned non-zero\n");
+        return 1;
+    }
+    if (u.sysname[0] == 0 || u.machine[0] == 0 || u.release[0] == 0) {
+        printf("[bbspike] FAILED: uname left fields empty\n");
+        return 1;
+    }
+    printf("[bbspike] uname: %s %s %s\n", u.sysname, u.release, u.machine);
+
+    int ppid = getppid();
+    if (ppid <= 0) {
+        printf("[bbspike] FAILED: getppid returned %d\n", ppid);
+        return 1;
+    }
+    printf("[bbspike] getppid: %d (init is 1)\n", ppid);
 
     printf("[bbspike] --- end of first contact ---\n");
     printf("[bbspike] ALL PASSED\n");

@@ -39,6 +39,9 @@ int close(int fd);
 int64_t lseek(int fd, int64_t offset, int whence);
 
 int getpid(void);
+// The parent's pid. 1 once the real parent has exited, as on Linux --
+// an orphan is reparented to init rather than left with a stale number.
+int getppid(void);
 
 // 1 on /dev/CONSOLE and /dev/TTY, 0 on a file, pipe or socket.
 int isatty(int fd);
