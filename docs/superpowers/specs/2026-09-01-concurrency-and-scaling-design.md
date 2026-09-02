@@ -542,3 +542,47 @@ argv and fd-allocation semantics all move toward Linux here), update
 `docs/stdlib.md` with any new divergence, and record the measured
 before/after numbers CS5.1 and CS5.2 produce — both are throughput
 claims and should be backed by the histograms CS1 builds.
+
+---
+
+## Results — CS4 and CS5 (2026-09-02)
+
+**CS4 is complete.** Every row of the table above was done, each with a
+test that exceeds the *old* limit:
+
+| Limit | Was | Now | Test |
+|---|---|---|---|
+| `spawn`/`exec` argv | 8 args x 128 bytes, truncated silently; **exec discarded argv entirely** | 1024 args, 4096 bytes each, 256 KiB total, `-E2BIG` past any of them | `argvtest` |
+| fd 0/1/2 | never reissued, and scanned from a per-bucket hint | strict lowest-available from 0 | `fdalloc` |
+| `poll()` cap | `-EINVAL` over 16 | `FD_TABLE_MAX`, small sets still on the stack | `polltrunc` |
+| threads per process | 16, in three separate places | 1024, set by the stack layout | `threadmany` |
+| PID space | stopped dead at 2^20; LIFO reuse | bitmap + rising cursor that wraps | `pid` selftest |
+| PTY pool | flat array of 16 | grows into 256 slots | `ptychurn` |
+
+The argv row turned out to be the milestone's most important: `exec`
+took a path and nothing else, so `execve("/bin/ls", {"ls","-la"})` ran
+`ls` with no arguments and reported success. No shell can be built on
+that.
+
+Two ceilings were found only by hitting them: `MAX_THREADS_PER_PROC` was
+**duplicated** in `thread_table.h` and the duplicate silently won, and
+the pty pool's real limit was `DEVFS_DYN_MAX` (32) rather than anything
+in `pty.c`.
+
+**CS5.2 is complete, and hit its target exactly.** Same suite, one boot,
+before and after:
+
+| | broadcasts | poll wakeups | wakeups that found nothing |
+|---|---|---|---|
+| before | 5894 | 507 | 496 (96%) |
+| after | 5998 | 8 | **0** |
+
+**CS5.3 and CS5.4 are complete**: `tools/lock_check.py`, run from `make
+test` before the boot. Both checks were proved by making them fire —
+the rank one on the historical `rand`/`SERIAL` collision.
+
+**CS5.1 (the `vfs_lock` peel) and CS5.5 (seqlocks) are NOT done.** Both
+are internal-performance work with no user-visible behaviour attached,
+and CS5.1 is specified as an incremental path-by-path audit rather than
+one change. They were deferred in favour of the BusyBox track, which is
+what the roadmap exists to reach. Nothing else depends on them.
