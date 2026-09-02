@@ -241,7 +241,15 @@ void smp_steal_selftest_start(void) {
     // CPU 0 with idle APs ready to steal them. They are parented to no
     // one (spawned from the boot path) and exit on their own; the
     // struct each leaves behind is reclaimed at power-off.
+#ifndef NEOOS_QUIET_BOOT
     for (int i = 0; i < 6; i++) { spawn("/BIN/LOOPER.ELF"); }
+#else
+    // Quiet boot: these six processes print "[looper] tick" for as long
+    // as they live, and an interactive session is not the place for
+    // them. The migration check below then has no workload and reports
+    // nothing, which is correct -- a boot that runs no selftests should
+    // not claim to have passed one.
+#endif
 }
 
 void smp_steal_selftest_check(void) {

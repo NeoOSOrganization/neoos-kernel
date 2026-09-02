@@ -213,6 +213,16 @@ int main(int argc, char **argv) {
     // `clear`. The terminal is then confined to the rows BELOW it by
     // moving the framebuffer origin down -- after which every render_*
     // call is already relative to FB.pix and needs no changes at all.
+    // Claim the screen BEFORE painting anything on it.
+    //
+    // The claim is what sets fb_owned and stops the kernel console
+    // painting (kernel/tty/console.c). Clearing and drawing first, as
+    // this used to, leaves a window in which late kernel output lands on
+    // top of what was just drawn. No such collision has actually been
+    // observed -- this is ordering put right on the argument, not on a
+    // reproduction.
+    ioctl(m, NEOOS_TIOCSACTIVE, (void *)1);
+
     render_clear(&FB, VT_DEFAULT_BG);
     int header_rows = logo_draw(&FB);
 
@@ -232,9 +242,6 @@ int main(int argc, char **argv) {
     // POLLHUP and the render loop bail before any output arrives.
     int slave = open(pts, O_RDWR);
     if (slave < 0) { fail("pts open"); }
-
-    // --- claim the screen + keyboard --------------------------------
-    ioctl(m, NEOOS_TIOCSACTIVE, (void *)1);
 
     // --- child -----------------------------------------------------
     int child = fork();

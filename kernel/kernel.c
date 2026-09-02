@@ -267,8 +267,17 @@ void kmain(void *multiboot_info) {
     // perturb state the workload observes -- vt_stress_selftest clears
     // the screen and flips VTs, which raced TERM's render check when it
     // ran after the spawn -- and the banner repaints afterwards anyway.
+#ifndef NEOOS_QUIET_BOOT
     vt_stress_selftest();     // CS0: VT switch vs. console write
     waitq_churn_selftest();   // CS2: thread exit vs. the kzombies drain
+#else
+    // Quiet boot skips these two specifically: vt_stress_selftest
+    // CLEARS THE SCREEN and flips VTs, which is invisible in a test run
+    // and unacceptable underneath an interactive shell. The rest of the
+    // selftests only write to the serial log, which is a file here, so
+    // they are left alone -- a boot that skipped every check would be a
+    // different kernel, not a quieter one.
+#endif
 
     // Everything the banner reports is now known: framebuffer/console up,
     // pmm seeded, CPU probed, every AP online.
