@@ -99,6 +99,18 @@ static int loopback_transmit(struct netdev *dev, const uint8_t *pkt, uint32_t le
     return 0;
 }
 
+// Exactly one, for now. A second real interface needs a routing table,
+// and a routing table with one entry in it is a variable.
+static struct netdev *registered;
+
+int net_register(struct netdev *dev) {
+    if (registered) { return -1; }
+    registered = dev;
+    return 0;
+}
+
+struct netdev *net_device(void) { return registered; }
+
 struct netdev *net_route(uint32_t dst_ip_n) {
     // One interface, so "routing" is a membership test. 127.0.0.0/8 is
     // loopback's, and so is INADDR_ANY -- a datagram sent to 0.0.0.0
@@ -278,6 +290,7 @@ void net_init(void) {
     loopback.name     = "lo";
     loopback.mtu      = NET_MTU_LOOPBACK;
     loopback.ip_n     = IP_LOOPBACK_N;
+    loopback.type     = NETDEV_LOOPBACK;   // no medium, so no framing and no MAC
     loopback.transmit = loopback_transmit;
     serial_write_string("[net] loopback up, 127.0.0.1\n");
 }

@@ -46,6 +46,8 @@
 #include "ipc/pipe.h"
 #include "net/net.h"
 #include "net/socket.h"
+#include "net/netrx.h"
+#include "drivers/net/virtio_net.h"
 #include "lib/rand.h"
 
 void kernel_shutdown(void) {
@@ -251,6 +253,29 @@ void kmain(void *multiboot_info) {
     socket_init();
     socket_selftest();
 
+    // D1. netrx BEFORE the driver: the device may raise its first
+    // interrupt the instant DRIVER_OK is set, and that interrupt posts
+    // into this queue.
+    netrx_init();
+    if (virtio_net_init() == 0) {
+        // PCI interrupts are level-triggered and active-low, always --
+        // unlike the ISA lines above, which need the MADT's overrides to
+        // say so. The line the firmware programmed into the device's
+        // config space IS the GSI; the IOAPIC pin is that minus the
+        // controller's base.
+        uint8_t nic_pin = (uint8_t)(virtio_net_irq_line() - acpi.ioapic_gsi_base);
+        ioapic_set_redirection(nic_pin, VECTOR_VIRTIO_NET,
+                               1 /* active-low */, 1 /* level */,
+                               (uint8_t)lapic_get_id());
+        serial_write_string("[ioapic] virtio-net routed: gsi=");
+        serial_write_hex64(virtio_net_irq_line());
+        serial_write_string(" vector=0x22\n");
+    }
+    // AFTER process_init: it starts a kernel thread. The queue would
+    // simply fill and drop without one, which is why the driver may be
+    // brought up first.
+    netrx_start();
+
     // BEFORE the spawns, and before any kernel thread exists.
     //
     // Bringing the APs up afterwards meant each one came online into a
@@ -285,6 +310,13 @@ void kmain(void *multiboot_info) {
     // they are left alone -- a boot that skipped every check would be a
     // different kernel, not a quieter one.
 #endif
+
+    // LAST of the selftests, and the only one that needs interrupts: the
+    // ARP reply it waits for arrives in the NIC's interrupt and is
+    // delivered by the netrx thread, so it opens an interrupt window of
+    // its own and closes it again. Everything above it -- the APs, the
+    // scheduler, the netrx thread -- has to exist first.
+    virtio_net_selftest();
 
     // Everything the banner reports is now known: framebuffer/console up,
     // pmm seeded, CPU probed, every AP online.

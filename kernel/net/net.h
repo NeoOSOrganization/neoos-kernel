@@ -39,19 +39,43 @@ static inline uint32_t ntohl_k(uint32_t v) { return htonl_k(v); }
 // 127.0.0.1, in network order.
 #define IP_LOOPBACK_N 0x0100007Fu
 
+// What a device carries. Loopback has no medium and therefore no
+// framing; an Ethernet device has both, and the difference decides
+// whether `transmit` or `transmit_frame` is the way in.
+#define NETDEV_LOOPBACK 0
+#define NETDEV_ETHERNET 1
+
 struct netdev {
     const char *name;
     uint32_t    mtu;
     uint32_t    ip_n;        // this interface's address, network order
+    int         type;        // NETDEV_LOOPBACK or NETDEV_ETHERNET
+    uint8_t     hwaddr[6];   // the MAC, zero on loopback
     // Hands one complete IPv4 packet to the device. The device is
     // responsible for getting it to the other end -- which, for
     // loopback, means handing it straight back to net_ipv4_input.
     int       (*transmit)(struct netdev *dev, const uint8_t *pkt, uint32_t len);
+    // Hands one COMPLETE ETHERNET FRAME to the device -- header,
+    // payload and all. Null on loopback. It exists beside `transmit`
+    // rather than replacing it because D1 has no link layer: there is
+    // nothing yet that can turn an IP packet into a frame, so an
+    // Ethernet device answers `transmit` with -ENETUNREACH and this is
+    // the only way onto the wire. D2 builds the layer between them.
+    int       (*transmit_frame)(struct netdev *dev, const uint8_t *frame, uint32_t len);
     uint64_t    tx_packets, rx_packets, rx_dropped;
 };
 
 void net_init(void);
 void net_selftest(void);
+
+// Registers a second interface beside loopback. D1 adds one; the
+// routing below still sends everything to loopback, because there is no
+// link layer yet -- D2 gives this device an address and a real route.
+// Returns 0, or negative when there is no room.
+int net_register(struct netdev *dev);
+// The registered non-loopback interface, or 0. D1's selftest needs it
+// to reach the NIC without knowing which driver provided it.
+struct netdev *net_device(void);
 
 // The interface an address belongs to, or 0. With one loopback device
 // this answers only for 127.0.0.0/8 and INADDR_ANY.

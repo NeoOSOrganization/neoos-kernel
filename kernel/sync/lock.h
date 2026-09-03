@@ -59,6 +59,23 @@
 // the object. Equal ranks are an inversion to the checker, and rightly.
 #define LOCK_RANK_SOCKTABLE  11
 #define LOCK_RANK_SOCKET     12
+// The NIC receive queue: the ring the network interrupt fills and the
+// netrx thread drains. It is in THIS band, not up with the leaves, for
+// one reason -- the thread hands it to waitq_sleep() as `release`, so
+// it must rank strictly below WAITQ, exactly like the IPC guards above.
+// Putting it at leaf rank looked right (it is taken from an interrupt)
+// and panicked on the first sleep.
+//
+// Taken from the network IRQ handler, which is safe for the reason
+// every IRQ-taken lock here is: locks are acquired with
+// spin_lock_irqsave, so interrupts are off whenever one is held, and an
+// interrupt handler therefore always starts holding nothing.
+//
+// Held only across a ring-buffer append or removal -- never across the
+// receive path, and never across the waitq wake, which is the whole
+// point of handing frames to a thread.
+#define LOCK_RANK_NETRX      13
+
 // The timed-sleep list. It was rank THREAD (2), which was fine while
 // waitq_sleep_timeout's only caller held no lock -- but any of the IPC
 // guards above hands itself to waitq_sleep_timeout as `release`, and
@@ -66,7 +83,7 @@
 // descending acquire and an instant panic. It belongs here, directly
 // under WAITQ, for the same reason WAITQ is where it is: it is taken on
 // the way into a sleep, under whatever guard the sleeper was holding.
-#define LOCK_RANK_TIMEOUT    13
+#define LOCK_RANK_TIMEOUT    14
 // Per-wait-queue. Above every lock legally held across waitq_sleep() (a
 // mutex passes its own guard in as `release`, carrying the mutex's
 // rank), and below RUNQUEUE, since the sleep path reaches schedule()
@@ -76,27 +93,27 @@
 // through, because poll_head_notify holds it across the wake -- and
 // above every object lock (pipe 10, socket 12, tty 8) so a driver can
 // notify with its own lock held.
-#define LOCK_RANK_POLLHEAD   14
-#define LOCK_RANK_WAITQ      15
-#define LOCK_RANK_RUNQUEUE   16
-#define LOCK_RANK_FDTABLE    17  // file descriptor table (per-bucket locks, after VFS)
-#define LOCK_RANK_HEAP       18
-#define LOCK_RANK_PMM        19
+#define LOCK_RANK_POLLHEAD   15
+#define LOCK_RANK_WAITQ      16
+#define LOCK_RANK_RUNQUEUE   17
+#define LOCK_RANK_FDTABLE    18  // file descriptor table (per-bucket locks, after VFS)
+#define LOCK_RANK_HEAP       19
+#define LOCK_RANK_PMM        20
 // The signal-queue pool: a leaf allocator taken while a process's
 // p->lock (rank 1, LOCK_RANK_PROCESS) is held, and holding nothing
 // itself. It sits innermost rather than beside LOCK_RANK_PROCESS
 // because equal ranks are an inversion -- acquisition must be strictly
 // ascending.
-#define LOCK_RANK_SIGQUEUE   20
+#define LOCK_RANK_SIGQUEUE   21
 // TLB shootdown bookkeeping: the deferred-free queue is filled from
 // paging_unmap_from, which runs UNDER a process's mm_lock (rank 3), so
 // it must rank strictly below it. It is a leaf -- tlb_flush_deferred
 // releases it before calling pmm_free.
-#define LOCK_RANK_TLB        21
+#define LOCK_RANK_TLB        22
 // Input subsystem: key event fan-out and grab. Taken from the keyboard
 // IRQ (so it must be a leaf-ish rank), but held only during ring-buffer
 // append -- never across tty_input_char or waitq_wake calls.
-#define LOCK_RANK_INPUT     22
+#define LOCK_RANK_INPUT     23
 // The kernel virtual terminals: vt_active, each VT's diff cache
 // (vc->shown / shown_valid) and kd_mode. Sits ABOVE TTY because the
 // write path is tty_obj_write -> t->lock -> vt_backend_output ->

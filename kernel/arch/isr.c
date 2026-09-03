@@ -9,6 +9,7 @@
 #include "smp/tlb.h"
 #include "drivers/irq/lapic.h"
 #include "drivers/input/keyboard.h"
+#include "drivers/net/virtio_net.h"
 #include "mm/paging.h"
 #include "mm/vma.h"
 #include "sched/proc.h"
@@ -191,6 +192,16 @@ static void isr_handler_inner(struct registers *regs) {
 
     if (regs->vector_number == VECTOR_KEYBOARD) {
         keyboard_handler();
+        lapic_send_eoi();
+        return;
+    }
+
+    if (regs->vector_number == VECTOR_VIRTIO_NET) {
+        // The handler reads the device's ISR (which is what acknowledges
+        // the interrupt AT THE DEVICE), copies completed frames into the
+        // netrx queue and wakes its thread. Nothing sleepable happens
+        // here -- see kernel/net/netrx.h for why that split exists.
+        virtio_net_irq();
         lapic_send_eoi();
         return;
     }

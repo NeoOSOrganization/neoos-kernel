@@ -45,6 +45,7 @@
 #define EOVERFLOW 75
 #define ESPIPE  29
 #define ENETUNREACH 101
+#define ENETDOWN 100
 #define EADDRNOTAVAIL 99
 #define EDESTADDRREQ 89
 #define ENOTSOCK 88

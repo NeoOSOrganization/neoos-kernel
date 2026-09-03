@@ -92,6 +92,7 @@ boot_one() {   # $1 = tag
   timeout $TIMEOUT qemu-system-x86_64 $GAUNTLET_MACHINE -smp 4 -boot order=d -vga std \
     -cdrom "$WORK/iso.$t" \
     -drive file="$WORK/d1.$t",format=raw -drive file="$WORK/d2.$t",format=raw \
+    -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
     -no-reboot -display none -serial file:"$WORK/serial.$t" \
     > /dev/null 2>"$WORK/qemu.err.$t"
   rm -f "$WORK/iso.$t" "$WORK/d1.$t" "$WORK/d2.$t"

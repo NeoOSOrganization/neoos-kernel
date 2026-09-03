@@ -50,7 +50,7 @@ ISO_DIR := iso
 # picked up silently.
 KERNEL_DIRS := kernel kernel/arch kernel/drivers/video kernel/drivers/input \
 	kernel/drivers/block kernel/drivers/char kernel/drivers/irq kernel/drivers/acpi \
-	kernel/drivers/pci \
+	kernel/drivers/pci kernel/drivers/virtio kernel/drivers/net \
 	kernel/tty kernel/ipc kernel/smp \
 	kernel/syscall kernel/mm kernel/fs kernel/sched kernel/sync kernel/net kernel/lib
 C_SOURCES := $(foreach d,$(KERNEL_DIRS),$(wildcard $(d)/*.c))
@@ -816,10 +816,26 @@ else
 QEMU_MACHINE := -cpu Nehalem
 endif
 
+# D1. The NIC is virtio-net, not the e1000 QEMU attaches by default --
+# see docs/superpowers/specs/2026-09-03-d1-virtio-net-design.md for why
+# the paravirtual device was chosen over the more realistic one.
+# Naming any -netdev/-device also suppresses QEMU's default NIC, so this
+# machine has exactly one interface and pci_selftest keeps seeing the
+# bus it asserts on.
+#
+# `user` (SLIRP) is the default because it needs NO PRIVILEGES: it
+# answers ARP for the gateway at 10.0.2.2, which is what
+# virtio_net_selftest proves the driver against, and it works in CI and
+# under the gauntlet with no host setup at all. The host cannot ping
+# INTO it -- that is what `make shell-tap` is for.
+QEMU_NETDEV ?= user,id=net0
+QEMU_NET := -netdev $(QEMU_NETDEV) -device virtio-net-pci,netdev=net0
+
 QEMU_COMMON := $(QEMU_MACHINE) -smp $(SMP_CPUS) -boot order=d \
 	-cdrom $(BUILD_DIR)/neoos.iso \
 	-drive file=$(DISK_IMG),format=raw -drive file=$(DISK2_IMG),format=raw \
 	-vga std \
+	$(QEMU_NET) \
 	-no-reboot
 
 # -vga std: the plain Bochs-VBE standard VGA -- a dumb linear
@@ -855,6 +871,24 @@ shell:
 	@echo "       (respawn), so the machine stays up; close the window to"
 	@echo "       stop it. Serial log: $(BUILD_DIR)/shell.log"
 	qemu-system-x86_64 $(QEMU_COMMON) -serial file:$(BUILD_DIR)/shell.log
+
+# The same shell, on a TAP interface instead of SLIRP: the host and
+# NeoOS are then two machines on one wire, so the host can ping NeoOS
+# and act as a real TCP peer -- neither of which SLIRP allows.
+#
+# It needs ONE-TIME HOST SETUP, as root, which is exactly why it is
+# never on the automated path:
+#
+#   sudo ip tuntap add dev tap0 mode tap user $$USER
+#   sudo ip addr add 10.0.2.2/24 dev tap0
+#   sudo ip link set tap0 up
+#
+# NeoOS is then 10.0.2.15 and the host is 10.0.2.2 -- the same addresses
+# SLIRP hands out, so nothing in the kernel has to know which of the two
+# it is running on.
+.PHONY: shell-tap
+shell-tap:
+	@$(MAKE) QEMU_NETDEV='tap,id=net0,ifname=tap0,script=no,downscript=no' shell
 
 # The same shell, but driven over the serial port instead of the
 # framebuffer -- useful when the QEMU window is not available (ssh, a
@@ -898,6 +932,7 @@ BOOT_MARKER  ?= NeoOS: interrupts enabled, starting scheduler
 # class to a regex, and would never match the literal brackets.
 REQUIRED_MARKERS := \
 	"[pci] ALL PASSED" \
+	"[virtio-net] ALL PASSED" \
 	"[smp] local timer selftest passed" \
 	"[smp] steal selftest passed" \
 	"[vfstest] ALL PASSED" \
