@@ -12,6 +12,7 @@
 #include "net/net.h"
 #include "net/route.h"
 #include "net/icmp.h"
+#include "net/tcp.h"
 #include "drivers/char/serial.h"
 #include "errno.h"
 #include "mm/heap.h"
@@ -212,7 +213,11 @@ void net_ipv4_input(struct netdev *dev, const uint8_t *pkt, uint32_t len) {
         icmp_input(dev, ip, pkt + ihl, total - ihl);
         return;
     }
-    // Every other protocol is dropped. TCP arrives in D5.
+    if (ip->protocol == IPPROTO_TCP) {
+        tcp_input(dev, ip, pkt + ihl, total - ihl);
+        return;
+    }
+    // Every other protocol is dropped.
     dev->rx_dropped++;
 }
 
@@ -222,6 +227,31 @@ void net_ipv4_input(struct netdev *dev, const uint8_t *pkt, uint32_t len) {
 // source and destination addresses, the protocol, and the UDP length.
 // That is what makes it detect a datagram delivered to the wrong host
 // -- information the UDP header itself does not carry.
+static uint32_t ip_pseudo_sum(uint32_t src_n, uint32_t dst_n,
+                              uint8_t proto, uint16_t l4_len) {
+    uint32_t sum = 0;
+    sum = checksum_partial(&src_n, 4, sum);
+    sum = checksum_partial(&dst_n, 4, sum);
+    uint8_t zp[2] = { 0, proto };
+    sum = checksum_partial(zp, 2, sum);
+    uint16_t len_n = htons_k(l4_len);
+    sum = checksum_partial(&len_n, 2, sum);
+    return sum;
+}
+
+uint16_t net_l4_checksum(uint32_t src_n, uint32_t dst_n, uint8_t proto,
+                         const void *seg, uint32_t len) {
+    uint32_t sum = ip_pseudo_sum(src_n, dst_n, proto, (uint16_t)len);
+    uint16_t ck  = checksum_fold(checksum_partial(seg, len, sum));
+    return htons_k(ck ? ck : 0xFFFF);
+}
+
+int net_l4_verify(uint32_t src_n, uint32_t dst_n, uint8_t proto,
+                  const void *seg, uint32_t len) {
+    uint32_t sum = ip_pseudo_sum(src_n, dst_n, proto, (uint16_t)len);
+    return checksum_fold(checksum_partial(seg, len, sum)) == 0;
+}
+
 static uint32_t udp_pseudo_sum(uint32_t src_n, uint32_t dst_n, uint16_t udp_len) {
     uint32_t sum = 0;
     sum = checksum_partial(&src_n, 4, sum);

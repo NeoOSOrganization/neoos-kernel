@@ -51,6 +51,7 @@
 #include "net/icmp.h"
 #include "net/dhcp.h"
 #include "net/dnsprobe.h"
+#include "net/tcp.h"
 #include "net/eth.h"
 #include "drivers/net/virtio_net.h"
 #include "lib/rand.h"
@@ -255,6 +256,7 @@ void kmain(void *multiboot_info) {
     pipe_selftest();
     net_init();
     net_selftest();
+    tcp_init();
     socket_init();
     socket_selftest();
 
@@ -290,6 +292,7 @@ void kmain(void *multiboot_info) {
     // simply fill and drop without one, which is why the driver may be
     // brought up first.
     netrx_start();
+    tcp_timer_start();
     dhcp_start(net_device());
 
     // BEFORE the spawns, and before any kernel thread exists.
@@ -341,6 +344,7 @@ void kmain(void *multiboot_info) {
     arp_selftest();
     icmp_selftest();
     dns_probe_selftest();
+    tcp_selftest();
 
     // Everything the banner reports is now known: framebuffer/console up,
     // pmm seeded, CPU probed, every AP online.

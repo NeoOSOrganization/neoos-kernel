@@ -175,4 +175,21 @@ int net_udp_hook(uint16_t port_n, udp_kernel_handler fn);   // 0, or -EBUSY
 // because UDP's covers a pseudo-header as well as its own.
 uint16_t net_checksum(const void *data, uint32_t len, uint32_t start);
 
+// The transport checksum: the segment, folded together with the
+// PSEUDO-HEADER of source, destination, protocol and length. That is
+// what makes it detect a segment delivered to the wrong host --
+// information neither the UDP nor the TCP header carries.
+//
+// One function for both protocols. It returns the value to STORE in the
+// checksum field (already network order, and never 0 -- a computed zero
+// is transmitted as 0xFFFF, which one's-complement arithmetic makes
+// legal rather than a fudge). To VERIFY, call it with the received
+// checksum left in place and compare the segment's own folded sum
+// against zero via net_l4_verify.
+uint16_t net_l4_checksum(uint32_t src_n, uint32_t dst_n, uint8_t proto,
+                         const void *seg, uint32_t len);
+// Nonzero when the segment's checksum is correct.
+int net_l4_verify(uint32_t src_n, uint32_t dst_n, uint8_t proto,
+                  const void *seg, uint32_t len);
+
 #endif

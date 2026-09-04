@@ -71,10 +71,23 @@
 // spin_lock_irqsave, so interrupts are off whenever one is held, and an
 // interrupt handler therefore always starts holding nothing.
 //
+// A TCP connection's control block. Taken by the netrx thread
+// (segments arriving), by the tcp_timer thread (retransmission,
+// delayed ACK, persist, TIME_WAIT) and by syscall threads (send, recv,
+// accept). It is HELD ACROSS THE TRANSMIT -- building and sending a
+// segment while holding the connection whose sequence numbers it
+// describes is the only way that is not a race -- which is why it must
+// rank strictly below ARP, the lock the transmit goes on to take.
+//
+// It is NOT held under the socket lock: tcp_sock.c drops that before
+// calling in, exactly as socket_sendto already drops it before
+// net_udp_output, and for the same reason.
+#define LOCK_RANK_TCP        13
+
 // Held only across a ring-buffer append or removal -- never across the
 // receive path, and never across the waitq wake, which is the whole
 // point of handing frames to a thread.
-#define LOCK_RANK_NETRX      13
+#define LOCK_RANK_NETRX      14
 
 // Address resolution. Taken by whichever thread is transmitting (a
 // cache lookup, and the queuing of a packet behind a pending request)
@@ -96,7 +109,7 @@
 //
 // Nothing is ever acquired while ARP is held: every path copies what it
 // needs out under the lock and transmits after dropping it.
-#define LOCK_RANK_ARP        14
+#define LOCK_RANK_ARP        15
 
 // The timed-sleep list. It was rank THREAD (2), which was fine while
 // waitq_sleep_timeout's only caller held no lock -- but any of the IPC
@@ -105,7 +118,7 @@
 // descending acquire and an instant panic. It belongs here, directly
 // under WAITQ, for the same reason WAITQ is where it is: it is taken on
 // the way into a sleep, under whatever guard the sleeper was holding.
-#define LOCK_RANK_TIMEOUT    15
+#define LOCK_RANK_TIMEOUT    16
 // Per-wait-queue. Above every lock legally held across waitq_sleep() (a
 // mutex passes its own guard in as `release`, carrying the mutex's
 // rank), and below RUNQUEUE, since the sleep path reaches schedule()
@@ -115,27 +128,27 @@
 // through, because poll_head_notify holds it across the wake -- and
 // above every object lock (pipe 10, socket 12, tty 8) so a driver can
 // notify with its own lock held.
-#define LOCK_RANK_POLLHEAD   16
-#define LOCK_RANK_WAITQ      17
-#define LOCK_RANK_RUNQUEUE   18
-#define LOCK_RANK_FDTABLE    19  // file descriptor table (per-bucket locks, after VFS)
-#define LOCK_RANK_HEAP       20
-#define LOCK_RANK_PMM        21
+#define LOCK_RANK_POLLHEAD   17
+#define LOCK_RANK_WAITQ      18
+#define LOCK_RANK_RUNQUEUE   19
+#define LOCK_RANK_FDTABLE    20  // file descriptor table (per-bucket locks, after VFS)
+#define LOCK_RANK_HEAP       21
+#define LOCK_RANK_PMM        22
 // The signal-queue pool: a leaf allocator taken while a process's
 // p->lock (rank 1, LOCK_RANK_PROCESS) is held, and holding nothing
 // itself. It sits innermost rather than beside LOCK_RANK_PROCESS
 // because equal ranks are an inversion -- acquisition must be strictly
 // ascending.
-#define LOCK_RANK_SIGQUEUE   22
+#define LOCK_RANK_SIGQUEUE   23
 // TLB shootdown bookkeeping: the deferred-free queue is filled from
 // paging_unmap_from, which runs UNDER a process's mm_lock (rank 3), so
 // it must rank strictly below it. It is a leaf -- tlb_flush_deferred
 // releases it before calling pmm_free.
-#define LOCK_RANK_TLB        23
+#define LOCK_RANK_TLB        24
 // Input subsystem: key event fan-out and grab. Taken from the keyboard
 // IRQ (so it must be a leaf-ish rank), but held only during ring-buffer
 // append -- never across tty_input_char or waitq_wake calls.
-#define LOCK_RANK_INPUT     24
+#define LOCK_RANK_INPUT     25
 // The NIC's transmit path. There is ONE shared bounce buffer and one
 // TX queue, and virtio_net_transmit spins waiting for the device to
 // hand the buffer back -- so two concurrent transmits scribble on each
@@ -149,7 +162,7 @@
 // since every ARP path drops its own lock before transmitting -- and it
 // is held across the device wait, which is precisely why nothing may be
 // acquired underneath it.
-#define LOCK_RANK_VIRTIO_TX 25
+#define LOCK_RANK_VIRTIO_TX 26
 // The kernel virtual terminals: vt_active, each VT's diff cache
 // (vc->shown / shown_valid) and kd_mode. Sits ABOVE TTY because the
 // write path is tty_obj_write -> t->lock -> vt_backend_output ->
