@@ -48,6 +48,7 @@
 #include "net/socket.h"
 #include "net/netrx.h"
 #include "net/arp.h"
+#include "net/icmp.h"
 #include "net/eth.h"
 #include "drivers/net/virtio_net.h"
 #include "lib/rand.h"
@@ -337,6 +338,7 @@ void kmain(void *multiboot_info) {
     // scheduler, the netrx thread -- has to exist first.
     virtio_net_selftest();
     arp_selftest();
+    icmp_selftest();
 
     // Everything the banner reports is now known: framebuffer/console up,
     // pmm seeded, CPU probed, every AP online.

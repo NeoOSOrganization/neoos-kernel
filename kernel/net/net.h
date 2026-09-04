@@ -147,9 +147,14 @@ int  net_udp_output(uint32_t src_n, uint16_t sport_n,
 
 // Delivered by the UDP receive path to the socket layer. Defined in
 // socket.c so that net.c does not need to know what a socket is.
-void net_udp_deliver(uint32_t src_n, uint16_t sport_n,
-                     uint32_t dst_n, uint16_t dport_n,
-                     const uint8_t *data, uint32_t len);
+// Returns 0 when a socket exists on that port, or -ENOENT when nothing
+// is bound there -- which is what D3 turns into an ICMP port
+// unreachable. A connected socket that filters out a stranger still
+// returns 0: the port is open, it is just not listening to them, and
+// saying otherwise would be a lie the sender acts on.
+int net_udp_deliver(uint32_t src_n, uint16_t sport_n,
+                    uint32_t dst_n, uint16_t dport_n,
+                    const uint8_t *data, uint32_t len);
 
 // The one's-complement sum every IPv4 checksum is built from. Exposed
 // because UDP's covers a pseudo-header as well as its own.

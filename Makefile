@@ -935,6 +935,7 @@ REQUIRED_MARKERS := \
 	"[virtio-net] ALL PASSED" \
 	"[route] ALL PASSED" \
 	"[arp] ALL PASSED" \
+	"[icmp] ALL PASSED" \
 	"[smp] local timer selftest passed" \
 	"[smp] steal selftest passed" \
 	"[vfstest] ALL PASSED" \

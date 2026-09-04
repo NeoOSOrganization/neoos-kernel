@@ -173,18 +173,17 @@ static void sock_put(struct socket *s) {
 // must not take a lock the sender already holds -- which is why the
 // send path below drops the socket lock before handing anything to the
 // network.
-void net_udp_deliver(uint32_t src_n, uint16_t sport_n,
-                     uint32_t dst_n, uint16_t dport_n,
-                     const uint8_t *data, uint32_t len) {
+int net_udp_deliver(uint32_t src_n, uint16_t sport_n,
+                    uint32_t dst_n, uint16_t dport_n,
+                    const uint8_t *data, uint32_t len) {
     uint64_t tf = spin_lock_irqsave(&sock_table_lock);
     struct socket *s = lookup_bound(dst_n, dport_n);
     if (!s) {
         spin_unlock_irqrestore(&sock_table_lock, tf);
-        // No listener. A real stack answers with ICMP port unreachable;
-        // there is no ICMP here, so the datagram is simply dropped --
-        // which is what UDP allows and what a caller must cope with
-        // anyway.
-        return;
+        // No listener. D3's caller turns this into an ICMP port
+        // unreachable -- it is reported rather than answered here
+        // because socket.c has no business knowing what ICMP is.
+        return -ENOENT;
     }
 
     // The socket lock is taken UNDER the table lock, which is why the
@@ -198,20 +197,25 @@ void net_udp_deliver(uint32_t src_n, uint16_t sport_n,
     if (s->connected &&
         (s->peer_ip_n != src_n || s->peer_port_n != sport_n)) {
         spin_unlock_irqrestore(&s->lock, sf);
-        return;
+        // Delivered as far as the caller is concerned: a socket exists
+        // on that port, and a connected socket filtering out a stranger
+        // is not the same thing as a closed port. Answering this with a
+        // port-unreachable would tell the sender the port is shut when
+        // it is merely not listening to THEM.
+        return 0;
     }
 
     if (s->rx_bytes + len > SOCK_RCVBUF) {
         s->rx_dropped++;
         spin_unlock_irqrestore(&s->lock, sf);
-        return;   // UDP: dropping is a legal outcome, not an error
+        return 0;   // UDP: dropping is a legal outcome, not an error
     }
 
     struct dgram *d = (struct dgram *)kmalloc(sizeof(struct dgram) + len);
     if (!d) {
         s->rx_dropped++;
         spin_unlock_irqrestore(&s->lock, sf);
-        return;
+        return 0;
     }
     d->next       = 0;
     d->src_ip_n   = src_n;
@@ -226,6 +230,7 @@ void net_udp_deliver(uint32_t src_n, uint16_t sport_n,
 
     waitq_wake_all(&s->readers);
     poll_head_notify(&s->poll);   // CS5.2: only this socket's pollers
+    return 0;
 }
 
 // --------------------------------------------------------------- syscalls

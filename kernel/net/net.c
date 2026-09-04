@@ -11,6 +11,7 @@
 
 #include "net/net.h"
 #include "net/route.h"
+#include "net/icmp.h"
 #include "drivers/char/serial.h"
 #include "errno.h"
 #include "mm/heap.h"
@@ -201,10 +202,11 @@ void net_ipv4_input(struct netdev *dev, const uint8_t *pkt, uint32_t len) {
         udp_input(dev, ip, pkt + ihl, total - ihl);
         return;
     }
-    // Every other protocol, ICMP included, is silently dropped. An
-    // ICMP echo responder would be twenty lines, but nothing can reach
-    // it: there are no raw sockets, so no way to send a ping or see a
-    // reply. It arrives with raw sockets.
+    if (ip->protocol == IPPROTO_ICMP) {
+        icmp_input(dev, ip, pkt + ihl, total - ihl);
+        return;
+    }
+    // Every other protocol is dropped. TCP arrives in D5.
     dev->rx_dropped++;
 }
 
@@ -283,9 +285,13 @@ static void udp_input(struct netdev *dev, const struct ipv4_header *ip,
         }
     }
 
-    net_udp_deliver(ip->src_n, udp->sport_n, ip->dst_n, udp->dport_n,
-                    payload + sizeof(*udp),
-                    udp_len - (uint32_t)sizeof(*udp));
+    if (net_udp_deliver(ip->src_n, udp->sport_n, ip->dst_n, udp->dport_n,
+                        payload + sizeof(*udp),
+                        udp_len - (uint32_t)sizeof(*udp)) == -ENOENT) {
+        // D3. Nothing is bound there, and a silent drop is the single
+        // least diagnosable failure a young network stack has.
+        icmp_port_unreachable(dev, ip, payload, udp_len);
+    }
 }
 
 // ------------------------------------------------------------------- init
