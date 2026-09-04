@@ -76,6 +76,9 @@ int net_register(struct netdev *dev);
 // The registered non-loopback interface, or 0. D1's selftest needs it
 // to reach the NIC without knowing which driver provided it.
 struct netdev *net_device(void);
+// The loopback device. route.c installs 127.0.0.0/8 through it, and it
+// is file-static in net.c otherwise.
+struct netdev *net_loopback(void);
 
 // The interface an address belongs to, or 0. With one loopback device
 // this answers only for 127.0.0.0/8 and INADDR_ANY.

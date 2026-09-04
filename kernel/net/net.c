@@ -10,6 +10,7 @@
 // about.
 
 #include "net/net.h"
+#include "net/route.h"
 #include "drivers/char/serial.h"
 #include "errno.h"
 #include "mm/heap.h"
@@ -111,13 +112,16 @@ int net_register(struct netdev *dev) {
 
 struct netdev *net_device(void) { return registered; }
 
+struct netdev *net_loopback(void) { return &loopback; }
+
 struct netdev *net_route(uint32_t dst_ip_n) {
-    // One interface, so "routing" is a membership test. 127.0.0.0/8 is
-    // loopback's, and so is INADDR_ANY -- a datagram sent to 0.0.0.0
-    // goes to this host, which with one interface is the same place.
-    uint32_t host = ntohl_k(dst_ip_n);
-    if (dst_ip_n == 0 || (host >> 24) == 127) { return &loopback; }
-    return 0;
+    // INADDR_ANY means "this host", which is loopback, and it is
+    // answered here rather than by a route: a 0.0.0.0/32 entry would
+    // sit in the table next to the default route's 0.0.0.0/0 and read
+    // as a mistake to everyone who saw it afterwards.
+    if (dst_ip_n == 0) { return &loopback; }
+    uint32_t next_hop;
+    return route_lookup(dst_ip_n, &next_hop);
 }
 
 // ------------------------------------------------------------------ IPv4
@@ -292,6 +296,7 @@ void net_init(void) {
     loopback.ip_n     = IP_LOOPBACK_N;
     loopback.type     = NETDEV_LOOPBACK;   // no medium, so no framing and no MAC
     loopback.transmit = loopback_transmit;
+    route_init();
     serial_write_string("[net] loopback up, 127.0.0.1\n");
 }
 
@@ -354,4 +359,5 @@ void net_selftest(void) {
     }
 
     serial_write_string("[net] selftest passed\n");
+    route_selftest();
 }
