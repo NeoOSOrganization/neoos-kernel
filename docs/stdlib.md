@@ -748,16 +748,54 @@ port. It is not a shortcut between two buffers.
 - **No `select`/`poll`/`epoll`.** A socket can only be read by
   blocking in `recvfrom`, so a program that must wait on several at
   once needs a thread per socket.
-- **No ICMP.** There is no `ping` and no port-unreachable reply: a
-  datagram sent to a port nobody has bound is silently dropped.
-- **No raw sockets**, which is also why the absent ICMP cannot be
-  noticed from userland.
+- **ICMP exists, but not from userland (D3).** The kernel answers echo
+  requests — the host can `ping` NeoOS — and generates a port
+  unreachable for a datagram sent to a port nobody has bound. Neither
+  is reachable from a program: there are still **no raw sockets**, so
+  there is no `ping(8)` and a UDP sender cannot see the unreachable
+  that its datagram provoked. `sendto` to a closed port still returns
+  success, as it does on Linux for the first datagram.
 - **Errors are returned directly as negative values**, per this
   library's convention: `socket()` returns `-EAFNOSUPPORT`, not `-1`
   with `errno`.
 - **`inet_ntoa` is spelled `inet_ntoa_r`** and takes the output buffer.
   The standard one returns a pointer to a static buffer, which is not
   thread-safe; NeoOS has threads and no reason to reproduce that.
+
+### Addressing: DHCP runs in the kernel (D4)
+
+**This is a divergence from Linux, and a deliberate one.** On Linux a
+DHCP client is a userspace program. On NeoOS it is `kernel/net/dhcp.c`,
+on its own kernel thread.
+
+The reason is surface area. A userspace client must receive an offer
+addressed to an address it does not have yet, which needs `AF_PACKET`
+or raw sockets; it must send to 255.255.255.255, which needs
+`SO_BROADCAST`; and it must install a route, which needs a routing API.
+That is three pieces of **user-facing** kernel interface — each with
+its own ABI obligations under this document — designed, implemented and
+frozen before the machine can find out its own address. The kernel
+client needs none of them.
+
+The decision is reversible by construction: `dhcp.c` speaks to the same
+`net_udp_output` / `net_udp_hook` pair a socket would, so replacing it
+with a userspace client later means **adding** raw sockets, not
+unpicking the stack.
+
+Two consequences a program can observe:
+
+- **There is no `/etc/resolv.conf` and no resolver.** DHCP option 6 is
+  parsed and the DNS server's address is stored, and nothing reads it.
+  `gethostbyname` and `getaddrinfo` do not exist.
+- **There is no way for a program to renew, release, or inspect the
+  lease.** The address is simply there. `getsockname` on a bound socket
+  is the only way to see it.
+
+If no server answers within five seconds the kernel installs a static
+**10.0.2.15/24 via 10.0.2.2** — QEMU user-networking's well-known first
+lease — and keeps trying in the background. It logs a **distinct** line
+when it does, because a broken client and an absent server otherwise
+produce an identical routing table.
 
 ## MPI: `<mpi.h>`
 

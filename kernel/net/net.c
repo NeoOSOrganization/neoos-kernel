@@ -103,8 +103,14 @@ void net_ifconfig(struct netdev *dev, uint32_t addr_n, uint32_t mask_n,
     if (!dev) { return; }
     route_flush_dev(dev);
     dev->ip_n = addr_n;
-    route_add(addr_n & mask_n, mask_n, 0, dev);
-    if (gw_n) { route_add(0, 0, gw_n, dev); }
+    // The all-ones broadcast, ALWAYS, and first: it is the route a DHCP
+    // client needs before it has an address, so it must survive being
+    // re-configured by the lease it goes on to obtain. On link, so the
+    // link layer resolves 255.255.255.255 -- which arp_resolve answers
+    // with the broadcast MAC without asking anybody.
+    route_add(IP_BROADCAST_N, 0xFFFFFFFFu, 0, dev);
+    if (addr_n) { route_add(addr_n & mask_n, mask_n, 0, dev); }
+    if (gw_n)   { route_add(0, 0, gw_n, dev); }
 }
 
 int net_is_local_addr(uint32_t ip_n) {
@@ -265,6 +271,25 @@ int net_udp_output(uint32_t src_n, uint16_t sport_n,
     return rc;
 }
 
+// Two, which is one more than there is a user for. A third means
+// something has started using this as a general mechanism, and that is
+// the point at which it wants a real design rather than an array.
+static struct { uint16_t port_n; udp_kernel_handler fn; } udp_hooks[2];
+
+int net_udp_hook(uint16_t port_n, udp_kernel_handler fn) {
+    for (unsigned i = 0; i < 2; i++) {
+        if (udp_hooks[i].fn && udp_hooks[i].port_n == port_n) { return -EBUSY; }
+    }
+    for (unsigned i = 0; i < 2; i++) {
+        if (!udp_hooks[i].fn) {
+            udp_hooks[i].port_n = port_n;
+            udp_hooks[i].fn     = fn;
+            return 0;
+        }
+    }
+    return -EBUSY;
+}
+
 static void udp_input(struct netdev *dev, const struct ipv4_header *ip,
                       const uint8_t *payload, uint32_t len) {
     if (len < sizeof(struct udp_header)) { dev->rx_dropped++; return; }
@@ -281,6 +306,18 @@ static void udp_input(struct netdev *dev, const struct ipv4_header *ip,
         uint32_t sum = udp_pseudo_sum(ip->src_n, ip->dst_n, (uint16_t)udp_len);
         if (checksum_fold(checksum_partial(payload, udp_len, sum)) != 0) {
             dev->rx_dropped++;
+            return;
+        }
+    }
+
+    // The kernel hook comes FIRST, and before the unreachable path: a
+    // hooked port is not a closed port.
+    for (unsigned i = 0; i < 2; i++) {
+        if (udp_hooks[i].fn && udp_hooks[i].port_n == udp->dport_n) {
+            udp_hooks[i].fn(dev, ip->src_n, udp->sport_n,
+                            ip->dst_n, udp->dport_n,
+                            payload + sizeof(*udp),
+                            udp_len - (uint32_t)sizeof(*udp));
             return;
         }
     }

@@ -156,6 +156,21 @@ int net_udp_deliver(uint32_t src_n, uint16_t sport_n,
                     uint32_t dst_n, uint16_t dport_n,
                     const uint8_t *data, uint32_t len);
 
+// A kernel-internal consumer of ONE UDP port, checked before the socket
+// table. dhcp.c is its only user, and it exists so that a lease can be
+// obtained without SO_BROADCAST, without raw sockets, and without an
+// address to bind to -- three pieces of user-facing surface that would
+// otherwise have to be designed and documented before the machine could
+// find out its own address.
+//
+// A hooked port is never "closed": no ICMP port-unreachable is
+// generated for it.
+typedef void (*udp_kernel_handler)(struct netdev *dev,
+                                   uint32_t src_n, uint16_t sport_n,
+                                   uint32_t dst_n, uint16_t dport_n,
+                                   const uint8_t *data, uint32_t len);
+int net_udp_hook(uint16_t port_n, udp_kernel_handler fn);   // 0, or -EBUSY
+
 // The one's-complement sum every IPv4 checksum is built from. Exposed
 // because UDP's covers a pseudo-header as well as its own.
 uint16_t net_checksum(const void *data, uint32_t len, uint32_t start);

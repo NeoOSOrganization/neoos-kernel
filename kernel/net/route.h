@@ -15,7 +15,10 @@
 // above this file and cannot be reconstructed below it, so route_lookup
 // answers both halves in one call.
 
-#define ROUTE_MAX 4
+// Four is the minimum that works -- 127/8, the all-ones broadcast, the
+// local subnet and a default -- and a table with no spare slot fails by
+// silently refusing the last route somebody adds. Eight.
+#define ROUTE_MAX 8
 
 struct netdev;
 

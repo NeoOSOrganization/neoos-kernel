@@ -936,6 +936,8 @@ REQUIRED_MARKERS := \
 	"[route] ALL PASSED" \
 	"[arp] ALL PASSED" \
 	"[icmp] ALL PASSED" \
+	"[dhcp] ALL PASSED" \
+	"[dns] ALL PASSED" \
 	"[smp] local timer selftest passed" \
 	"[smp] steal selftest passed" \
 	"[vfstest] ALL PASSED" \

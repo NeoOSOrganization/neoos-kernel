@@ -78,6 +78,13 @@ int eth_output_ipv4(struct netdev *dev, const uint8_t *pkt, uint32_t len) {
     uint32_t next_hop = 0;
     if (!route_lookup(ip->dst_n, &next_hop)) { return -ENETUNREACH; }
 
+    // A BROADCAST destination goes to the broadcast MAC whatever the
+    // route says the next hop is. Without this a DHCP DISCOVER for
+    // 255.255.255.255 follows the default route, resolves the GATEWAY,
+    // and is unicast to one machine -- which is not a broadcast, and
+    // which fails in the confusing way where a packet does go out.
+    if (ip->dst_n == IP_BROADCAST_N) { next_hop = IP_BROADCAST_N; }
+
     uint8_t mac[6];
     int rc = arp_resolve(dev, next_hop, mac, pkt, len);
     if (rc == -EAGAIN) {
