@@ -58,6 +58,12 @@
 #define NEO_SENDTO          48
 #define NEO_RECVFROM        49
 #define NEO_GETSOCKNAME     50
+#define NEO_LISTEN          83
+#define NEO_ACCEPT4         84
+#define NEO_SHUTDOWN        85
+#define NEO_GETPEERNAME     86
+#define NEO_SETSOCKOPT      87
+#define NEO_GETSOCKOPT      88
 #define NEO_FCNTL           52
 #define NEO_CHDIR           53
 #define NEO_GETCWD          54
@@ -129,6 +135,13 @@
 #define LX_RECVFROM         45
 #define LX_BIND             49
 #define LX_GETSOCKNAME      51
+#define LX_ACCEPT           43
+#define LX_SHUTDOWN         48
+#define LX_LISTEN           50
+#define LX_GETPEERNAME      52
+#define LX_SETSOCKOPT       54
+#define LX_GETSOCKOPT       55
+#define LX_ACCEPT4          288
 #define LX_FORK             57
 #define LX_EXIT             60
 #define LX_WAIT4            61
@@ -263,6 +276,16 @@ long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a
     case LX_SENDTO:          return neo(NEO_SENDTO, a1, a2, a3, a4, a5, a6);
     case LX_RECVFROM:        return neo(NEO_RECVFROM, a1, a2, a3, a4, a5, a6);
     case LX_GETSOCKNAME:     return neo(NEO_GETSOCKNAME, a1, a2, a3, 0, 0, 0);
+    case LX_LISTEN:          return neo(NEO_LISTEN, a1, a2, 0, 0, 0, 0);
+    // accept() is accept4() with no flags, which is how Linux
+    // implements it too. Only the four-argument form crosses into the
+    // kernel.
+    case LX_ACCEPT:          return neo(NEO_ACCEPT4, a1, a2, a3, 0, 0, 0);
+    case LX_ACCEPT4:         return neo(NEO_ACCEPT4, a1, a2, a3, a4, 0, 0);
+    case LX_SHUTDOWN:        return neo(NEO_SHUTDOWN, a1, a2, 0, 0, 0, 0);
+    case LX_GETPEERNAME:     return neo(NEO_GETPEERNAME, a1, a2, a3, 0, 0, 0);
+    case LX_SETSOCKOPT:      return neo(NEO_SETSOCKOPT, a1, a2, a3, a4, a5, 0);
+    case LX_GETSOCKOPT:      return neo(NEO_GETSOCKOPT, a1, a2, a3, a4, a5, 0);
 
     // ---- argument RESHAPING: Linux's char* becomes NeoOS's ptr+len --
     //
