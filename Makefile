@@ -933,6 +933,8 @@ BOOT_MARKER  ?= NeoOS: interrupts enabled, starting scheduler
 REQUIRED_MARKERS := \
 	"[pci] ALL PASSED" \
 	"[virtio-net] ALL PASSED" \
+	"[route] ALL PASSED" \
+	"[arp] ALL PASSED" \
 	"[smp] local timer selftest passed" \
 	"[smp] steal selftest passed" \
 	"[vfstest] ALL PASSED" \

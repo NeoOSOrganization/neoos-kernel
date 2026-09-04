@@ -57,20 +57,8 @@ static uint16_t checksum_fold(uint32_t sum) {
 
 // ---------------------------------------------------------------- headers
 
-// Wire layout, exactly. Packed because the compiler must not pad it:
-// these bytes go on a network, not into a register.
-struct ipv4_header {
-    uint8_t  version_ihl;      // 4 bits each
-    uint8_t  tos;
-    uint16_t total_length_n;
-    uint16_t id_n;
-    uint16_t flags_frag_n;
-    uint8_t  ttl;
-    uint8_t  protocol;
-    uint16_t checksum_n;
-    uint32_t src_n;
-    uint32_t dst_n;
-} __attribute__((packed));
+// struct ipv4_header moved to net.h in D2: eth.c, icmp.c and tcp.c all
+// need to read a header they did not build.
 
 struct udp_header {
     uint16_t sport_n;
@@ -79,12 +67,7 @@ struct udp_header {
     uint16_t checksum_n;
 } __attribute__((packed));
 
-_Static_assert(sizeof(struct ipv4_header) == 20, "IPv4 header must be 20 bytes");
 _Static_assert(sizeof(struct udp_header)  == 8,  "UDP header must be 8 bytes");
-
-#define IPV4_VERSION_IHL_20  0x45   // version 4, 5 32-bit words of header
-#define IPV4_DEFAULT_TTL     64
-#define IPV4_FLAG_DF_N       0x0040 // network order of 0x4000
 
 // ------------------------------------------------------------- loopback
 
@@ -113,6 +96,23 @@ int net_register(struct netdev *dev) {
 struct netdev *net_device(void) { return registered; }
 
 struct netdev *net_loopback(void) { return &loopback; }
+
+void net_ifconfig(struct netdev *dev, uint32_t addr_n, uint32_t mask_n,
+                  uint32_t gw_n) {
+    if (!dev) { return; }
+    route_flush_dev(dev);
+    dev->ip_n = addr_n;
+    route_add(addr_n & mask_n, mask_n, 0, dev);
+    if (gw_n) { route_add(0, 0, gw_n, dev); }
+}
+
+int net_is_local_addr(uint32_t ip_n) {
+    if (ip_n == 0) { return 1; }                     // INADDR_ANY
+    if ((ntohl_k(ip_n) >> 24) == 127) { return 1; }  // the whole 127/8
+    if (ip_n == loopback.ip_n) { return 1; }
+    if (registered && registered->ip_n && ip_n == registered->ip_n) { return 1; }
+    return 0;
+}
 
 struct netdev *net_route(uint32_t dst_ip_n) {
     // INADDR_ANY means "this host", which is loopback, and it is

@@ -34,7 +34,34 @@ static inline uint32_t htonl_k(uint32_t v) {
 static inline uint32_t ntohl_k(uint32_t v) { return htonl_k(v); }
 
 #define IPPROTO_ICMP 1
+#define IPPROTO_TCP  6
 #define IPPROTO_UDP  17
+
+// Wire layout, exactly. Packed because the compiler must not pad it:
+// these bytes go on a network, not into a register. It lives in the
+// header rather than in net.c because eth.c, icmp.c and tcp.c all have
+// to read a header none of them built.
+struct ipv4_header {
+    uint8_t  version_ihl;      // 4 bits each
+    uint8_t  tos;
+    uint16_t total_length_n;
+    uint16_t id_n;
+    uint16_t flags_frag_n;
+    uint8_t  ttl;
+    uint8_t  protocol;
+    uint16_t checksum_n;
+    uint32_t src_n;
+    uint32_t dst_n;
+} __attribute__((packed));
+_Static_assert(sizeof(struct ipv4_header) == 20, "IPv4 header must be 20 bytes");
+
+#define IPV4_VERSION_IHL_20  0x45   // version 4, 5 32-bit words of header
+#define IPV4_DEFAULT_TTL     64
+#define IPV4_FLAG_DF_N       0x0040 // network order of 0x4000
+
+// The all-ones broadcast. A DHCP client has to be able to receive a
+// packet addressed to this before it has an address of its own.
+#define IP_BROADCAST_N 0xFFFFFFFFu
 
 // 127.0.0.1, in network order.
 #define IP_LOOPBACK_N 0x0100007Fu
@@ -79,6 +106,28 @@ struct netdev *net_device(void);
 // The loopback device. route.c installs 127.0.0.0/8 through it, and it
 // is file-static in net.c otherwise.
 struct netdev *net_loopback(void);
+
+// Gives an interface an address and installs its two routes: the local
+// subnet on link, and the default via `gw_n` (0 for no default). The
+// old routes through that device are removed first, so a changed
+// address cannot leave a route to the previous subnet behind.
+//
+// D2 calls this once with a provisional static address, because ARP
+// cannot be tested by a host that has no address to put in the sender
+// field. D4's DHCP client calls the same function with a real lease --
+// which is the point of it being a function rather than three lines in
+// the boot path.
+void net_ifconfig(struct netdev *dev, uint32_t addr_n, uint32_t mask_n,
+                  uint32_t gw_n);
+
+// Whether `ip_n` is an address THIS HOST HOLDS -- which is what bind()
+// actually asks, and is not the same question as "can I route there".
+//
+// While loopback was the only device those two questions had the same
+// answer, and socket_bind asked the routing one. The moment a default
+// route existed, bind(8.8.8.8) started succeeding: perfectly routable,
+// and not ours. Linux returns EADDRNOTAVAIL for exactly this.
+int net_is_local_addr(uint32_t ip_n);
 
 // The interface an address belongs to, or 0. With one loopback device
 // this answers only for 127.0.0.0/8 and INADDR_ANY.

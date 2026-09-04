@@ -4,6 +4,8 @@
 #include "net.h"
 #include "../sync/lock.h"
 #include "../sync/waitq.h"
+#include "net/arp.h"
+#include "drivers/char/timer.h"
 #include "../sched/proc.h"
 #include "../drivers/char/serial.h"
 
@@ -28,7 +30,21 @@ void netrx_init(void) {
     handler = 0;
 }
 
-void netrx_set_handler(netrx_handler fn) { handler = fn; }
+netrx_handler netrx_set_handler(netrx_handler fn) {
+    netrx_handler prev = handler;
+    handler = fn;
+    return prev;
+}
+
+uint64_t netrx_boot_window_open(void) {
+    uint64_t rflags;
+    __asm__ volatile ("pushfq; pop %0; sti" : "=r"(rflags) :: "memory");
+    return rflags;
+}
+
+void netrx_boot_window_close(uint64_t saved) {
+    if (!(saved & (1u << 9))) { __asm__ volatile ("cli"); }
+}
 
 void netrx_post(struct netdev *dev, const uint8_t *frame, uint32_t len) {
     if (len > NETRX_FRAME_MAX) { len = NETRX_FRAME_MAX; }
@@ -91,14 +107,27 @@ static void netrx_thread(void) {
                 // wait queue's own lock and only then releases this one,
                 // so a frame posted in between cannot wake an empty
                 // queue. It returns with the lock held again.
-                waitq_sleep(&rx_wait, &rx_lock);
+                //
+                // D2: while an ARP request is outstanding, sleep on a
+                // TIMEOUT instead. A retry that only fires when a frame
+                // happens to arrive is not a retry -- and the frame it
+                // is waiting for is the one that is not coming. The
+                // timeout is armed only while something is pending, so
+                // an idle machine still sleeps until the next frame.
+                if (arp_pending()) {
+                    waitq_sleep_timeout(&rx_wait, &rx_lock, timer_ticks() + 1);
+                } else {
+                    waitq_sleep(&rx_wait, &rx_lock);
+                }
             }
             spin_unlock_irqrestore(&rx_lock, f);
+            arp_tick();
             continue;
         }
 
         stat_delivered++;
         if (handler) { handler(dev, frame, len); }
+        arp_tick();
     }
 }
 

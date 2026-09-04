@@ -49,5 +49,14 @@
 #define EADDRNOTAVAIL 99
 #define EDESTADDRREQ 89
 #define ENOTSOCK 88
+// D2. Linux's values, as everything in this file is: an application
+// that compares errno against its own <errno.h> has to see the same
+// numbers NeoOS returns.
+#define EHOSTUNREACH 113
+#define EHOSTDOWN 112
+#define ENOPROTOOPT 92
+#define EINPROGRESS 115
+#define ECONNRESET 104
+#define ECONNABORTED 103
 
 #endif

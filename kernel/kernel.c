@@ -47,6 +47,8 @@
 #include "net/net.h"
 #include "net/socket.h"
 #include "net/netrx.h"
+#include "net/arp.h"
+#include "net/eth.h"
 #include "drivers/net/virtio_net.h"
 #include "lib/rand.h"
 
@@ -253,10 +255,19 @@ void kmain(void *multiboot_info) {
     socket_init();
     socket_selftest();
 
+    // D2. The ARP cache, before the driver: the driver's transmit hook
+    // IS eth_output_ipv4, so it must be usable the moment the device
+    // comes up.
+    arp_init();
+
     // D1. netrx BEFORE the driver: the device may raise its first
     // interrupt the instant DRIVER_OK is set, and that interrupt posts
     // into this queue.
     netrx_init();
+    // AFTER netrx_init, which zeroes the handler. Registering before it
+    // is silently undone, and the symptom is a stack that transmits
+    // perfectly and receives nothing.
+    netrx_set_handler(eth_input);
     if (virtio_net_init() == 0) {
         // PCI interrupts are level-triggered and active-low, always --
         // unlike the ISA lines above, which need the MADT's overrides to
@@ -270,6 +281,14 @@ void kmain(void *multiboot_info) {
         serial_write_string("[ioapic] virtio-net routed: gsi=");
         serial_write_hex64(virtio_net_irq_line());
         serial_write_string(" vector=0x22\n");
+
+        // A PROVISIONAL address, replaced by D4's DHCP lease. It is
+        // here rather than in D4 because ARP cannot work without one:
+        // a request whose sender protocol address is 0.0.0.0 is not
+        // something a peer is obliged to answer, and slirp does not.
+        // 10.0.2.15 is QEMU user-networking's well-known first lease.
+        net_ifconfig(net_device(), 0x0F02000Au, 0x00FFFFFFu, 0x0202000Au);
+        serial_write_string("[net] eth0 provisional 10.0.2.15/24 via 10.0.2.2\n");
     }
     // AFTER process_init: it starts a kernel thread. The queue would
     // simply fill and drop without one, which is why the driver may be
@@ -317,6 +336,7 @@ void kmain(void *multiboot_info) {
     // its own and closes it again. Everything above it -- the APs, the
     // scheduler, the netrx thread -- has to exist first.
     virtio_net_selftest();
+    arp_selftest();
 
     // Everything the banner reports is now known: framebuffer/console up,
     // pmm seeded, CPU probed, every AP online.

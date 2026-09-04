@@ -76,6 +76,28 @@
 // point of handing frames to a thread.
 #define LOCK_RANK_NETRX      13
 
+// Address resolution. Taken by whichever thread is transmitting (a
+// cache lookup, and the queuing of a packet behind a pending request)
+// and by the netrx thread (learning from a received packet). It never
+// sleeps, and it is NEVER held across a call into the driver:
+// virtio_net_transmit spins waiting for the device to hand the buffer
+// back, and spinning on a device with a lock held that the receive path
+// also wants is a deadlock with a stack trace that explains nothing.
+//
+// It sits ABOVE every object lock a sender might hold on its way down
+// (socket, and later TCP) and ABOVE NETRX -- which was not the first
+// guess. The reasoning that put it below NETRX was "it is taken from a
+// receive", which is the wrong axis: what decides a rank is what is
+// ALREADY HELD when the lock is taken. The netrx thread asks
+// arp_pending() while holding its own queue lock, to decide whether to
+// sleep on a timeout or until the next frame, so ARP is acquired
+// UNDER netrx and must rank above it. The rank checker found this on
+// the first boot, which is what it is for.
+//
+// Nothing is ever acquired while ARP is held: every path copies what it
+// needs out under the lock and transmits after dropping it.
+#define LOCK_RANK_ARP        14
+
 // The timed-sleep list. It was rank THREAD (2), which was fine while
 // waitq_sleep_timeout's only caller held no lock -- but any of the IPC
 // guards above hands itself to waitq_sleep_timeout as `release`, and
@@ -83,7 +105,7 @@
 // descending acquire and an instant panic. It belongs here, directly
 // under WAITQ, for the same reason WAITQ is where it is: it is taken on
 // the way into a sleep, under whatever guard the sleeper was holding.
-#define LOCK_RANK_TIMEOUT    14
+#define LOCK_RANK_TIMEOUT    15
 // Per-wait-queue. Above every lock legally held across waitq_sleep() (a
 // mutex passes its own guard in as `release`, carrying the mutex's
 // rank), and below RUNQUEUE, since the sleep path reaches schedule()
@@ -93,27 +115,41 @@
 // through, because poll_head_notify holds it across the wake -- and
 // above every object lock (pipe 10, socket 12, tty 8) so a driver can
 // notify with its own lock held.
-#define LOCK_RANK_POLLHEAD   15
-#define LOCK_RANK_WAITQ      16
-#define LOCK_RANK_RUNQUEUE   17
-#define LOCK_RANK_FDTABLE    18  // file descriptor table (per-bucket locks, after VFS)
-#define LOCK_RANK_HEAP       19
-#define LOCK_RANK_PMM        20
+#define LOCK_RANK_POLLHEAD   16
+#define LOCK_RANK_WAITQ      17
+#define LOCK_RANK_RUNQUEUE   18
+#define LOCK_RANK_FDTABLE    19  // file descriptor table (per-bucket locks, after VFS)
+#define LOCK_RANK_HEAP       20
+#define LOCK_RANK_PMM        21
 // The signal-queue pool: a leaf allocator taken while a process's
 // p->lock (rank 1, LOCK_RANK_PROCESS) is held, and holding nothing
 // itself. It sits innermost rather than beside LOCK_RANK_PROCESS
 // because equal ranks are an inversion -- acquisition must be strictly
 // ascending.
-#define LOCK_RANK_SIGQUEUE   21
+#define LOCK_RANK_SIGQUEUE   22
 // TLB shootdown bookkeeping: the deferred-free queue is filled from
 // paging_unmap_from, which runs UNDER a process's mm_lock (rank 3), so
 // it must rank strictly below it. It is a leaf -- tlb_flush_deferred
 // releases it before calling pmm_free.
-#define LOCK_RANK_TLB        22
+#define LOCK_RANK_TLB        23
 // Input subsystem: key event fan-out and grab. Taken from the keyboard
 // IRQ (so it must be a leaf-ish rank), but held only during ring-buffer
 // append -- never across tty_input_char or waitq_wake calls.
-#define LOCK_RANK_INPUT     23
+#define LOCK_RANK_INPUT     24
+// The NIC's transmit path. There is ONE shared bounce buffer and one
+// TX queue, and virtio_net_transmit spins waiting for the device to
+// hand the buffer back -- so two concurrent transmits scribble on each
+// other's frame and then race for each other's completion, and the
+// loser spins ten million times before reporting a timeout it did not
+// cause.
+//
+// D1 never noticed, because D1 transmitted from exactly one place. D2
+// transmits from two: the netrx thread answering an ARP request, and
+// whatever thread is sending. It is a LEAF -- taken with nothing held,
+// since every ARP path drops its own lock before transmitting -- and it
+// is held across the device wait, which is precisely why nothing may be
+// acquired underneath it.
+#define LOCK_RANK_VIRTIO_TX 25
 // The kernel virtual terminals: vt_active, each VT's diff cache
 // (vc->shown / shown_valid) and kd_mode. Sits ABOVE TTY because the
 // write path is tty_obj_write -> t->lock -> vt_backend_output ->

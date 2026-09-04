@@ -24,7 +24,9 @@
 #include "../../mm/paging.h"
 #include "../../net/net.h"
 #include "../../net/netrx.h"
+#include "../../net/eth.h"
 #include "errno.h"
+#include "../../sync/lock.h"
 
 #define RX_BUFFERS   32
 #define RX_BUF_SIZE  2048           // header + a full frame, rounded up
@@ -33,6 +35,7 @@
 static struct virtio_device vdev;
 static struct virtqueue rxq, txq;
 static struct netdev    nic;
+static struct spinlock  tx_lock;   // LOCK_RANK_VIRTIO_TX
 
 static uint64_t rx_pool_phys;
 static unsigned rx_pool_order;
@@ -70,14 +73,6 @@ static int rx_give(uint64_t buf_phys) {
     if (d < 0) { return -1; }
     rx_desc_buf[d] = buf_phys;
     return d;
-}
-
-// A netdev transmit hook that refuses. D1 has no link layer, so there
-// is no IP-to-frame path yet; net_ipv4_output must not silently send
-// an unframed IP packet onto a real wire.
-static int nic_transmit_ip(struct netdev *dev, const uint8_t *pkt, uint32_t len) {
-    (void)dev; (void)pkt; (void)len;
-    return -ENETUNREACH;   // D2 gives this an Ethernet header and an ARP lookup
 }
 
 static int nic_transmit_frame(struct netdev *dev, const uint8_t *frame, uint32_t len) {
@@ -154,10 +149,15 @@ int virtio_net_init(void) {
     nic.ip_n  = 0;                  // D2 configures an address
     nic.type  = NETDEV_ETHERNET;
     for (int i = 0; i < ETH_ALEN; i++) { nic.hwaddr[i] = mac[i]; }
-    nic.transmit = nic_transmit_ip;
+    // D2: eth_output_ipv4 resolves the next hop and frames the
+    // packet. Until it existed this hook returned -ENETUNREACH,
+    // because sending an unframed IP packet onto a real wire is
+    // worse than refusing to send it.
+    nic.transmit = eth_output_ipv4;
     nic.transmit_frame = nic_transmit_frame;
     net_register(&nic);
 
+    spin_init(&tx_lock, LOCK_RANK_VIRTIO_TX, "virtio-tx");
     present = 1;
     log_mac();
     serial_write_string("[virtio-net] ready\n");
@@ -167,6 +167,12 @@ int virtio_net_init(void) {
 int virtio_net_transmit(const uint8_t *frame, uint32_t len) {
     if (!present) { return -ENETDOWN; }
     if (len > ETH_FRAME_MAX) { return -EMSGSIZE; }
+
+    // ONE bounce buffer, ONE queue, and a spin for the completion:
+    // every part of that is unsafe against a second caller, and D2 made
+    // a second caller permanent. The netrx thread answers ARP requests
+    // while any other thread may be sending.
+    uint64_t txf = spin_lock_irqsave(&tx_lock);
 
     uint8_t *buf = (uint8_t *)phys_to_virt(tx_buf_phys);
 
@@ -179,7 +185,7 @@ int virtio_net_transmit(const uint8_t *frame, uint32_t len) {
     for (uint32_t i = 0; i < len; i++) { buf[VIRTIO_NET_HDR_LEN + i] = frame[i]; }
 
     int d = virtio_queue_add(&txq, tx_buf_phys, VIRTIO_NET_HDR_LEN + len, 0);
-    if (d < 0) { return -ENOBUFS; }
+    if (d < 0) { spin_unlock_irqrestore(&tx_lock, txf); return -ENOBUFS; }
     virtio_queue_notify(&vdev, &txq);
 
     // Synchronous: wait for the device to hand the buffer back before
@@ -194,6 +200,7 @@ int virtio_net_transmit(const uint8_t *frame, uint32_t len) {
             virtio_queue_free(&txq, (uint16_t)done);
             stat_tx++;
             nic.tx_packets++;
+            spin_unlock_irqrestore(&tx_lock, txf);
             return 0;
         }
         __asm__ volatile ("pause");
@@ -204,6 +211,7 @@ int virtio_net_transmit(const uint8_t *frame, uint32_t len) {
     // that buffer as far as anyone here knows, and handing it back to
     // the free list would let the next transmit scribble on memory a
     // late device is still reading.
+    spin_unlock_irqrestore(&tx_lock, txf);
     serial_write_string("[virtio-net] transmit timed out waiting for completion\n");
     return -EIO;
 }
@@ -320,39 +328,28 @@ void virtio_net_selftest(void) {
     }
 
     arp_reply_seen = 0;
-    netrx_set_handler(selftest_rx);
+    netrx_handler prev_handler = netrx_set_handler(selftest_rx);
 
     uint8_t frame[ARP_FRAME_LEN];
     build_arp_request(frame);
 
-    // TWO THINGS ARE MISSING FROM BOOT HERE, and both are why this wait
-    // looks the way it does.
-    //
-    // Interrupts are off for the whole of boot -- the kernel does not
-    // sti until after init is spawned -- and this is the one selftest
-    // that cannot work without them, because the reply arrives in the
-    // NIC's interrupt. So the window is opened here and closed again,
-    // leaving boot exactly as it found it.
-    //
-    // And kmain IS NOT A THREAD: the BSP's c->current is still 0 here,
-    // which is why timer_handler refuses to preempt it (see the comment
-    // there). So this CANNOT call schedule() -- doing so switches away
-    // from a bootstrap stack there is nothing to save into, and the
-    // machine runs on forever having quietly abandoned its own boot.
-    // hlt parks until the next interrupt instead, and it is ANOTHER CPU
-    // that picks up the netrx thread and delivers the frame. That is
-    // also why netrx_start() runs before the APs come up.
-    uint64_t rflags;
-    __asm__ volatile ("pushfq; pop %0; sti" : "=r"(rflags) :: "memory");
+    // The interrupt window and the hlt-not-schedule rule are explained
+    // once, in netrx.h. D2 moved them there because arp, icmp, dhcp and
+    // tcp all need the same dance and each got it wrong differently.
+    uint64_t rflags = netrx_boot_window_open();
 
     int rc = virtio_net_transmit(frame, ARP_FRAME_LEN);
 
     // Bounded by the 100 Hz timer at worst, so ~2 seconds.
     for (int i = 0; rc == 0 && i < 200 && !arp_reply_seen; i++) {
-        __asm__ volatile ("hlt");
+        netrx_boot_park();
     }
 
-    if (!(rflags & (1u << 9))) { __asm__ volatile ("cli"); }
+    netrx_boot_window_close(rflags);
+    // Put the real handler back. Leaving selftest_rx installed sent
+    // every subsequent frame to a counter, which is invisible until the
+    // next milestone's suite times out for no stated reason.
+    netrx_set_handler(prev_handler);
 
     if (rc != 0) {
         serial_write_string("[virtio-net] FAILED: could not transmit the ARP request\n");

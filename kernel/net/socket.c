@@ -342,7 +342,10 @@ int64_t socket_bind(int fd, const struct k_sockaddr *addr, uint32_t len) {
     // "whatever the packet came in on", which with one interface is
     // still just loopback, but is kept distinct because the demux rule
     // above depends on the difference.
-    if (ip_n != 0 && !net_route(ip_n)) { sock_put(s); return -EADDRNOTAVAIL; }
+    // NOT net_route: an address being reachable does not make it ours.
+    // See net_is_local_addr -- once a default route existed,
+    // bind(8.8.8.8) started succeeding.
+    if (!net_is_local_addr(ip_n)) { sock_put(s); return -EADDRNOTAVAIL; }
 
     uint64_t tf = spin_lock_irqsave(&sock_table_lock);
     if (s->bound) {
