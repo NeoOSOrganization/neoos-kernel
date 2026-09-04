@@ -163,6 +163,12 @@
 // is held across the device wait, which is precisely why nothing may be
 // acquired underneath it.
 #define LOCK_RANK_VIRTIO_TX 26
+// The loopback deferred-delivery queue. A LEAF in the strict sense: it
+// is held ONLY across a copy into or out of the queue, never across
+// net_ipv4_input, and every caller reaches it holding nothing -- the
+// transmit paths all release their own locks first. So it sits at the
+// top, where a lock taken from anywhere and holding nothing belongs.
+#define LOCK_RANK_LOOPBACK  27
 // The kernel virtual terminals: vt_active, each VT's diff cache
 // (vc->shown / shown_valid) and kd_mode. Sits ABOVE TTY because the
 // write path is tty_obj_write -> t->lock -> vt_backend_output ->

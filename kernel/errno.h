@@ -58,5 +58,7 @@
 #define EINPROGRESS 115
 #define ECONNRESET 104
 #define ECONNABORTED 103
+#define EOPNOTSUPP 95
+#define EALREADY 114
 
 #endif

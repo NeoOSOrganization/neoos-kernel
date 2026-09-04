@@ -238,6 +238,13 @@ struct thread {
     // fully covered by poll heads are skipped by it.
     volatile int  poll_wants_broadcast;
     uint64_t      sleep_deadline;   // 0 = none; else a timer_ticks() value
+    // How deep THIS THREAD is inside a loopback delivery. It belongs to
+    // the thread rather than the CPU because it describes a CALL CHAIN:
+    // a per-CPU counter is incremented on one CPU and, if the thread is
+    // preempted and migrates, decremented on another -- leaving one CPU
+    // permanently deep and the other underflowed into never limiting
+    // anything at all. See loopback_transmit in net.c.
+    int           net_loop_depth;
     struct thread *timeout_next;    // list of threads with a deadline
 
     sigset_t_k    blocked;

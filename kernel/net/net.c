@@ -16,6 +16,9 @@
 #include "drivers/char/serial.h"
 #include "errno.h"
 #include "mm/heap.h"
+#include "arch/cpu_local.h"
+#include "sched/proc.h"
+#include "sync/lock.h"
 
 // ---------------------------------------------------------------- checksum
 
@@ -76,13 +79,115 @@ _Static_assert(sizeof(struct udp_header)  == 8,  "UDP header must be 8 bytes");
 static struct netdev loopback;
 static uint16_t ip_next_id;   // only ever incremented; wrapping is fine
 
+// How deep the send/receive cycle may nest before delivery is deferred.
+//
+// Loopback delivers in the sender's context, so send and receive are
+// one call chain. UDP nests twice and nobody noticed. TCP nests
+// UNBOUNDEDLY: A sends, B acknowledges, A receives the ACK and sends
+// more, and each turn costs several kilobytes of segment buffers. A
+// 256 KiB transfer recursed about a hundred and seventy deep, ran off
+// the kernel stack, and faulted in resolve_walk -- a function with no
+// connection to any of this.
+//
+// Four is chosen to keep the ordinary cases inline. A UDP round trip
+// nests twice, and the boot selftests assert on delivery having already
+// happened by the time net_udp_output returns, so making loopback
+// asynchronous outright is not available: there is no scheduler yet
+// when some of them run.
+#define LOOPBACK_MAX_DEPTH 4
+#define LOOPBACK_DEFER_MAX 64
+
+// The deferred queue. Packets that arrived at the depth limit wait here
+// and are delivered by the OUTERMOST frame as it unwinds -- so they are
+// still delivered before the original send returns, and the synchronous
+// contract the selftests rely on survives. Only the stack depth changes.
+// A RING, not a shifting array: shifting 9 KiB structs compiles to a
+// memcpy the freestanding kernel does not link against, and copying
+// them was pointless anyway.
+//
+// 2 KiB a slot. Only TCP ever nests deep enough to reach here and its
+// segments are at most 1500 bytes; the 8 KiB datagrams MPI sends over
+// loopback nest twice and are delivered inline. A packet too large to
+// defer is dropped, which loopback is allowed to do.
+#define LOOPBACK_DEFER_SLOT 2048
+static struct {
+    struct netdev *dev;
+    uint32_t       len;
+    uint8_t        data[LOOPBACK_DEFER_SLOT];
+} loop_defer[LOOPBACK_DEFER_MAX];
+static int             loop_head, loop_tail, loop_count;
+static struct spinlock loop_lock;
+static uint64_t        stat_loop_deferred, stat_loop_dropped;
+
+// The counter this thread's recursion is measured with. A thread's own,
+// because the depth describes a call chain and a call chain belongs to
+// a thread: a per-CPU counter is incremented on one CPU and, when the
+// thread is preempted mid-delivery and migrates, decremented on
+// another. One CPU is then permanently "deep" and the other underflows
+// into never limiting anything -- which is the unbounded recursion the
+// limit exists to stop, reintroduced by the fix for it.
+//
+// kmain has no thread (c->current is 0 during boot), and cannot be
+// preempted either, so it falls back to the CPU's own counter.
+static int *loop_depth_slot(void) {
+    struct thread *t = current_thread();
+    return t ? &t->net_loop_depth : &this_cpu()->loop_depth;
+}
+
 static int loopback_transmit(struct netdev *dev, const uint8_t *pkt, uint32_t len) {
     dev->tx_packets++;
-    // Straight back up. No copy: net_ipv4_input does not retain the
-    // buffer, and the socket layer copies the payload into its own
-    // datagram before returning.
+
+    int *depth = loop_depth_slot();
+    if (*depth >= LOOPBACK_MAX_DEPTH) {
+        uint64_t f = spin_lock_irqsave(&loop_lock);
+        if (loop_count < LOOPBACK_DEFER_MAX && len <= LOOPBACK_DEFER_SLOT) {
+            loop_defer[loop_tail].dev = dev;
+            loop_defer[loop_tail].len = len;
+            for (uint32_t i = 0; i < len; i++) { loop_defer[loop_tail].data[i] = pkt[i]; }
+            loop_tail = (loop_tail + 1) % LOOPBACK_DEFER_MAX;
+            loop_count++;
+            stat_loop_deferred++;
+        } else {
+            // A full queue drops, and that is correct rather than
+            // merely convenient: loopback is a network, TCP
+            // retransmits, and UDP is allowed to lose a datagram.
+            stat_loop_dropped++;
+        }
+        spin_unlock_irqrestore(&loop_lock, f);
+        return 0;
+    }
+
+    (*depth)++;
     net_ipv4_input(dev, pkt, len);
+
+    // The OUTERMOST frame drains whatever nested below it, one at a
+    // time and each at depth 1 again -- so everything is still
+    // delivered before the original send returns, and the synchronous
+    // contract the boot selftests rely on survives. Only the stack
+    // depth changes.
+    if (*depth == 1) {
+        for (;;) {
+            uint8_t  buf[LOOPBACK_DEFER_SLOT];
+            struct netdev *d;
+            uint32_t n;
+            uint64_t f = spin_lock_irqsave(&loop_lock);
+            if (loop_count == 0) { spin_unlock_irqrestore(&loop_lock, f); break; }
+            d = loop_defer[loop_head].dev;
+            n = loop_defer[loop_head].len;
+            for (uint32_t i = 0; i < n; i++) { buf[i] = loop_defer[loop_head].data[i]; }
+            loop_head = (loop_head + 1) % LOOPBACK_DEFER_MAX;
+            loop_count--;
+            spin_unlock_irqrestore(&loop_lock, f);
+            net_ipv4_input(d, buf, n);
+        }
+    }
+    (*depth)--;
     return 0;
+}
+
+void net_loopback_stats(uint64_t *deferred, uint64_t *dropped) {
+    if (deferred) { *deferred = stat_loop_deferred; }
+    if (dropped)  { *dropped  = stat_loop_dropped; }
 }
 
 // Exactly one, for now. A second real interface needs a routing table,
@@ -368,6 +473,7 @@ void net_init(void) {
     loopback.mtu      = NET_MTU_LOOPBACK;
     loopback.ip_n     = IP_LOOPBACK_N;
     loopback.type     = NETDEV_LOOPBACK;   // no medium, so no framing and no MAC
+    spin_init(&loop_lock, LOCK_RANK_LOOPBACK, "loopback");
     loopback.transmit = loopback_transmit;
     route_init();
     serial_write_string("[net] loopback up, 127.0.0.1\n");

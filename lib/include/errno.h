@@ -50,4 +50,15 @@
 #define EDESTADDRREQ 89
 #define ENOTSOCK 88
 
+
+// D5. Linux's values, as everything in this file is.
+#define ENOPROTOOPT 92
+#define EOPNOTSUPP 95
+#define ECONNABORTED 103
+#define ECONNRESET 104
+#define ETIMEDOUT 110
+#define EHOSTUNREACH 113
+#define EALREADY 114
+#define EINPROGRESS 115
+
 #endif

@@ -92,6 +92,10 @@ struct netdev {
     uint64_t    tx_packets, rx_packets, rx_dropped;
 };
 
+// Loopback delivery deferred (and dropped) because the send/receive
+// cycle nested too deep. See loopback_transmit.
+void net_loopback_stats(uint64_t *deferred, uint64_t *dropped);
+
 void net_init(void);
 void net_selftest(void);
 

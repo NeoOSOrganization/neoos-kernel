@@ -51,6 +51,22 @@ struct cpu {
     // Ticks left in the running thread's time slice. Per-CPU because it
     // is a property of what THIS CPU is running; see timer_handler.
     uint32_t          timeslice_remaining;
+    // The loopback depth for code with no thread -- kmain during boot,
+    // where c->current is still 0. Preemption cannot move that, so a
+    // per-CPU counter is right there and wrong everywhere else; see
+    // struct thread's net_loop_depth.
+    //
+    // Loopback hands a packet straight back up in the sender's context,
+    // so send and receive are one call chain. For UDP that chain is two
+    // frames deep and nobody noticed. For TCP it is a CYCLE: A sends, B
+    // receives and acknowledges, A receives the ACK and sends more --
+    // and each turn adds several kilobytes of stack for the segment
+    // buffers. A 256 KiB transfer recurses about a hundred and seventy
+    // times, runs off the kernel stack, and faults somewhere entirely
+    // unrelated. It faulted in resolve_walk.
+    //
+    // net.c reads this to decide whether to deliver inline or defer.
+    int               loop_depth;
     // Local timer interrupts taken. Only the selftest reads it, and it
     // is the one direct evidence that this CPU is actually being
     // preempted rather than merely looking busy.

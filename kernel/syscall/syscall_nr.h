@@ -164,7 +164,16 @@
 // anything.
 #define SYS_GETRANDOM       82
 
+// D5. TCP's socket surface. Linux gives each its own number on x86-64
+// and so does NeoOS; the shim maps musl's numbers onto these.
+#define SYS_LISTEN          83
+#define SYS_ACCEPT4         84
+#define SYS_SHUTDOWN        85
+#define SYS_GETPEERNAME     86
+#define SYS_SETSOCKOPT      87
+#define SYS_GETSOCKOPT      88
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX             83
+#define SYS_MAX             89
 
 #endif

@@ -578,11 +578,16 @@ static void tcp_segment(struct tcb *t, const struct ipv4_header *ip,
     uint8_t  fl  = h->flags;
 
     if (fl & TCP_RST) {
-        // A RST tears the connection down. Everything blocked on it
-        // wakes with ECONNRESET, which is the whole point of the
-        // so_error field.
+        // A RST tears the connection down. WHICH error it becomes
+        // depends on whether the connection was ever established: a RST
+        // answering our SYN means the port is closed, and Linux reports
+        // that as ECONNREFUSED. Reporting ECONNRESET there tells a
+        // program its connection was broken when in fact it never had
+        // one, and every retry loop written against Linux gets it wrong.
         t->reset = 1;
-        enter_closed(t, ECONNRESET);
+        int err = (t->state == TCP_SYN_SENT || t->state == TCP_SYN_RECEIVED)
+                ? ECONNREFUSED : ECONNRESET;
+        enter_closed(t, err);
         return;
     }
 

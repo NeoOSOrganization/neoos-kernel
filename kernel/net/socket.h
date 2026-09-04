@@ -10,6 +10,24 @@
 #define SOCK_STREAM 1
 #define SOCK_DGRAM  2
 
+// accept4/socket flags, and shutdown's `how`. Linux's values.
+#define SOCK_NONBLOCK 04000
+#define SOCK_CLOEXEC  02000000
+#define SHUT_RD   0
+#define SHUT_WR   1
+#define SHUT_RDWR 2
+
+// Socket option levels and names. Linux's values, because a program
+// compiled against its own <sys/socket.h> passes these as integers and
+// no shim can retrofit a number.
+#define SOL_SOCKET   1
+#define SO_REUSEADDR 2
+#define SO_TYPE      3
+#define SO_ERROR     4
+#define SO_SNDBUF    7
+#define SO_RCVBUF    8
+#define TCP_NODELAY  1
+
 #define INADDR_ANY       0x00000000u
 #define INADDR_LOOPBACK  0x7F000001u   // host order; 127.0.0.1
 
@@ -45,6 +63,12 @@ int64_t socket_sendto(int fd, const void *buf, uint64_t len, int flags,
                       const struct k_sockaddr *dest, uint32_t dest_len);
 int64_t socket_recvfrom(int fd, void *buf, uint64_t len, int flags,
                         struct k_sockaddr *src, uint32_t *src_len);
+int64_t socket_listen(int fd, int backlog);
+int64_t socket_accept4(int fd, struct k_sockaddr *addr, uint32_t *len, int flags);
+int64_t socket_shutdown(int fd, int how);
+int64_t socket_getpeername(int fd, struct k_sockaddr *addr, uint32_t *len);
+int64_t socket_setsockopt(int fd, int level, int opt, const void *val, uint32_t len);
+int64_t socket_getsockopt(int fd, int level, int opt, void *val, uint32_t *len);
 
 const struct file_ops *socket_file_ops(void);
 

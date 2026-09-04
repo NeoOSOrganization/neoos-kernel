@@ -61,13 +61,16 @@ static int check_byte_order(void) {
 }
 
 static int check_socket_errors(void) {
-    // Only AF_INET/SOCK_DGRAM exists, and the refusals must be the
-    // right ones -- a program probing for TCP support needs to be told
-    // "no protocol", not "no address family".
-    if (socket(AF_INET, SOCK_STREAM, 0) != -EPROTONOSUPPORT) {
-        printf("[nettest] FAILED: SOCK_STREAM was not refused with EPROTONOSUPPORT\n");
+    // SOCK_STREAM used to be refused here with EPROTONOSUPPORT. D5
+    // implemented it, so the assertion is inverted rather than deleted:
+    // a stream socket must now be creatable, and tcptest exercises what
+    // it does. AF_INET is still the only family.
+    int sfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sfd < 0) {
+        printf("[nettest] FAILED: SOCK_STREAM was refused (%d)\n", sfd);
         return 0;
     }
+    close(sfd);
     if (socket(17, SOCK_DGRAM, 0) != -EAFNOSUPPORT) {
         printf("[nettest] FAILED: an unknown family was not refused\n");
         return 0;

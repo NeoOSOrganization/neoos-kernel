@@ -10,6 +10,12 @@
 #define SYS_SENDTO      48
 #define SYS_RECVFROM    49
 #define SYS_GETSOCKNAME 50
+#define SYS_LISTEN      83
+#define SYS_ACCEPT4     84
+#define SYS_SHUTDOWN    85
+#define SYS_GETPEERNAME 86
+#define SYS_SETSOCKOPT  87
+#define SYS_GETSOCKOPT  88
 
 extern long __neoos_syscall3(long n, long a, long b, long c);
 extern long __neoos_syscall6(long n, long a, long b, long c, long d, long e, long f);
@@ -29,6 +35,38 @@ int connect(int fd, const struct sockaddr *addr, socklen_t len) {
 int getsockname(int fd, struct sockaddr *addr, socklen_t *len) {
     return (int)__neoos_syscall3(SYS_GETSOCKNAME, fd,
                                  (long)(uintptr_t)addr, (long)(uintptr_t)len);
+}
+
+int listen(int fd, int backlog) {
+    return (int)__neoos_syscall3(SYS_LISTEN, fd, backlog, 0);
+}
+
+int accept4(int fd, struct sockaddr *addr, socklen_t *len, int flags) {
+    return (int)__neoos_syscall6(SYS_ACCEPT4, fd, (long)(uintptr_t)addr,
+                                 (long)(uintptr_t)len, flags, 0, 0);
+}
+
+int accept(int fd, struct sockaddr *addr, socklen_t *len) {
+    return accept4(fd, addr, len, 0);
+}
+
+int shutdown(int fd, int how) {
+    return (int)__neoos_syscall3(SYS_SHUTDOWN, fd, how, 0);
+}
+
+int getpeername(int fd, struct sockaddr *addr, socklen_t *len) {
+    return (int)__neoos_syscall3(SYS_GETPEERNAME, fd,
+                                 (long)(uintptr_t)addr, (long)(uintptr_t)len);
+}
+
+int setsockopt(int fd, int level, int opt, const void *val, socklen_t len) {
+    return (int)__neoos_syscall6(SYS_SETSOCKOPT, fd, level, opt,
+                                 (long)(uintptr_t)val, len, 0);
+}
+
+int getsockopt(int fd, int level, int opt, void *val, socklen_t *len) {
+    return (int)__neoos_syscall6(SYS_GETSOCKOPT, fd, level, opt,
+                                 (long)(uintptr_t)val, (long)(uintptr_t)len, 0);
 }
 
 int64_t sendto(int fd, const void *buf, uint64_t len, int flags,

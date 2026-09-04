@@ -37,6 +37,39 @@ int64_t sys_connect(struct syscall_args *a) {
                           (uint32_t)a->a3);
 }
 
+int64_t sys_listen(struct syscall_args *a) {
+    return socket_listen((int)a->a1, (int)a->a2);
+}
+
+// accept(fd, addr, len) is accept4 with no flags, which is how Linux
+// implements it too -- so only the four-argument form exists here and
+// the shim passes 0.
+int64_t sys_accept4(struct syscall_args *a) {
+    return socket_accept4((int)a->a1, (struct k_sockaddr *)(uintptr_t)a->a2,
+                          (uint32_t *)(uintptr_t)a->a3, (int)a->a4);
+}
+
+int64_t sys_shutdown(struct syscall_args *a) {
+    return socket_shutdown((int)a->a1, (int)a->a2);
+}
+
+int64_t sys_getpeername(struct syscall_args *a) {
+    return socket_getpeername((int)a->a1, (struct k_sockaddr *)(uintptr_t)a->a2,
+                              (uint32_t *)(uintptr_t)a->a3);
+}
+
+int64_t sys_setsockopt(struct syscall_args *a) {
+    return socket_setsockopt((int)a->a1, (int)a->a2, (int)a->a3,
+                             (const void *)(uintptr_t)a->a4,
+                             (uint32_t)a->frame->r8);
+}
+
+int64_t sys_getsockopt(struct syscall_args *a) {
+    return socket_getsockopt((int)a->a1, (int)a->a2, (int)a->a3,
+                             (void *)(uintptr_t)a->a4,
+                             (uint32_t *)(uintptr_t)a->frame->r8);
+}
+
 int64_t sys_getsockname(struct syscall_args *a) {
     return socket_getsockname((int)a->a1, (struct k_sockaddr *)(uintptr_t)a->a2,
                               (uint32_t *)(uintptr_t)a->a3);
