@@ -164,15 +164,28 @@ static int vesafb_set_mode(const struct fb_mode *m) {
             m->bpp == cur.bpp) ? 0 : -EINVAL;
 }
 
-static void vesafb_flush_rect(int x, int y, int w, int h) {
-    (void)x; (void)y; (void)w; (void)h;      // linear framebuffer: scanout is live
+static void vesafb_blit(const void *src, uint32_t src_pitch,
+                         int dst_x, int dst_y, int w, int h) {
+    if (!fb.present) { return; }
+    const uint8_t *s = (const uint8_t *)src;
+    volatile uint8_t *d = fb.virt + (uint64_t)dst_y * fb.pitch + (uint64_t)dst_x * 4;
+    // vesafb's native format is already canonical XRGB8888 (see the
+    // channel-sanitizing comment in vesafb_parse), so this is a
+    // straight per-row copy -- no conversion needed. A future driver
+    // whose native format genuinely differs would convert here,
+    // isolated to its own blit implementation.
+    for (int row = 0; row < h; row++) {
+        for (int col = 0; col < w * 4; col++) { d[col] = s[col]; }
+        s += src_pitch;
+        d += fb.pitch;
+    }
 }
 
 struct fb_device vesafb_drv = {
     .name = "vesafb", .priority = 100,
     .probe = vesafb_probe, .current = vesafb_current,
     .modes = vesafb_modes, .set_mode = vesafb_set_mode,
-    .flush_rect = vesafb_flush_rect, .cursor = 0,
+    .blit = vesafb_blit, .cursor = 0,
 };
 
 // ---------------------------------------------------------------- /dev/fb0

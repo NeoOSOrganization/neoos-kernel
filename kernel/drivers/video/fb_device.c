@@ -48,6 +48,10 @@ void fb_device_selftest(void) {
         serial_write_string("[fbdev] selftest FAILED: bad current() mode\n");
         return;
     }
-    if (active->flush_rect) { active->flush_rect(0, 0, 1, 1); }
+    // A 1x1 black-pixel blit at the origin -- proves the driver's
+    // blit path itself works, not just that the function pointer is
+    // non-NULL.
+    uint32_t px = 0;
+    if (active->blit) { active->blit(&px, 4, 0, 0, 1, 1); }
     serial_write_string("[fbdev] selftest passed\n");
 }

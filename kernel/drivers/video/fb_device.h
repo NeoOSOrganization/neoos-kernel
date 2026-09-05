@@ -24,7 +24,16 @@ struct fb_device {
     void (*current)(struct fb_mode *m, uint64_t *phys, uint64_t *size);
     int  (*modes)(struct fb_mode *out, int max);
     int  (*set_mode)(const struct fb_mode *m);
-    void (*flush_rect)(int x, int y, int w, int h);   // may be NULL
+    // Blits a rectangle from `src` (always canonical 32bpp XRGB8888 --
+    // byte order 0x00RRGGBB per pixel, regardless of the driver's
+    // actual hardware format) into the framebuffer at (dst_x, dst_y),
+    // width w, height h. src_pitch is the SOURCE buffer's stride in
+    // bytes (may differ from w*4 if the caller is blitting a sub-rect
+    // of a larger off-screen buffer). May assume the destination rect
+    // is fully within the current mode's bounds -- callers clip, not
+    // drivers. May be NULL (a text-only/no-framebuffer boot).
+    void (*blit)(const void *src, uint32_t src_pitch,
+                 int dst_x, int dst_y, int w, int h);
     int  (*cursor)(int x, int y, int visible);        // may be NULL
 };
 
