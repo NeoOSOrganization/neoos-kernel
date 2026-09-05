@@ -12,6 +12,7 @@
 #include "drivers/net/virtio_net.h"
 #include "drivers/audio/ac97.h"
 #include "mm/paging.h"
+#include "mm/uaccess.h"
 #include "mm/vma.h"
 #include "sched/proc.h"
 #include "ipc/signal.h"
@@ -132,6 +133,40 @@ static void isr_handler_inner(struct registers *regs) {
             struct process *p = current_proc();
             if (p && p->pml4_phys &&
                 vma_fault(p, cr2, (regs->error_code & 2) != 0)) {
+                return;
+            }
+        }
+    }
+
+    if (regs->vector_number == 14) {
+        // A ring-0 fault while copying to/from a user buffer on the
+        // CURRENT process's behalf (copy_to_user/copy_from_user,
+        // kernel/mm/uaccess.c) -- reachable ONLY at an instruction this
+        // kernel itself marked recoverable via EX_TABLE_ENTRY. Any
+        // OTHER ring-0 fault, at any other address, still falls through
+        // to exception_dump_and_halt below unchanged: this is a narrow,
+        // explicit opt-in, not a blanket "ring-0 faults in low memory
+        // are fine" rule -- see
+        // docs/superpowers/specs/2026-09-06-fault-tolerant-user-copy-design.md
+        // section 2 for why the narrower rule is the safe one.
+        if ((regs->cs & 3) != 3) {
+            struct exception_entry *found = 0;
+            for (struct exception_entry *e = __ex_table_start; e < __ex_table_end; e++) {
+                if (e->fault_addr == regs->rip) { found = e; break; }
+            }
+            if (found) {
+                uint64_t cr2;
+                __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+                struct process *p = current_proc();
+                if (p && p->pml4_phys &&
+                    vma_fault(p, cr2, (regs->error_code & 2) != 0)) {
+                    return;   // page installed; IRET retries the same instruction
+                }
+                // Genuinely invalid address: resume at the fixup instead
+                // of the faulting instruction. The fixup landing pad
+                // (part of copy_to_user/copy_from_user's own asm) reports
+                // the partial byte count back to its C caller normally.
+                regs->rip = found->fixup_addr;
                 return;
             }
         }
