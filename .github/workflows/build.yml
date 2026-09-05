@@ -21,14 +21,17 @@ jobs:
           (cd ../neoos-libneoos && make)
       - name: checkout and build neoos-musl
         run: |
+          KERNEL_ABS="$(pwd)"
           git clone --depth 1 --recurse-submodules https://github.com/NeoOSOrganization/neoos-musl ../neoos-musl
           export PATH="$HOME/opt/cross-x86_64-elf/bin:$PATH"
-          (cd ../neoos-musl && make KERNEL_SHIM_DIR=$(pwd)/third_party/shim)
+          (cd ../neoos-musl && make KERNEL_SHIM_DIR="$KERNEL_ABS/third_party/shim")
       - name: checkout and build neoos-kernel-tests-common
         run: |
+          LIBNEOOS_ABS="$(cd ../neoos-libneoos && pwd)"
+          MUSL_ABS="$(cd ../neoos-musl && pwd)"
           git clone --depth 1 https://github.com/NeoOSOrganization/neoos-kernel-tests-common ../neoos-kernel-tests-common
           export PATH="$HOME/opt/cross-x86_64-elf/bin:$PATH"
-          (cd ../neoos-kernel-tests-common && make LIBNEOOS_DIR=$(pwd)/../neoos-libneoos/build-output MUSL_DIR=$(pwd)/../neoos-musl/build-output)
+          (cd ../neoos-kernel-tests-common && make LIBNEOOS_DIR="$LIBNEOOS_ABS/build-output" MUSL_DIR="$MUSL_ABS/build-output")
       - name: make test (full coverage, EMBED_DIRS = the regression suite)
         run: |
           export PATH="$HOME/opt/cross-x86_64-elf/bin:$PATH"
