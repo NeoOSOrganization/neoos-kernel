@@ -36,7 +36,8 @@ jobs:
               EMBED_DIRS=../neoos-kernel-tests-common/build test
       - name: fail loudly on a gauntlet regression
         if: always()
-        run: grep -q "PASS: no FAILED lines" build/serial.log
+        run: |
+          grep -q "PASS: no FAILED lines" build/serial.log
       - name: upload serial log on failure
         if: failure()
         uses: actions/upload-artifact@v4
