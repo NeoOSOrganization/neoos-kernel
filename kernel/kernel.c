@@ -24,6 +24,7 @@
 #include "drivers/input/input.h"
 #include "mm/pmm.h"
 #include "mm/paging.h"
+#include "mm/uaccess.h"
 #include "mm/heap.h"
 #include "mm/vma.h"
 #include "drivers/block/ata.h"
@@ -136,6 +137,7 @@ void kmain(void *multiboot_info) {
     // from any address space).
     fb_map();
     fb_device_selftest();
+    uaccess_selftest();
     con_driver_register_builtin();
     con_driver_select();
     fbcon_selftest();

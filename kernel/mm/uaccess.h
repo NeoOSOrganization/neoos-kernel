@@ -49,4 +49,6 @@ uint64_t copy_to_user(void *dst, const void *src, uint64_t n);
 // user memory.
 uint64_t copy_from_user(void *dst, const void *src, uint64_t n);
 
+void uaccess_selftest(void);   // "[uaccess] selftest ..."
+
 #endif
