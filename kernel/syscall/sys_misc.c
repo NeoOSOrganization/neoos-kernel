@@ -163,6 +163,8 @@ int64_t sys_test_hook(struct syscall_args *a) {
         tcp_stats(0, 0, 0, &re, 0, 0);
         return (int64_t)re;
     }
+    case TESTHOOK_TCP_INUSE:
+        return (int64_t)tcp_inuse();
     case TESTHOOK_PARENT_PID: {
         struct process *p = proc_find((int)a->a2);
         if (!p) { return -ESRCH; }

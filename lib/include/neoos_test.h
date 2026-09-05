@@ -39,5 +39,9 @@ long neoos_test_poll_wasted(void);
 int  neoos_test_tcp_fault(unsigned drop_1_in_n, unsigned reorder_1_in_m);
 long neoos_test_tcp_retrans(void);
 long neoos_test_tcp_reasm(void);
+// Connection-table slots currently taken, out of TCP_MAX_CONNS. A
+// finished connection that never gives its slot back is invisible until
+// the table is empty; this is how that is seen.
+long neoos_test_tcp_inuse(void);
 
 #endif

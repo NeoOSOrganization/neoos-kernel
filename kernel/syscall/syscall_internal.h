@@ -74,6 +74,7 @@ typedef int64_t (*syscall_handler)(struct syscall_args *);
 #define TESTHOOK_TCP_FAULT    8   // a2 = drop 1 in N, a3 = reorder 1 in M
 #define TESTHOOK_TCP_RETRANS  9   // segments retransmitted so far
 #define TESTHOOK_TCP_REASM   10   // segments queued out of order so far
+#define TESTHOOK_TCP_INUSE   11   // connection-table slots currently taken
 
 // ---- shared helpers, defined in syscall.c ---------------------------
 

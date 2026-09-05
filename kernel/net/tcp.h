@@ -43,15 +43,23 @@ struct tcp_header {
 } __attribute__((packed));
 _Static_assert(sizeof(struct tcp_header) == 20, "TCP header must be 20 bytes");
 
-// SIXTEEN connections with 32 KiB each way, and the numbers are chosen
-// against the machine rather than against the RFC. The table is STATIC
-// -- nothing allocates on the receive path, so a SYN flood exhausts a
-// fixed table and refuses instead of exhausting the heap and panicking
-// -- which means its size is a permanent charge against a 128 MiB
-// machine. Sixty-four connections at 64 KiB each way is nearly 9 MiB of
-// .bss; this is 1.2 MiB. A 32 KiB window still needs no window scaling,
-// which is the property the size was actually chosen for.
-#define TCP_MAX_CONNS   16
+// THIRTY-TWO connections with 32 KiB each way, and the numbers are
+// chosen against the machine rather than against the RFC. The table is
+// STATIC -- nothing allocates on the receive path, so a SYN flood
+// exhausts a fixed table and refuses instead of exhausting the heap and
+// panicking -- which means its size is a permanent charge against a
+// 128 MiB machine. Sixty-four connections at 64 KiB each way is nearly
+// 9 MiB of .bss; this is 2.4 MiB. A 32 KiB window still needs no window
+// scaling, which is the property the buffer size was chosen for.
+//
+// It was SIXTEEN until the churn test showed what that means in
+// practice. TIME_WAIT lasts 2*MSL, ten seconds here, and the side that
+// closes first holds its slot for all of it -- so a sixteen-slot table
+// sustains at most sixteen connection closes per ten seconds
+// MACHINE-WIDE, and one test closing ten connections starved every test
+// after it. Thirty-two is not a fix for that arithmetic, only headroom
+// against it; the arithmetic is recorded in docs/stdlib.md.
+#define TCP_MAX_CONNS   32
 #define TCP_SNDBUF      32768
 #define TCP_RCVBUF      32768
 #define TCP_REASM_SEGS  8
@@ -133,6 +141,10 @@ struct tcb {
     int      accept_n;
     struct tcb *parent;
 
+    // The socket has been closed and the connection is finishing on its
+    // own. THE reclaim condition, together with state == CLOSED --
+    // see tcp_close and tcp_timer_tick.
+    int      sock_gone, reclaimed;
     int      nodelay, reuseaddr, so_error;
     int      fin_sent, fin_rcvd, reset;
     int      shut_rd, shut_wr;
@@ -203,6 +215,7 @@ void tcp_fault_inject(uint32_t drop_1_in_n, uint32_t reorder_1_in_n);
 void tcp_stats(uint64_t *segs_tx, uint64_t *segs_rx, uint64_t *retrans,
                uint64_t *reasm, uint64_t *rst_tx, uint64_t *dropped);
 
+int tcp_inuse(void);   // connection-table slots currently taken
 uint64_t tcp_rst_tx(void);
 const struct tcp_header *tcp_last_tx(void);
 

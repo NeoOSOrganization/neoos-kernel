@@ -472,9 +472,12 @@ through the NIC — and against deliberately injected 1-in-8 packet loss.
 
 - **MSL is 5 seconds** (TIME_WAIT 10, not 120). A port becomes reusable
   sooner than on Linux.
-- **Sixteen TCP connections machine-wide**, from a static table, so that
-  nothing allocates on the receive path. The seventeenth gets
-  `ECONNREFUSED`, not `EMFILE`.
+- **Thirty-two TCP connections machine-wide**, from a static table, so
+  that nothing allocates on the receive path. The thirty-third gets
+  `ECONNREFUSED`, not `EMFILE`. Combined with the short TIME_WAIT this
+  caps sustained connection churn at roughly thirty-two closes per ten
+  seconds; a program that loops open/close will see `ECONNREFUSED` with
+  nothing actually broken.
 - **`SO_SNDBUF`/`SO_RCVBUF` are accepted and ignored**, reading back the
   real fixed 32 KiB.
 - **DHCP runs in the kernel**, so there is no client to signal, no lease

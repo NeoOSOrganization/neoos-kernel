@@ -798,10 +798,18 @@ forever after.
   is static, so the buffers are a compile-time constant. Failing
   instead would break every program that sets a buffer size out of
   habit.
-- **Sixteen connections, machine-wide.** The table is static so that
+- **Thirty-two connections, machine-wide.** The table is static so that
   nothing allocates on the receive path: a SYN flood exhausts a fixed
   table and is refused with RST, rather than exhausting the heap. The
-  seventeenth connection gets `ECONNREFUSED`, not `EMFILE`.
+  thirty-third connection gets `ECONNREFUSED`, not `EMFILE`.
+- **The table and the short TIME_WAIT interact, and the arithmetic is
+  worth knowing.** The side that closes first holds its slot for 2×MSL
+  — ten seconds here — so the machine sustains at most about thirty-two
+  connection *closes* per ten seconds in total. A program that opens and
+  closes connections in a tight loop will start seeing `ECONNREFUSED`
+  long before anything is actually wrong. On Linux the same arithmetic
+  exists with a 120-second TIME_WAIT and tens of thousands of slots,
+  which is why it is never noticed there.
 - **No window scaling, no SACK, no timestamps, no ECN, no TCP Fast
   Open, no keepalives, and no `SO_LINGER`.** A 32 KiB window needs no
   scaling; the rest are absent rather than stubbed.

@@ -27,6 +27,7 @@
 #define PORT_HALF   7803
 #define PORT_NB     7804
 #define PORT_LOSS   7805
+#define PORT_CHURN  7806
 
 // Larger than TCP_SNDBUF (32 KiB), on purpose: a transfer that fits in
 // the buffer never closes the window, and a window that never closes
@@ -135,7 +136,16 @@ static void test_handshake(void) {
     }
     // The server half-closed, so a further read must report EOF rather
     // than blocking forever.
-    if (read(cfd, back, 1) != 0) { fail("no EOF after the peer's FIN"); }
+    // Report the VALUE, not just the fact. This has failed
+    // intermittently, and "not zero" cannot distinguish a stray byte
+    // (positive) from a connection reset out from under the reader
+    // (-104) -- which are different bugs in different files.
+    int64_t eof = read(cfd, back, 1);
+    if (eof != 0) {
+        printf("[tcptest] FAILED: no EOF after the peer's FIN (read = %d)\n",
+               (int)eof);
+        failures++;
+    }
 
     close(cfd);
     pthread_join(th, 0);
@@ -399,8 +409,117 @@ static void test_loss(void) {
     }
 }
 
+// ---- 5. connection churn: does a finished connection give its slot
+//         back? -----------------------------------------------------
+//
+// The table is SIXTEEN connections, machine-wide and static. A
+// connection that finishes without releasing its slot is invisible
+// until the table is empty and every further connect is refused --
+// which on a machine that mostly runs one test at a time could be days.
+//
+// The SERVER closes first, deliberately. That puts the client through
+// ESTABLISHED -> CLOSE_WAIT -> LAST_ACK -> CLOSED, the passive close,
+// which never passes through TIME_WAIT -- and was therefore the path
+// that leaked a slot every single time. Ten cycles is more than the
+// table can absorb if they leak, and comfortably within it if they do
+// not.
+// Five, not ten. Each cycle parks one slot in TIME_WAIT for ten
+// seconds, and this test runs FIRST -- ten cycles held eleven slots and
+// starved every arm after it, which is a true fact about the table
+// rather than a bug, and not one this test should be demonstrating by
+// breaking its neighbours. The per-cycle assertion catches a leak on
+// the FIRST cycle anyway.
+#define CHURN_CYCLES 5
+
+static void test_churn(void) {
+    long peak = 0;
+    int lfd = listen_on(PORT_CHURN);
+    if (lfd < 0) { return; }
+    set_nonblock(lfd);
+
+    for (int i = 0; i < CHURN_CYCLES; i++) {
+        int cfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (cfd < 0) {
+            printf("[tcptest] FAILED: churn cycle %d could not make a socket\n", i);
+            failures++;
+            break;
+        }
+        set_nonblock(cfd);
+        struct sockaddr_in a;
+        addr_for(&a, INADDR_LOOPBACK, PORT_CHURN);
+        int rc = connect(cfd, (struct sockaddr *)&a, sizeof a);
+        if (rc != 0 && rc != -EINPROGRESS) {
+            // -ECONNREFUSED here is the leak: the table is full, so the
+            // SYN was answered with a RST.
+            printf("[tcptest] FAILED: churn cycle %d connect = %d "
+                   "(a full connection table refuses)\n", i, rc);
+            failures++;
+            close(cfd);
+            break;
+        }
+
+        int sfd = -1;
+        for (int spin = 0; spin < 3000 && sfd < 0; spin++) {
+            sfd = accept(lfd, 0, 0);
+            if (sfd < 0) { nap_ms(1); }
+        }
+        if (sfd < 0) {
+            printf("[tcptest] FAILED: churn cycle %d never accepted\n", i);
+            failures++;
+            close(cfd);
+            break;
+        }
+
+        // The SERVER closes first. This is the whole point of the test.
+        close(sfd);
+
+        // The client drains to EOF, which is what walks it through
+        // CLOSE_WAIT and LAST_ACK to CLOSED.
+        unsigned char b[64];
+        for (int spin = 0; spin < 3000; spin++) {
+            int64_t n = read(cfd, b, sizeof b);
+            if (n == 0) { break; }
+            if (n < 0 && n != -EAGAIN) { break; }
+            nap_ms(1);
+        }
+        close(cfd);
+        // The timer thread does the reclaiming, so give it a tick or
+        // two before counting. Without this the count includes slots
+        // that are on their way back, not slots that are stuck.
+        nap_ms(50);
+
+        // THE ASSERTION. After cycle i, the table should hold the
+        // listener plus ONE slot per cycle -- the server's TIME_WAIT,
+        // which is real and lasts 2*MSL. The CLIENT took the passive
+        // close and must be gone.
+        //
+        // A leak shows up as two per cycle rather than one, and this
+        // catches it on the very first cycle instead of when the table
+        // finally runs dry. One slot of slack for a connection still
+        // finishing.
+        long inuse = neoos_test_tcp_inuse();
+        if (inuse > 0 && inuse > 1 + (i + 1) + 1) {
+            printf("[tcptest] FAILED: after %d cycles the table holds %d slots, "
+                   "expected about %d -- a finished connection is not "
+                   "releasing its slot\n", i + 1, (int)inuse, 1 + (i + 1));
+            failures++;
+            break;
+        }
+        peak = (inuse > peak) ? inuse : peak;
+    }
+
+    close(lfd);
+    if (!failures) {
+        printf("[tcptest] %d connections opened and closed, peak %d table slots\n",
+               CHURN_CYCLES, (int)peak);
+    }
+}
+
 int main(void) {
     printf("[tcptest] start\n");
+    // FIRST, so it runs against an empty table rather than one holding
+    // the other arms' TIME_WAITs.
+    test_churn();
     test_handshake();
     test_bulk();
     test_refused();

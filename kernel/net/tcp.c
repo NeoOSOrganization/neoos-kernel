@@ -24,6 +24,12 @@ static uint32_t fault_drop_n, fault_reorder_n;
 static uint64_t fault_counter;
 static struct tcp_header last_tx;
 
+int tcp_inuse(void) {
+    int n = 0;
+    for (int i = 0; i < TCP_MAX_CONNS; i++) { if (conns[i].in_use) { n++; } }
+    return n;
+}
+
 uint64_t tcp_rst_tx(void) { return stat_rst_tx; }
 const struct tcp_header *tcp_last_tx(void) { return &last_tx; }
 
@@ -135,6 +141,7 @@ struct tcb *tcp_alloc(void) {
         t->cwnd = 0; t->ssthresh = TCP_SNDBUF; t->dupacks = 0;
         t->in_recovery = 0; t->recover = 0;
         t->backlog = 0; t->accept_n = 0; t->parent = 0;
+        t->sock_gone = 0; t->reclaimed = 0;
         t->nodelay = 0; t->reuseaddr = 0; t->so_error = 0;
         t->fin_sent = t->fin_rcvd = t->reset = 0;
         t->shut_rd = t->shut_wr = 0;
@@ -896,6 +903,28 @@ void tcp_timer_tick(void) {
             enter_closed(t, 0);
             spin_unlock_irqrestore(&t->lock, f);
             tcp_tx_flush(t);
+            continue;
+        }
+
+        // THE RECLAIM RULE, and it is the only place a finished
+        // connection's slot comes back.
+        //
+        // It used to be TIME_WAIT expiry that dropped the reference,
+        // unconditionally -- which freed the block out from under any
+        // socket still open on it (a program that shut down its write
+        // side and kept reading), handing the slot to the next
+        // connection. And it missed the passive close entirely:
+        // CLOSE_WAIT -> LAST_ACK -> CLOSED never passes through
+        // TIME_WAIT, so every connection this machine did not initiate
+        // the close of leaked a slot until the table was empty and
+        // everything was refused.
+        //
+        // Both are the same question asked properly: the socket is
+        // gone, the state machine has finished, so nothing can reach
+        // this block again.
+        if (t->sock_gone && t->state == TCP_CLOSED && !t->reclaimed) {
+            t->reclaimed = 1;
+            spin_unlock_irqrestore(&t->lock, f);
             tcp_unref(t);
             continue;
         }
@@ -1099,16 +1128,43 @@ void tcp_shutdown_write(struct tcb *t) {
 }
 
 void tcp_close(struct tcb *t) {
+    // Everything the LISTENER was holding for somebody who never called
+    // accept(). Each of those connections was allocated by tcp_input
+    // and has nothing else pointing at it; closing the listener without
+    // releasing them leaks a table slot apiece, permanently.
+    struct tcb *orphans[TCP_BACKLOG_MAX];
+    int n_orphans = 0;
+
     uint64_t f = spin_lock_irqsave(&t->lock);
     enum tcp_state st = t->state;
+    t->sock_gone = 1;
+    if (st == TCP_LISTEN) {
+        for (int i = 0; i < t->accept_n; i++) { orphans[n_orphans++] = t->accept_q[i]; }
+        t->accept_n = 0;
+    }
     spin_unlock_irqrestore(&t->lock, f);
+
+    for (int i = 0; i < n_orphans; i++) {
+        struct tcb *c = orphans[i];
+        uint64_t g = spin_lock_irqsave(&c->lock);
+        c->sock_gone = 1;
+        // RST rather than a polite close: nobody ever accepted this, so
+        // there is no application state to flush, and the peer should
+        // learn immediately rather than wait out a FIN exchange with a
+        // connection that was never really there.
+        send_flags(c, TCP_RST, c->snd_nxt);
+        set_state(c, TCP_CLOSED);
+        spin_unlock_irqrestore(&c->lock, g);
+        tcp_tx_flush(c);
+        tcp_unref(c);
+    }
 
     if (st == TCP_ESTABLISHED || st == TCP_CLOSE_WAIT) {
         tcp_shutdown_write(t);
         // The reference is NOT dropped here. The TCB has to live on
-        // through FIN_WAIT_1, FIN_WAIT_2 and TIME_WAIT with no file
-        // descriptor attached -- see THE LIFETIME RULE in tcp.h. The
-        // timer drops it when TIME_WAIT expires.
+        // through FIN_WAIT_1, FIN_WAIT_2, LAST_ACK and TIME_WAIT with no
+        // file descriptor attached -- see THE LIFETIME RULE in tcp.h.
+        // The timer reclaims it once the state machine reaches CLOSED.
         return;
     }
     if (st == TCP_LISTEN || st == TCP_CLOSED || st == TCP_SYN_SENT) {

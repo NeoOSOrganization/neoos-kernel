@@ -94,6 +94,7 @@
 #define TESTHOOK_TCP_FAULT    8
 #define TESTHOOK_TCP_RETRANS  9
 #define TESTHOOK_TCP_REASM   10
+#define TESTHOOK_TCP_INUSE   11
 
 static inline int64_t syscall0(int64_t num) {
     int64_t ret;
@@ -640,4 +641,8 @@ long neoos_test_tcp_retrans(void) {
 
 long neoos_test_tcp_reasm(void) {
     return (long)syscall1(SYS_TEST_HOOK, TESTHOOK_TCP_REASM);
+}
+
+long neoos_test_tcp_inuse(void) {
+    return (long)syscall1(SYS_TEST_HOOK, TESTHOOK_TCP_INUSE);
 }
