@@ -229,6 +229,13 @@ void kmain(void *multiboot_info) {
     // looks for /proc by name and says so when it is missing.
     vfs_mount_fs(0,     "/proc", "procfs");
     vfs_mount_fs("hd1", "/mnt", "fat");
+    // Boot-critical apps (init/login/term/nsh) are linked directly
+    // into this kernel image and served from here, never from FAT --
+    // see kernel/fs/embedfs.c and docs/superpowers/specs/
+    // 2026-09-05-embedded-test-and-app-architecture.md.
+    vfs_mount_fs("bin",  "/bin",  "embedfs");
+    vfs_mount_fs("sbin", "/sbin", "embedfs");
+    vfs_mount_fs("tests", "/usr/tests", "embedfs");
     vfs_selftest();
     devfs_selftest();
 

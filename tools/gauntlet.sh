@@ -71,15 +71,6 @@ KNOWN_RE='schedule\(\) with a spinlock held.*socktable'
 rm -rf "$WORK"; mkdir -p "$WORK"
 rm -f "$DIR"/pgauntlet.serial.run*
 
-mapfile -t MARKERS < <(
-  awk '/^REQUIRED_MARKERS[[:space:]]*:=/{f=1} f{print} f&&!/\\[[:space:]]*$/{exit}' Makefile \
-  | grep -oE '"[^"]+"' | sed 's/^"//; s/"$//'
-)
-if [ "${#MARKERS[@]}" -lt 10 ]; then
-  echo "pgauntlet: failed to parse REQUIRED_MARKERS from Makefile (${#MARKERS[@]})"; exit 2
-fi
-echo "pgauntlet: N=$N CONC=$CONC, ${#MARKERS[@]} required markers"
-
 rm -f build/disk.img build/disk2.img
 # clean-kernel so a prior `make test` (which compiles with
 # -DNEOOS_TEST_HOOKS) cannot leave stale objects that relink into this
@@ -87,6 +78,26 @@ rm -f build/disk.img build/disk2.img
 if ! make clean-kernel $GAUNTLET_MAKEFLAGS iso disk-image > "$WORK/build.log" 2>&1; then
   echo "pgauntlet: BUILD FAILED"; tail -20 "$WORK/build.log"; exit 1
 fi
+
+# CORE_REQUIRED_MARKERS (kernel-internal selftests, no userland test
+# binary) is still a static := block, parsed the same way as always.
+# The rest -- every userland test's and BusyBox's marker -- is
+# data-driven now (tools/gen-embedfs.py, from userland/tests.manifest.json
+# and third_party/busybox-config/busybox.test.json) and only exists
+# once the build above has run: build/embedfs-markers.txt. Parsing
+# markers BEFORE the build (as this used to) would have missed it
+# entirely on a clean tree.
+mapfile -t MARKERS < <(
+  awk '/^CORE_REQUIRED_MARKERS[[:space:]]*:=/{f=1} f{print} f&&!/\\[[:space:]]*$/{exit}' Makefile \
+  | grep -oE '"[^"]+"' | sed 's/^"//; s/"$//'
+)
+if [ -f build/embedfs-markers.txt ]; then
+  mapfile -t -O "${#MARKERS[@]}" MARKERS < build/embedfs-markers.txt
+fi
+if [ "${#MARKERS[@]}" -lt 10 ]; then
+  echo "pgauntlet: failed to parse required markers (${#MARKERS[@]})"; exit 2
+fi
+echo "pgauntlet: N=$N CONC=$CONC, ${#MARKERS[@]} required markers"
 
 boot_one() {   # $1 = tag
   local t=$1
