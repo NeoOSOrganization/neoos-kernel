@@ -721,33 +721,31 @@ The kernel asserts those offsets at boot, because getting one wrong is
 invisible until a ported program's port lands in the wrong half of a
 word.
 
-Underneath is a real IPv4/UDP path over a loopback device: every
-datagram carries an IPv4 header with a verified checksum and a UDP
-header with a verified pseudo-header checksum, and is demultiplexed by
-port. It is not a shortcut between two buffers.
+Underneath is a real IPv4 stack over a loopback device **and a
+virtio-net NIC** (D1–D5): every datagram or segment carries an IPv4
+header with a verified checksum and a transport header with a verified
+pseudo-header checksum, is routed through a real routing table, and --
+off the machine -- is framed in Ethernet with the next hop resolved by
+ARP. It is not a shortcut between two buffers.
 
 ### Divergences, and what is simply absent
 
-- **One interface, and it is loopback.** Only `127.0.0.0/8` and
-  `INADDR_ANY` have a route; anything else is `-ENETUNREACH`. There is
-  no NIC driver, no link layer, no ARP, no routing table.
-- **No TCP.** `socket(AF_INET, SOCK_STREAM, ...)` returns
-  `-EPROTONOSUPPORT` rather than quietly giving a datagram socket: a
-  program handed message boundaries where it expects a stream corrupts
-  its own protocol, and a clean refusal is far better than that. So
-  there is no `listen`, `accept` or `shutdown` either.
+- **Two interfaces: loopback and one NIC.** `127.0.0.0/8` routes to
+  loopback, the leased subnet is on link, and everything else goes via
+  the default gateway. An address with no matching route is
+  `-ENETUNREACH`. The routing table is not reachable from userland:
+  there is no `route(8)`, no `AF_NETLINK`, and no `ioctl` to change it.
 - **AF_INET only.** No `AF_UNIX`, no `AF_INET6`.
 - **No `MSG_*` flags at all**, and the header deliberately does not
   define them. `flags` must be 0. In particular there is no
   `MSG_DONTWAIT` and no `MSG_PEEK`, and `MSG_TRUNC` is not available to
   report a truncated datagram — `recvfrom` returns what it delivered,
   and the rest of the message is discarded.
-- **No `setsockopt`/`getsockopt`**, so no `SO_REUSEADDR`, no
-  `SO_RCVBUF`, no timeouts. The receive buffer is 64KiB per socket and
-  a datagram that does not fit is dropped, as UDP permits.
-- **No `select`/`poll`/`epoll`.** A socket can only be read by
-  blocking in `recvfrom`, so a program that must wait on several at
-  once needs a thread per socket.
+- **`setsockopt`/`getsockopt` exist but are a short list** — see the
+  TCP section below for exactly which options, and which are accepted
+  and ignored. The UDP receive buffer is 64 KiB per socket and a
+  datagram that does not fit is dropped, as UDP permits.
+- **`poll`/`select` work on sockets.** `epoll` does not exist.
 - **ICMP exists, but not from userland (D3).** The kernel answers echo
   requests — the host can `ping` NeoOS — and generates a port
   unreachable for a datagram sent to a port nobody has bound. Neither
@@ -761,6 +759,55 @@ port. It is not a shortcut between two buffers.
 - **`inet_ntoa` is spelled `inet_ntoa_r`** and takes the output buffer.
   The standard one returns a pointer to a static buffer, which is not
   thread-safe; NeoOS has threads and no reason to reproduce that.
+
+### TCP (D5)
+
+```c
+int listen(int fd, int backlog);
+int accept(int fd, struct sockaddr *addr, socklen_t *len);
+int accept4(int fd, struct sockaddr *addr, socklen_t *len, int flags);
+int shutdown(int fd, int how);          /* SHUT_RD, SHUT_WR, SHUT_RDWR */
+int getpeername(int fd, struct sockaddr *addr, socklen_t *len);
+int setsockopt(int fd, int level, int opt, const void *val, socklen_t len);
+int getsockopt(int fd, int level, int opt, void *val, socklen_t *len);
+```
+
+`socket(AF_INET, SOCK_STREAM, 0)` works. The state machine is the full
+eleven states with Reno congestion control, Nagle, delayed ACK, an
+eight-segment reassembly queue, Jacobson/Karels round-trip estimation
+with Karn's algorithm, a persist timer for a zero window, and
+retransmission with exponential backoff. `connect` blocks, or returns
+`EINPROGRESS` under `O_NONBLOCK` with the result readable through
+`SO_ERROR` and `poll(POLLOUT)`. `read`/`write` work on a connected
+socket, as POSIX says they do.
+
+Options implemented: `SO_REUSEADDR`, `SO_ERROR`, `SO_TYPE`, `SO_SNDBUF`,
+`SO_RCVBUF` (all at `SOL_SOCKET`), and `TCP_NODELAY` at `IPPROTO_TCP`.
+Anything else returns `-ENOPROTOOPT` rather than succeeding silently: a
+program that sets an option and does not get it behaves mysteriously
+forever after.
+
+**Divergences, each deliberate:**
+
+- **MSL is 5 seconds, so TIME_WAIT is 10** — not Linux's 60 and 120. A
+  two-minute TIME_WAIT cannot be observed inside a boot that also runs
+  forty other suites, and the state would then be untested. A program
+  that reuses a port sooner than Linux would allow will succeed here.
+- **`SO_SNDBUF` and `SO_RCVBUF` are accepted and ignored**, and read
+  back as the real fixed sizes (32 KiB each way). The connection table
+  is static, so the buffers are a compile-time constant. Failing
+  instead would break every program that sets a buffer size out of
+  habit.
+- **Sixteen connections, machine-wide.** The table is static so that
+  nothing allocates on the receive path: a SYN flood exhausts a fixed
+  table and is refused with RST, rather than exhausting the heap. The
+  seventeenth connection gets `ECONNREFUSED`, not `EMFILE`.
+- **No window scaling, no SACK, no timestamps, no ECN, no TCP Fast
+  Open, no keepalives, and no `SO_LINGER`.** A 32 KiB window needs no
+  scaling; the rest are absent rather than stubbed.
+- **No `sendmsg`/`recvmsg`, no `socketpair`.**
+- **`accept4` honours `SOCK_NONBLOCK`; `SOCK_CLOEXEC` is accepted and
+  ignored**, because NeoOS has no exec-time descriptor closing yet.
 
 ### Addressing: DHCP runs in the kernel (D4)
 

@@ -446,3 +446,160 @@ checksum or segmentation offload. No TCP fast open, no keepalives.
   identical to an absent server from the route table's point of view.
   Mitigation: the fallback logs a distinct line, and `[dhcp] ALL PASSED`
   asserts a *real lease*, not merely a working address.
+
+---
+
+## 10. Results (2026-09-05)
+
+Built as specified, in four commits. A program on NeoOS opens a TCP
+connection to a process on the host and gets its bytes back:
+
+```
+[route] ALL PASSED
+[dhcp] bound 10.0.2.15/24 via 10.0.2.2
+[arp]  10.0.2.2 is at 52:55:0a:00:02:02
+[icmp] gateway rtt ticks=0
+[dns]  round trip, rcode=0
+[tcp]  ALL PASSED
+[tcptest] 96KiB through a 32KiB window passed
+[tcptest] 32KiB under 1-in-8 loss, retrans=2 reasm=3
+[tcpwire] 16KiB echoed by the host, byte for byte
+```
+
+### The one thing that cost more than everything else
+
+**TCP over synchronous loopback recurses without bound.** Loopback
+delivers in the sender's context, so send and receive are one call
+chain: A sends, B acknowledges *inside that call*, A receives the ACK
+and sends more. Each turn costs several kilobytes of segment buffers. A
+256 KiB transfer nested about a hundred and seventy deep, ran off the
+kernel stack, and faulted in `resolve_walk` — a VFS function with no
+connection to any of it.
+
+UDP never noticed because a UDP round trip nests twice. The socket
+layer had *already recorded* the hazard ("on loopback the send path
+runs straight into the receive path") and worked around it by holding
+no lock; TCP is the first code that had to obey it with sequence
+numbers in hand, and holding no lock was not enough.
+
+Two mechanisms came out of it, and both are load-bearing:
+
+- **Segments are built under the connection's lock and transmitted
+  after it.** Over 127.0.0.1 both ends of a connection live in the same
+  table, so a send under A's lock takes B's — and the other end doing
+  the same thing at the same moment is a deadlock, not merely the rank
+  complaint that surfaced it.
+- **Loopback limits nesting to four and defers the rest**, which the
+  outermost frame drains as it unwinds. Everything is still delivered
+  before the original send returns, so the synchronous contract the
+  boot selftests depend on survives; only the stack depth changes.
+
+**The first version of the second fix was the same bug again.** The
+depth counter was per-CPU, and a thread preempted mid-delivery
+migrates: one CPU is left permanently deep and the other underflows
+into never limiting anything. A recursion depth describes a *call
+chain*, and a call chain belongs to a thread.
+
+### Things the design did not predict
+
+| | |
+|---|---|
+| **The NIC had no address.** | D1 never assigned one and D4 was to bring DHCP, but ARP cannot be tested by a host with nothing to put in the sender field — slirp does not answer a request from 0.0.0.0. `net_ifconfig()` landed in D2 with a provisional address, and D4 deleted the provisional one, because a hardcoded address in the boot path is indistinguishable from a working client. |
+| **`virtio_net_transmit` had no lock.** | One bounce buffer, one queue, and a spin for the completion. D1 transmitted from exactly one place; D2 made a second caller permanent, since the netrx thread answers ARP while any other thread may be sending. |
+| **`virtio_net_selftest` never restored the netrx handler.** | It installed its own and left it, so after D1's suite every frame went to a counter. Invisible until the next milestone's suite times out for no stated reason. |
+| **`bind()` asked the wrong question.** | It tested `net_route()`, which means "can I reach it" — the same question as "do I own it" only while loopback is the sole interface. The moment a default route existed, `bind(8.8.8.8)` succeeded. |
+| **A DISCOVER for 255.255.255.255 followed the default route** | and was unicast to the gateway. A broadcast destination now takes the broadcast MAC whatever the route says, and `net_ifconfig` always installs a `255.255.255.255/32` on-link route so a client has somewhere to send before it has an address. |
+| **A RST is not always `ECONNRESET`.** | Answering our SYN it means the port is closed, which Linux reports as `ECONNREFUSED`. |
+
+### Design points corrected
+
+- **`LOCK_RANK_ARP` went in below `LOCK_RANK_NETRX`** on the reasoning
+  that it is taken from a receive. That is the wrong axis — a rank is
+  decided by what is *already held*. The netrx thread asks
+  `arp_pending()` under its own queue lock, so ARP is acquired *under*
+  netrx and ranks above it. The checker caught it on the first boot,
+  which is exactly what D1's results section said it was for.
+- **Sixteen connections at 32 KiB each way, not sixty-four at 64 KiB.**
+  The table is static — nothing allocates on the receive path, so a SYN
+  flood exhausts a fixed table and refuses rather than exhausting the
+  heap — which makes its size a permanent charge against a 128 MiB
+  machine. 9 MiB of `.bss` became 1.2 MiB, and a 32 KiB window still
+  needs no window scaling, which is the property the size was chosen
+  for.
+- **`tcp_sock.c` was not split out.** `struct socket`, `sock_ref_of`,
+  `addr_in` and `addr_out` are all file-private to `socket.c`, and
+  splitting would have meant exporting four statics out of a working
+  file to move four hundred lines out of it. It is a marked section
+  instead.
+- **`BOOT_TIMEOUT` 150 → 240**, and the gauntlet now reads that number
+  from the Makefile rather than keeping its own. The two had already
+  drifted: the script used 60 while its own header claimed 150.
+
+### Proving the detectors
+
+Every detector was broken deliberately, watched to fire, and reverted.
+
+| Break | What fired |
+|---|---|
+| return the first route, not the longest | `/0 beat /24` |
+| never send the ARP request | `gateway never resolved` |
+| reply to any ARP request regardless of target | `replied on behalf of another address` |
+| skip ARP's learn step | `did not learn from a request addressed to us` |
+| drop the ARP length check | `parsed a truncated ARP packet` |
+| build the ICMP reply instead of echoing it | `reply did not echo the payload` |
+| quote the IP header but not the 8 payload bytes | `unreachable did not quote the UDP ports` |
+| disable the ICMP rate limiter | `rate limiter did not limit` |
+| ping an address nothing answers | `no echo reply from the gateway` |
+| never send DHCPDISCOVER | `fell back to the static address` |
+| ignore the DHCP transaction id | `a malformed offer was accepted` |
+| bind a lease without installing routes | `default route not installed` |
+| query a DNS address nothing answers | `no response from 10.0.2.3` |
+| make the fault injector drop nothing | `1-in-8 loss produced no retransmissions` |
+
+**Three of those found bugs in the TESTS, not the code**, and each had
+been passing for the wrong reason:
+
+- The route selftest added the `/24` before the `/0`, so a first-match
+  table still answered `10.0.2.1` correctly by tripping over the `/24`
+  first.
+- The ARP truncation test used a target that was not ours, so a parser
+  ignoring the length still declined to reply.
+- `FIN_WAIT_1 + FIN -> CLOSING` was asserted while the injected FIN
+  *also* acknowledged our FIN — which is a simultaneous close
+  *completing*, and TIME_WAIT is then the correct answer. Whether the
+  ACK covers our FIN is a separate axis from the flags.
+
+The TCP state-machine selftest was wrong twice more before it was
+right: `SYN_SENT` was staged with `snd_nxt == iss` when the SYN is
+already out and `snd_nxt` is one past it, and the transition arm ran
+over loopback, where every reply came back, matched no connection (its
+ports are the connection's mirrored), and RST'd the machine's own
+connection. The traces showed each state being reached and then CLOSED
+microseconds later — which is what the per-TCB state ring was added
+for, and it earned itself on its first use.
+
+### Not done
+
+- **No window scaling, SACK, timestamps, ECN, Fast Open or
+  keepalives.** Absent rather than stubbed.
+- **No resolver.** DHCP option 6 is parsed and stored and nothing reads
+  it, so every address a program uses must be numeric. This is the most
+  likely single reason a real network application will not run
+  unmodified.
+- **No raw sockets or `AF_PACKET`**, so ICMP exists and `ping(8)`
+  cannot.
+- **No IPv6, no `AF_UNIX`, no `sendmsg`/`recvmsg`.**
+
+### One pre-existing failure, not this track's
+
+The gauntlet's known `schedule() with a spinlock held ... socktable`
+panic still appears intermittently. It is whitelisted there as a Phase
+13.6 residual and predates this work. What this track added is the
+means to find it: the held-lock stack now records **where** each lock
+was acquired. The name alone lies, because
+`spin_unlock_irqrestore` assumes strict LIFO and simply decrements —
+so a caller that releases an outer lock while an inner one is still
+held (`net_udp_deliver` does exactly that, deliberately) leaves the
+stack labelled with the wrong lock. That is why this panic has always
+pointed at socktable, and the return address is the thing that does not
+lie.

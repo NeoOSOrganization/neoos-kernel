@@ -219,11 +219,9 @@ loopback device — real headers, real checksums, real port demux. A
 socket is an ordinary file descriptor, so `close`, `fork` inheritance,
 and `read`/`write` on a connected socket all work.
 
-**DIVERGES / absent:** one interface and it is loopback; **no TCP**
-(`SOCK_STREAM` returns `-EPROTONOSUPPORT` rather than silently giving
-datagram semantics); no `AF_UNIX`, no IPv6; no `MSG_*` flags at all,
-including `MSG_DONTWAIT` and `MSG_TRUNC`; no `setsockopt`/`getsockopt`;
-no `select`/`poll`; no ICMP and no raw sockets.
+*(Superseded by the D2–D5 refresh at the end of this document: there is
+now a NIC, a link layer, ARP, routing, ICMP, DHCP and TCP. The
+divergences that survive are listed there.)*
 
 ## 8. Process startup contract
 
@@ -416,3 +414,87 @@ deferred, and everything here is static); no `SIGTTIN`/`SIGTTOU`
 generation; `brk` never grows; `uname` reports `NeoOS`; no users, modes
 or ownership; `/proc` has only the two files `ps` reads; FAT has no
 symlinks. Each is recorded with its reasoning in `docs/stdlib.md`.
+
+## Refresh — end of the network track, D0–D5 (2026-09-05)
+
+The stack went from "IPv4 and UDP over loopback" to "a machine on a
+network". PCI enumeration (D0), a virtio-net driver (D1), Ethernet and
+ARP (D2), ICMP (D3), UDP on the wire with a DHCP client (D4), and TCP
+(D5).
+
+**What of the socket ABI is now implemented**
+
+| Call | State |
+|---|---|
+| `socket`, `bind`, `connect`, `sendto`, `recvfrom`, `getsockname` | implemented, `SOCK_DGRAM` and `SOCK_STREAM` |
+| `listen`, `accept`, `accept4`, `shutdown`, `getpeername` | implemented (D5) |
+| `setsockopt`, `getsockopt` | implemented for a short, explicit option list |
+| `read`, `write`, `close`, `poll`, `select`, `fcntl(O_NONBLOCK)` on a socket | implemented |
+| `sendmsg`, `recvmsg`, `socketpair`, `sendfile` | absent |
+
+`SOCK_STREAM` is a real TCP: all eleven states, Reno congestion
+control, Nagle, delayed ACK, out-of-order reassembly,
+Jacobson/Karels RTO with Karn's algorithm, a persist timer, and
+retransmission with exponential backoff. It has been driven against a
+peer this kernel does not control — a host-side echo server reached
+through the NIC — and against deliberately injected 1-in-8 packet loss.
+
+**Constants** all carry Linux's values: `SOL_SOCKET`, `SO_REUSEADDR`,
+`SO_ERROR`, `SO_TYPE`, `SO_SNDBUF`, `SO_RCVBUF`, `IPPROTO_TCP`,
+`TCP_NODELAY`, `SHUT_RD`/`SHUT_WR`/`SHUT_RDWR`, `SOCK_NONBLOCK`,
+`SOCK_CLOEXEC`, and the errnos the stack returns (`ECONNREFUSED` 111,
+`ECONNRESET` 104, `EINPROGRESS` 115, `EALREADY` 114, `ENOPROTOOPT` 92,
+`EHOSTUNREACH` 113, `ETIMEDOUT` 110).
+
+**Semantics matched deliberately, where an application can tell**
+
+- `connect` to a closed port returns `ECONNREFUSED`, not `ECONNRESET`.
+  A RST answering our SYN means the port is shut, not that a connection
+  broke — telling a program otherwise breaks every retry loop written
+  against Linux.
+- `bind` to a non-local address returns `EADDRNOTAVAIL`. This was a bug
+  until D2: the check asked whether the address was *routable*, which
+  is the same question as *local* only while loopback is the sole
+  interface. The moment a default route existed, `bind(8.8.8.8)`
+  succeeded.
+- A UDP datagram to a port with no socket provokes an ICMP port
+  unreachable, as on Linux. A *connected* socket filtering out a
+  stranger does not: the port is open, it is merely not listening to
+  them.
+- Reading `SO_ERROR` clears it, so a non-blocking connect reports its
+  result exactly once.
+- `poll` on a listening socket reports `POLLIN` when a connection is
+  waiting to be accepted; on a connected one, EOF counts as readable
+  and a failed connection is writable, so a poll loop learns a verdict
+  rather than waiting for one forever.
+
+**Divergences a ported application could observe**
+
+- **MSL is 5 seconds** (TIME_WAIT 10, not 120). A port becomes reusable
+  sooner than on Linux.
+- **Sixteen TCP connections machine-wide**, from a static table, so that
+  nothing allocates on the receive path. The seventeenth gets
+  `ECONNREFUSED`, not `EMFILE`.
+- **`SO_SNDBUF`/`SO_RCVBUF` are accepted and ignored**, reading back the
+  real fixed 32 KiB.
+- **DHCP runs in the kernel**, so there is no client to signal, no lease
+  to inspect or renew, and no `/etc/resolv.conf`. DHCP option 6 is
+  parsed and stored and nothing reads it.
+- **No resolver at all**: no `gethostbyname`, no `getaddrinfo`. Every
+  address is numeric.
+- **The routing table is not reachable from userland** — no `route(8)`,
+  no `AF_NETLINK`, no `SIOCADDRT`.
+- **No raw sockets and no `AF_PACKET`**, so ICMP exists but `ping(8)`
+  cannot: the kernel answers and originates echo requests, and userland
+  has no way to.
+
+**What a real ported application still hits**
+
+No IPv6. No `AF_UNIX` sockets, which a surprising amount of software
+assumes for local IPC. No `sendmsg`/`recvmsg`, so anything passing file
+descriptors or using scatter-gather I/O on a socket fails to build. No
+window scaling, SACK, or timestamps, so throughput over a
+high-bandwidth-delay path will be poor — correct, but poor. No
+`getaddrinfo`, so any program that resolves a name needs patching, which
+is the single most likely reason a network application will not run
+unmodified today.
