@@ -2,6 +2,10 @@
 #include "drivers/pci/pci.h"
 #include "drivers/char/serial.h"
 #include "arch/io.h"
+#include "mm/pmm.h"
+#include "mm/paging.h"
+#include "sync/waitq.h"
+#include "sync/lock.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -50,6 +54,15 @@ static uint16_t nam_base, nabm_base;   // BAR0/BAR1, I/O port space
 static uint8_t  ac97_present;
 static uint8_t  ac97_irq_line_val;
 
+static struct ac97_bdl_entry *bdl;     // 4 entries, one page, never freed
+static uint64_t bdl_phys;
+static uint8_t *seg_virt[AC97_BDL_ENTRIES];
+static uint64_t seg_phys[AC97_BDL_ENTRIES];
+static volatile uint32_t next_write_seg;   // next segment software may fill
+static volatile uint32_t irq_count;        // observed by the selftest
+static struct waitq  space_waitq;
+static struct spinlock ac97_lock;
+
 static uint16_t nam_read16(uint16_t reg)  { return inw((uint16_t)(nam_base + reg)); }
 static void     nam_write16(uint16_t reg, uint16_t v) { outw((uint16_t)(nam_base + reg), v); }
 
@@ -61,6 +74,49 @@ static uint8_t  nabm_read8(uint16_t reg)  { return inb((uint16_t)(nabm_base + re
 static void     nabm_write8(uint16_t reg, uint8_t v) { outb((uint16_t)(nabm_base + reg), v); }
 
 uint8_t ac97_irq_line(void) { return ac97_irq_line_val; }
+
+// Programs the PCM-OUT DMA engine with the BDL and starts it.
+static void ac97_start_dma(void) {
+    nabm_write32(NABM_PCM_OUT_BASE + NABM_BDBAR, (uint32_t)bdl_phys);
+    nabm_write8(NABM_PCM_OUT_BASE + NABM_LVI, AC97_BDL_ENTRIES - 1);
+    nabm_write8(NABM_PCM_OUT_BASE + NABM_CR, CR_RPBM | CR_IOCE);
+}
+
+// Fills segment `seg` with silence (used to arm buffers before the
+// first real write, so DMA has valid data to play immediately).
+static void ac97_fill_silence(uint32_t seg) {
+    uint8_t *p = seg_virt[seg];
+    for (uint32_t i = 0; i < AC97_BYTES_PER_SEG; i++) { p[i] = 0; }
+}
+
+static void ac97_setup_bdl(void) {
+    bdl_phys = pmm_alloc(0);      // one 4KiB page: 4 * 8-byte entries fits easily
+    bdl = (struct ac97_bdl_entry *)phys_to_virt(bdl_phys);
+
+    // One contiguous pool for all 4 segments, never freed -- same
+    // style as virtio_net's rx_pool_phys.
+    uint64_t need = (uint64_t)AC97_BDL_ENTRIES * AC97_BYTES_PER_SEG;
+    unsigned order = 0;
+    while (((uint64_t)4096 << order) < need) { order++; }
+    uint64_t pool_phys = pmm_alloc(order);
+    uint8_t *pool_virt = (uint8_t *)phys_to_virt(pool_phys);
+
+    for (int i = 0; i < AC97_BDL_ENTRIES; i++) {
+        seg_phys[i] = pool_phys + (uint64_t)i * AC97_BYTES_PER_SEG;
+        seg_virt[i] = pool_virt + (uint64_t)i * AC97_BYTES_PER_SEG;
+        bdl[i].buf_phys = (uint32_t)seg_phys[i];
+        bdl[i].length   = AC97_FRAMES_PER_SEG * 2;   // samples, not bytes
+        bdl[i].flags    = 0x8000;                    // IOC on every segment
+        ac97_fill_silence((uint32_t)i);
+    }
+
+    waitq_init(&space_waitq);
+    spin_init(&ac97_lock, LOCK_RANK_AC97, "ac97");
+    next_write_seg = 0;
+    irq_count = 0;
+
+    ac97_start_dma();
+}
 
 int ac97_init(void) {
     ac97_present = 0;
@@ -110,6 +166,8 @@ int ac97_init(void) {
     nam_write16(NAM_MASTER_VOLUME, 0x0000);
     nam_write16(NAM_PCM_OUT_VOLUME, 0x0000);
 
+    ac97_setup_bdl();
+
     ac97_present = 1;
     serial_write_string("[ac97] device found\n");
     return 0;
@@ -125,9 +183,54 @@ void ac97_selftest(void) {
         serial_write_string("[ac97] selftest FAILED: codec no longer ready\n");
         return;
     }
+
+    // Write one segment's worth of a simple 480 Hz square wave (100
+    // samples high, 100 low, at 48kHz -- integer-only, no FPU: this
+    // kernel is built -mno-sse) and wait for its completion IRQ. This
+    // is the structural proof DMA actually moves data, matching
+    // fb_device_selftest's "prove the driver's real path works, not
+    // just that a function pointer is non-NULL" standard.
+    uint32_t before = irq_count;
+    uint16_t *samples = (uint16_t *)seg_virt[0];
+    for (uint32_t i = 0; i < AC97_FRAMES_PER_SEG; i++) {
+        int16_t v = ((i / 100) % 2) ? 8000 : -8000;
+        samples[i * 2 + 0] = (uint16_t)v;   // left
+        samples[i * 2 + 1] = (uint16_t)v;   // right
+    }
+
+    // This runs before kernel.c's global `sti` (the scheduler is not
+    // driving thread wakeups yet), so waiting via waitq_sleep would
+    // never actually be woken by the completion IRQ -- schedule()
+    // would switch away with no interrupt able to ever switch back.
+    // Bracket a narrow interrupts-enabled polling window instead, the
+    // same pattern kernel/smp/tlb.c's shootdown wait uses for the
+    // identical problem (needing one hardware interrupt to arrive
+    // during early boot, before the scheduler is live).
+    uint64_t caller_flags;
+    __asm__ volatile ("pushfq; pop %0" : "=r"(caller_flags) :: "memory");
+    __asm__ volatile ("sti");
+    int spins = 0;
+    while (irq_count == before) {
+        __asm__ volatile ("pause");
+        if (++spins > 50000000) { break; }
+    }
+    if (!(caller_flags & (1ULL << 9))) { __asm__ volatile ("cli"); }
+
+    if (irq_count == before) {
+        serial_write_string("[ac97] selftest FAILED: no completion interrupt\n");
+        return;
+    }
     serial_write_string("[ac97] selftest passed\n");
 }
 
 void ac97_irq(void) {
-    // Populated in Task 2, once there is a stream to acknowledge.
+    uint16_t sr = nabm_read16(NABM_PCM_OUT_BASE + NABM_SR);
+    if (sr & SR_BCIS) {
+        nabm_write16(NABM_PCM_OUT_BASE + NABM_SR, SR_BCIS);   // write-1-to-clear
+        irq_count++;
+        waitq_wake_all(&space_waitq);
+    }
+    if (sr & SR_FIFOE) {
+        nabm_write16(NABM_PCM_OUT_BASE + NABM_SR, SR_FIFOE);
+    }
 }

@@ -111,6 +111,7 @@ boot_one() {   # $1 = tag
     -cdrom "$WORK/iso.$t" \
     -drive file="$WORK/d1.$t",format=raw -drive file="$WORK/d2.$t",format=raw \
     -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
+    -audiodev none,id=ac97null -device AC97,audiodev=ac97null,addr=0x6 \
     -no-reboot -display none -serial file:"$WORK/serial.$t" \
     > /dev/null 2>"$WORK/qemu.err.$t"
   rm -f "$WORK/iso.$t" "$WORK/d1.$t" "$WORK/d2.$t"

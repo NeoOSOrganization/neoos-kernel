@@ -169,6 +169,10 @@
 // transmit paths all release their own locks first. So it sits at the
 // top, where a lock taken from anywhere and holding nothing belongs.
 #define LOCK_RANK_LOOPBACK  27
+// ac97_lock: taken alone around a PCM-OUT BDL segment write, never
+// nested under or within another lock -- same leaf profile as
+// LOCK_RANK_INPUT/LOCK_RANK_VIRTIO_TX/LOCK_RANK_LOOPBACK above it.
+#define LOCK_RANK_AC97      28
 // The kernel virtual terminals: vt_active, each VT's diff cache
 // (vc->shown / shown_valid) and kd_mode. Sits ABOVE TTY because the
 // write path is tty_obj_write -> t->lock -> vt_backend_output ->

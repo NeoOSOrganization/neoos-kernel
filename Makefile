@@ -362,7 +362,8 @@ QEMU_COMMON := $(QEMU_MACHINE) -smp $(SMP_CPUS) -boot order=d \
 	-drive file=$(DISK_IMG),format=raw -drive file=$(DISK2_IMG),format=raw \
 	-vga std \
 	$(QEMU_NET) \
-	-device AC97 \
+	-audiodev wav,id=ac97wav,path=$(BUILD_DIR)/ac97-test.wav \
+	-device AC97,audiodev=ac97wav,addr=0x6 \
 	-no-reboot
 
 # -vga std: the plain Bochs-VBE standard VGA -- a dumb linear
@@ -493,7 +494,8 @@ CORE_REQUIRED_MARKERS := \
 	"[banner]" \
 	"[rtc] selftest passed" \
 	"[keyboard] decode selftest passed" \
-	"[input] selftest passed"
+	"[input] selftest passed" \
+	"[ac97] selftest passed"
 
 # `=` (recursive), not `:=`: this must re-read embedfs-markers.txt at
 # RECIPE-EXECUTION time, after $(BUILD_DIR)/embedfs_table.c's rule has
@@ -603,6 +605,11 @@ test: lock-check clean-kernel fresh-disks iso disk-image
 	@for m in $(REQUIRED_MARKERS); do \
 		if ! grep -qF "$$m" $(BUILD_DIR)/serial.log; then \
 			echo "MISSING EXPECTED RESULT: $$m"; exit 1; fi; done
+	@if [ ! -s $(BUILD_DIR)/ac97-test.wav ]; then \
+		echo "AC97 WAV FILE MISSING OR EMPTY: no audio was captured"; exit 1; fi
+	@wav_bytes=$$(stat -c%s $(BUILD_DIR)/ac97-test.wav 2>/dev/null || stat -f%z $(BUILD_DIR)/ac97-test.wav); \
+	if [ "$$wav_bytes" -lt 1000 ]; then \
+		echo "AC97 WAV FILE TOO SMALL ($$wav_bytes bytes): DMA likely did not run"; exit 1; fi
 	@echo "PASS: no FAILED lines, boot reached the scheduler, all suites reported"
 
 # The WIRE test, which needs a host-side helper and therefore cannot be

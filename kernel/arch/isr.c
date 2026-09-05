@@ -10,6 +10,7 @@
 #include "drivers/irq/lapic.h"
 #include "drivers/input/keyboard.h"
 #include "drivers/net/virtio_net.h"
+#include "drivers/audio/ac97.h"
 #include "mm/paging.h"
 #include "mm/vma.h"
 #include "sched/proc.h"
@@ -202,6 +203,12 @@ static void isr_handler_inner(struct registers *regs) {
         // netrx queue and wakes its thread. Nothing sleepable happens
         // here -- see kernel/net/netrx.h for why that split exists.
         virtio_net_irq();
+        lapic_send_eoi();
+        return;
+    }
+
+    if (regs->vector_number == VECTOR_AC97) {
+        ac97_irq();
         lapic_send_eoi();
         return;
     }

@@ -3,6 +3,22 @@
 
 #include <stdint.h>
 
+#define VECTOR_AC97 0x23
+
+// One BDL, 4 fixed-size segments, 4096 frames each (16-bit stereo:
+// 4096 frames * 2 channels * 2 bytes = 16384 bytes/segment, ~85ms;
+// ~341ms total buffer -- see spec section 3.3).
+#define AC97_BDL_ENTRIES     4
+#define AC97_FRAMES_PER_SEG  4096
+#define AC97_BYTES_PER_SEG   (AC97_FRAMES_PER_SEG * 2 /*channels*/ * 2 /*bytes/sample*/)
+
+struct ac97_bdl_entry {
+    uint32_t buf_phys;
+    uint16_t length;   // SAMPLES (16-bit words): frames * channels
+    uint16_t flags;    // bit15 IOC (0x8000), bit14 BUP (0x4000)
+} __attribute__((packed));
+_Static_assert(sizeof(struct ac97_bdl_entry) == 8, "AC97 BDL ABI");
+
 // AC97 (Intel ICH 82801AA) playback driver. QEMU's -device AC97
 // emulates exactly this controller -- see
 // docs/superpowers/specs/2026-09-05-ac97-audio-driver-design.md.

@@ -281,13 +281,15 @@ void kmain(void *multiboot_info) {
     // is silently undone, and the symptom is a stack that transmits
     // perfectly and receives nothing.
     netrx_set_handler(eth_input);
-    if (virtio_net_init() == 0) {
+    int virtio_net_present = (virtio_net_init() == 0);
+    uint8_t nic_pin = 0;
+    if (virtio_net_present) {
         // PCI interrupts are level-triggered and active-low, always --
         // unlike the ISA lines above, which need the MADT's overrides to
         // say so. The line the firmware programmed into the device's
         // config space IS the GSI; the IOAPIC pin is that minus the
         // controller's base.
-        uint8_t nic_pin = (uint8_t)(virtio_net_irq_line() - acpi.ioapic_gsi_base);
+        nic_pin = (uint8_t)(virtio_net_irq_line() - acpi.ioapic_gsi_base);
         ioapic_set_redirection(nic_pin, VECTOR_VIRTIO_NET,
                                1 /* active-low */, 1 /* level */,
                                (uint8_t)lapic_get_id());
@@ -297,9 +299,50 @@ void kmain(void *multiboot_info) {
 
     }
     if (ac97_init() == 0) {
-        // IRQ routing for the AC97 line is added in Task 2, once
-        // there is an interrupt to acknowledge -- probing/reset
-        // alone need no interrupt.
+        uint8_t ac97_pin = (uint8_t)(ac97_irq_line() - acpi.ioapic_gsi_base);
+        if (virtio_net_present && ac97_pin == nic_pin) {
+            // Shared PCI interrupt line (QEMU put both devices' INTx on
+            // the same GSI -- confirmed via [pci]'s own irq= log lines,
+            // not assumed). A second ioapic_set_redirection on the same
+            // pin would silently overwrite virtio-net's entry and steal
+            // its interrupts entirely -- confirmed by an earlier attempt
+            // at this: virtio-net's ARP/DHCP/ICMP/DNS selftests all
+            // failed the moment AC97 was added.
+            //
+            // Riding the existing vector (calling both drivers' IRQ
+            // handlers from one dispatch) was tried next and is NOT
+            // safe here: virtio_net_irq() unconditionally reads
+            // virtio's ISR register, which the driver's own comment
+            // documents as side-effecting ("acknowledges the interrupt
+            // AT THE DEVICE"). Every AC97 completion interrupt then
+            // caused a spurious extra ack on the virtio device, which
+            // was reproduced causing an unrelated TLB shootdown
+            // selftest to fail (confirmed by disabling AC97's DMA
+            // start and watching the failure disappear). Sharing a
+            // vector is only safe when every handler on it tolerates a
+            // spurious call with zero side effects; virtio_net_irq()
+            // does not, and changing it is out of this driver's scope.
+            //
+            // So: this configuration (this QEMU build's -device AC97
+            // placed at addr=0x6 in the Makefile) does not actually hit
+            // this branch -- AC97 lands on a different GSI than
+            // virtio-net's. This branch exists as an honest fallback
+            // for a future config where a collision does happen: skip
+            // routing AC97's interrupt at all (leave the IOAPIC entry
+            // alone) rather than corrupt an unrelated driver. AC97
+            // still works for playback; it just cannot report DMA
+            // completion via interrupt in that case.
+            serial_write_string("[ioapic] ac97 shares virtio-net's gsi=");
+            serial_write_hex64(ac97_irq_line());
+            serial_write_string(" -- interrupt routing skipped (see kernel.c)\n");
+        } else {
+            ioapic_set_redirection(ac97_pin, VECTOR_AC97,
+                                   1 /* active-low */, 1 /* level */,
+                                   (uint8_t)lapic_get_id());
+            serial_write_string("[ioapic] ac97 routed: gsi=");
+            serial_write_hex64(ac97_irq_line());
+            serial_write_string(" vector=0x23\n");
+        }
     }
     // Selftest runs immediately after init, not grouped with the
     // early fb_device_selftest()/fbcon_selftest() calls -- ac97_init()
