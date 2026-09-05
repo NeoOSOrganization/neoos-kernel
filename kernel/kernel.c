@@ -54,6 +54,7 @@
 #include "net/tcp.h"
 #include "net/eth.h"
 #include "drivers/net/virtio_net.h"
+#include "drivers/audio/ac97.h"
 #include "lib/rand.h"
 
 void kernel_shutdown(void) {
@@ -295,6 +296,16 @@ void kmain(void *multiboot_info) {
         serial_write_string(" vector=0x22\n");
 
     }
+    if (ac97_init() == 0) {
+        // IRQ routing for the AC97 line is added in Task 2, once
+        // there is an interrupt to acknowledge -- probing/reset
+        // alone need no interrupt.
+    }
+    // Selftest runs immediately after init, not grouped with the
+    // early fb_device_selftest()/fbcon_selftest() calls -- ac97_init()
+    // itself runs this late (after PCI enumeration), so its selftest
+    // must too.
+    ac97_selftest();
     // AFTER process_init: it starts a kernel thread. The queue would
     // simply fill and drop without one, which is why the driver may be
     // brought up first.

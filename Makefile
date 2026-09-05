@@ -51,7 +51,7 @@ ISO_DIR := iso
 # picked up silently.
 KERNEL_DIRS := kernel kernel/arch kernel/drivers/video kernel/drivers/input \
 	kernel/drivers/block kernel/drivers/char kernel/drivers/irq kernel/drivers/acpi \
-	kernel/drivers/pci kernel/drivers/virtio kernel/drivers/net \
+	kernel/drivers/pci kernel/drivers/virtio kernel/drivers/net kernel/drivers/audio \
 	kernel/tty kernel/ipc kernel/smp \
 	kernel/syscall kernel/mm kernel/fs kernel/sched kernel/sync kernel/net kernel/lib
 C_SOURCES := $(foreach d,$(KERNEL_DIRS),$(wildcard $(d)/*.c))
@@ -362,6 +362,7 @@ QEMU_COMMON := $(QEMU_MACHINE) -smp $(SMP_CPUS) -boot order=d \
 	-drive file=$(DISK_IMG),format=raw -drive file=$(DISK2_IMG),format=raw \
 	-vga std \
 	$(QEMU_NET) \
+	-device AC97 \
 	-no-reboot
 
 # -vga std: the plain Bochs-VBE standard VGA -- a dumb linear
