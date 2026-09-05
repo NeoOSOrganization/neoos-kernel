@@ -19,7 +19,10 @@
 #                         NeoOS
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
-musl="$here/../musl"
+# Defaults to the monorepo layout (shim and musl as siblings under
+# third_party/); the neoos-musl repo, where musl lives in its own repo
+# instead, overrides this to point at its checkout instead.
+musl="${MUSL_DIR:-$here/../musl}"
 
 [ -d "$musl/arch/x86_64" ] || {
     echo "musl submodule missing: run 'git submodule update --init --recursive'" >&2
