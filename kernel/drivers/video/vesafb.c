@@ -1,6 +1,5 @@
 #include "drivers/video/fb.h"
 #include "drivers/video/fb_device.h"
-#include "drivers/video/vesafb_internal.h"
 #include "drivers/char/serial.h"
 #include "mm/paging.h"
 #include "mm/vma.h"
@@ -9,7 +8,21 @@
 #include "sched/proc.h"
 #include "errno.h"
 
-struct fb_info fb;
+// vesafb's own state -- the Multiboot2 linear framebuffer. Not a public
+// interface: everything outside kernel/drivers/video/ goes through
+// fb_device.h (the abstraction) or fb.h (the /dev/fb0 surface).
+struct fb_info {
+    uint64_t phys;                 // framebuffer physical base
+    uint64_t size;                 // pitch * height, rounded up to a page
+    uint32_t pitch;                // bytes per scanline
+    uint32_t width, height;        // pixels
+    uint8_t  bpp;                  // 32 only
+    struct { uint8_t pos, size; } r, g, b;   // channel bit positions
+    volatile uint8_t *virt;        // kernel VA once fb_map() runs, else 0
+    int      present;              // 0 => VGA text fallback
+};
+
+static struct fb_info fb;
 
 // Multiboot2 framebuffer info tag (type 8). Layout from the spec:
 // common header, then addr/pitch/width/height, then bpp + type + a
@@ -39,7 +52,7 @@ struct mb2_fb_tag {
     uint8_t  b_pos, b_size;
 } __attribute__((packed));
 
-void vesafb_parse(void *multiboot_info) {
+static void vesafb_parse(void *multiboot_info) {
     if (fb.present) { return; }   // idempotent: probe may run more than once
     fb.present = 0;
 
@@ -164,6 +177,28 @@ static int vesafb_set_mode(const struct fb_mode *m) {
             m->bpp == cur.bpp) ? 0 : -EINVAL;
 }
 
+// Copies `n` bytes from `s` to volatile `d`, 32 bytes (four uint64_t
+// stores) per iteration, falling back to 8-byte and then byte copies
+// for the tail (x86_64 tolerates unaligned loads/stores fine). No
+// memcpy is linked into this freestanding kernel (see net.c/devfs.c's
+// own local copy helpers), and the kernel is built with -mno-sse
+// (KCFLAGS), so wide vector stores (XMM/YMM) are not available here --
+// this is scalar GPR stores unrolled to cut loop-branch overhead, the
+// widest safe copy without turning on kernel-side FPU/SSE state.
+static void blit_row(volatile uint8_t *d, const uint8_t *s, uint32_t n) {
+    uint32_t i = 0;
+    for (; i + 32 <= n; i += 32) {
+        *(volatile uint64_t *)(d + i +  0) = *(const uint64_t *)(s + i +  0);
+        *(volatile uint64_t *)(d + i +  8) = *(const uint64_t *)(s + i +  8);
+        *(volatile uint64_t *)(d + i + 16) = *(const uint64_t *)(s + i + 16);
+        *(volatile uint64_t *)(d + i + 24) = *(const uint64_t *)(s + i + 24);
+    }
+    for (; i + 8 <= n; i += 8) {
+        *(volatile uint64_t *)(d + i) = *(const uint64_t *)(s + i);
+    }
+    for (; i < n; i++) { d[i] = s[i]; }
+}
+
 static void vesafb_blit(const void *src, uint32_t src_pitch,
                          int dst_x, int dst_y, int w, int h) {
     if (!fb.present) { return; }
@@ -175,7 +210,7 @@ static void vesafb_blit(const void *src, uint32_t src_pitch,
     // whose native format genuinely differs would convert here,
     // isolated to its own blit implementation.
     for (int row = 0; row < h; row++) {
-        for (int col = 0; col < w * 4; col++) { d[col] = s[col]; }
+        blit_row(d, s, (uint32_t)w * 4);
         s += src_pitch;
         d += fb.pitch;
     }

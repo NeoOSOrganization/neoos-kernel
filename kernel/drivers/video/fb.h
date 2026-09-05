@@ -4,8 +4,8 @@
 #include <stdint.h>
 
 // The /dev/fb0 surface. The framebuffer itself is an fb_device (see
-// fb_device.h); vesafb's own state and the MB2 parse live in
-// vesafb_internal.h. This header is just the character device.
+// fb_device.h); vesafb's own state and the MB2 parse are private to
+// vesafb.c. This header is just the character device.
 
 // Map the active framebuffer into the kernel higher half and set
 // fb.virt (physmap when it reaches, else FB_VIRT_BASE). Needs pmm +
