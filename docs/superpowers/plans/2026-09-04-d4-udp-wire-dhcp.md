@@ -18,6 +18,9 @@ host cooperation and no privileges.
 
 **Spec:** `docs/superpowers/specs/2026-09-04-d2-d5-network-stack-design.md` §5
 
+**Status:** DONE. Results, including everything the design did not
+predict, are in the spec's section 10.
+
 ## Global Constraints
 
 - **Depends on D2 and D3.**
