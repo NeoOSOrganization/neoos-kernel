@@ -78,6 +78,20 @@ SECTIONS
         __rodata_end = .;
     }
 
+    /* The exception table: one 16-byte entry per recoverable
+       copy_to_user/copy_from_user instruction (kernel/mm/uaccess.c),
+       walked by isr.c's page-fault handler. 8-byte aligned, not 4K --
+       there will be tens of entries, not enough to justify a whole
+       page. Sits between .rodata and .data so it inherits NX from
+       paging.c's "everything from .rodata onward is NX" pass, which
+       is correct: this section holds addresses, never executed code. */
+    .ex_table ALIGN(8) : AT(ADDR(.ex_table) - KERNEL_VIRT_BASE)
+    {
+        __ex_table_start = .;
+        *(.ex_table)
+        __ex_table_end = .;
+    }
+
     .data ALIGN(4K) : AT(ADDR(.data) - KERNEL_VIRT_BASE)
     {
         __data_start = .;
