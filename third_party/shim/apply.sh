@@ -46,4 +46,4 @@ install "$here/vfork.s"             src/process/x86_64/vfork.s
 # Not a replacement: a new file, so no .orig to keep.
 cp "$here/neoos_syscall.c" "$musl/src/internal/neoos_syscall.c"
 
-echo "shim installed into third_party/musl"
+echo "shim installed into $musl"
