@@ -13,6 +13,17 @@
 # twice): processing entries strictly in order and always anchoring to
 # the most recent match means a later entry anchored on that same name
 # correctly lands after the LATEST occurrence, not the first.
+#
+# A missing anchor is a WARNING, not a fatal error: it means the entry
+# it anchors onto simply wasn't embedded (e.g. BusyBox's bbspike
+# anchors onto "thrdmany", a test-suite entry -- assembling an image
+# with BusyBox but tests.include: false must still succeed; BusyBox
+# itself is still embedded and usable, it just won't get an inittab
+# line wiring it into a regression check that has nothing to anchor
+# to). This is intentionally visible (stderr), not silent -- if the
+# missing anchor WAS supposed to be there (a real regression), `make
+# test`'s REQUIRED_MARKERS check still fails loudly, since the marker
+# this entry would have produced never appears in the serial log.
 import json
 import sys
 
@@ -28,8 +39,8 @@ def main():
         anchor = f"/{entry['after']}.nex"
         matches = [i for i, l in enumerate(lines) if not l.lstrip().startswith("#") and anchor in l]
         if not matches:
-            print(f"error: no inittab line matches anchor '{anchor}' for entry {entry!r}", file=sys.stderr)
-            sys.exit(1)
+            print(f"warning: no inittab line matches anchor '{anchor}' -- skipping {entry['line']!r}", file=sys.stderr)
+            continue
         idx = max(matches)
         lines.insert(idx + 1, entry["line"])
 
