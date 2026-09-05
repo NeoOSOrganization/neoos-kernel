@@ -547,3 +547,79 @@ sharing unsafely) if some future configuration collides again. Any
 future driver sharing an IOAPIC vector with an existing one must
 confirm that existing one's IRQ handler is provably safe to call
 spuriously before doing so.
+
+## Refresh — fault-tolerant user-copy machinery (2026-09-06)
+
+**The bug this closes:** `sys_read()` (and, it turned out, nearly every
+other syscall touching a user buffer) passed the raw user pointer
+straight into the underlying object's `read`/`write`/fill routine
+(`fatfs_read`, `net_udp_output`, `vfs_stat_vnode`'s caller, ...), which
+dereferences it from kernel context with no fault-recovery of any kind.
+A destination page that had never been touched (a fresh `malloc()`
+region, the common case for a program's very first `read()` into a
+buffer) has no frame mapped yet; the resulting page fault happened at
+CPL0 and hit the "kernel bug, halt" path instead of being demand-paged
+in. Found via the neoos-doom port's WAD loader, which does exactly
+that; general enough that it could halt the kernel on any large-enough
+first read anywhere in userland.
+
+**The fix:** a real exception-table mechanism, matching what Linux and
+every other production kernel does — not a per-syscall patch.
+`copy_to_user`/`copy_from_user` (`kernel/mm/uaccess.h`/`.c`) copy byte
+by byte inside an inline-asm block whose instruction address is
+recorded in a `.ex_table` linker section alongside a fixup address.
+`kernel/arch/isr.c`'s page-fault dispatcher, on a ring-0 fault whose
+`rip` matches an exception-table entry, first tries `vma_fault()` (the
+same demand-paging path ring-3 faults already used) — if the process
+has a real VMA covering the address, the frame is installed and the
+faulting instruction retried transparently. Only a genuinely invalid
+address falls through to the recorded fixup, which reports a partial
+byte count back to the C caller instead of halting the machine. Every
+OTHER ring-0 fault, at any other address, is unaffected — this is an
+opt-in for instructions the kernel itself marked recoverable, not a
+blanket "ring-0 faults are fine" rule.
+
+**Converted to the new primitive, full audit (not just the crashing
+site):** every unguarded direct dereference of a user pointer across
+`sys_read`/`sys_write`/`sys_readv`/`sys_writev`/`sys_getdents`,
+`stat`/`lstat`/`fstat`/`newfstatat`/`getcwd`/`pipe2` (sys_file.c),
+`clock_gettime`/`nanosleep` (sys_misc.c), `wait4`/`thread_join`
+(sys_proc.c), the full `rt_sig*`/`sigaltstack` family (sys_signal.c),
+`arch_prctl(ARCH_GET_FS)`/`getrandom` (sys_mem.c), `poll`/`select`
+(sys_poll.c), and the socket family's address/option marshalling plus
+`sendto`/`recvfrom`/generic `read`/`write` on a socket fd (net/socket.c,
+including `net_udp_output`'s destination-buffer safety — sendto now
+copies the whole payload into a kernel staging buffer before that call
+rather than handing it a raw user pointer). Two sites were explicitly
+excluded, by design rather than oversight: `ipc/futex.c` (the futex
+word must be touched atomically; a byte-loop copy cannot preserve
+that), and `copy_user_vector` in sys_proc.c's exec-argument path
+(already correct via a proven, independent incremental-validation
+approach predating this work).
+
+**Locking, checked at every conversion:** `copy_to_user`/
+`copy_from_user`'s fault path takes `mm_lock` (`LOCK_RANK_MM` = 3) via
+`vma_fault`. Every converted site was checked for a lock ranked >= 3
+still held at the moment of copy; `sys_rt_sigaction` was the one real
+case (`p->lock`, taken via `spin_lock_irqsave` — IRQs off, and a fault
+under IRQs-off spinning into `vma_fault`'s allocation/sleep path would
+be its own bug) and was restructured to copy in before the lock and
+copy out after, rather than across it.
+
+**A second bug this audit found along the way, same family:** several
+already-guarded sites (`sys_mem.c`'s `getrandom`, `sys_poll.c`'s
+`poll`/`select`, `net/socket.c`'s address/option calls) used
+`user_range_writable`/`user_range_readable` — a pre-flight check for
+`PAGE_PRESENT`, not a copy mechanism — which rejects a valid-but-
+untouched page exactly like the crash above, just returning `-EFAULT`
+instead of halting. Migrated onto `copy_to_user`/`copy_from_user` for
+the same reason as the unguarded sites: a first-touch page should
+demand-page in and succeed, not fail.
+
+Verified: the full `[uaccess] selftest` (baseline correctness; a
+process-less boot has no VMA list to make demand-paging or
+invalid-address behavior meaningful to test, so those two properties
+are verified by the real neoos-doom regression instead — see that
+port's own history) plus a clean 15/15 gauntlet after each of the three
+conversion passes (read/write family, stat/signal/wait family,
+already-guarded migrations).

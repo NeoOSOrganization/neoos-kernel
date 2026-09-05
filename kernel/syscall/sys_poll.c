@@ -16,6 +16,7 @@
 #include "drivers/char/timer.h"
 #include "mm/paging.h"
 #include "mm/heap.h"
+#include "mm/uaccess.h"
 #include "errno.h"
 
 // Stack budget for a small poll. Not a ceiling: past this the array is
@@ -127,7 +128,7 @@ int64_t sys_poll(struct syscall_args *a) {
     // CS2.2; this is the same fix on the other call.
     if (n > FD_TABLE_MAX) { return -EINVAL; }
     if (n == 0) { return 0; }
-    if (!user_range_writable(uptr, n * sizeof(struct pollfd))) { return -EFAULT; }
+    if (!uptr) { return -EFAULT; }
 
     // Small polls -- which is nearly all of them -- stay on the stack.
     // Only a large set pays for an allocation, and 16384 pollfds would
@@ -139,19 +140,14 @@ int64_t sys_poll(struct syscall_args *a) {
         if (!pfd) { return -ENOMEM; }
     }
 
-    for (unsigned i = 0; i < n; i++) {
-        struct pollfd *up = (struct pollfd *)(uintptr_t)(uptr + i * sizeof(struct pollfd));
-        pfd[i].fd     = up->fd;
-        pfd[i].events = up->events;
-        pfd[i].revents = 0;
-    }
+    uint64_t missed = copy_from_user(pfd, (const void *)(uintptr_t)uptr, (uint64_t)n * sizeof(struct pollfd));
+    if (missed > 0) { if (pfd != small) { kfree(pfd); } return -EFAULT; }
+    for (unsigned i = 0; i < n; i++) { pfd[i].revents = 0; }
 
     int64_t r = poll_core(pfd, n, deadline_from_ms(tmo));
     if (r >= 0) {
-        for (unsigned i = 0; i < n; i++) {
-            struct pollfd *up = (struct pollfd *)(uintptr_t)(uptr + i * sizeof(struct pollfd));
-            up->revents = pfd[i].revents;
-        }
+        missed = copy_to_user((void *)(uintptr_t)uptr, pfd, (uint64_t)n * sizeof(struct pollfd));
+        if (missed > 0) { r = -EFAULT; }
     }
     if (pfd != small) { kfree(pfd); }
     return r;
@@ -167,12 +163,13 @@ int64_t sys_select(struct syscall_args *a) {
     if (nfds < 0 || nfds > FD_SETSIZE) { return -EINVAL; }
 
     uint64_t rd[FD_WORDS] = {0}, wr[FD_WORDS] = {0}, ex[FD_WORDS] = {0};
-    if (urd) { if (!user_range_writable(urd, sizeof rd)) { return -EFAULT; }
-               for (int i = 0; i < FD_WORDS; i++) { rd[i] = ((uint64_t *)(uintptr_t)urd)[i]; } }
-    if (uwr) { if (!user_range_writable(uwr, sizeof wr)) { return -EFAULT; }
-               for (int i = 0; i < FD_WORDS; i++) { wr[i] = ((uint64_t *)(uintptr_t)uwr)[i]; } }
-    if (uex) { if (!user_range_writable(uex, sizeof ex)) { return -EFAULT; }
-               for (int i = 0; i < FD_WORDS; i++) { ex[i] = ((uint64_t *)(uintptr_t)uex)[i]; } }
+    uint64_t missed;
+    if (urd) { missed = copy_from_user(rd, (const void *)(uintptr_t)urd, sizeof rd);
+               if (missed > 0) { return -EFAULT; } }
+    if (uwr) { missed = copy_from_user(wr, (const void *)(uintptr_t)uwr, sizeof wr);
+               if (missed > 0) { return -EFAULT; } }
+    if (uex) { missed = copy_from_user(ex, (const void *)(uintptr_t)uex, sizeof ex);
+               if (missed > 0) { return -EFAULT; } }
 
     // Collect the set bits into a pollfd array sized to what the caller
     // actually described. This used to be a fixed 16-entry array
@@ -204,10 +201,10 @@ int64_t sys_select(struct syscall_args *a) {
 
     int timeout_ms = -1;
     if (utv) {
-        if (!user_range_writable(utv, 16)) { kfree(pfd); return -EFAULT; }
-        long sec  = ((long *)(uintptr_t)utv)[0];
-        long usec = ((long *)(uintptr_t)utv)[1];
-        timeout_ms = (int)(sec * 1000 + usec / 1000);
+        long tv[2];
+        uint64_t m = copy_from_user(tv, (const void *)(uintptr_t)utv, sizeof tv);
+        if (m > 0) { kfree(pfd); return -EFAULT; }
+        timeout_ms = (int)(tv[0] * 1000 + tv[1] / 1000);
         if (timeout_ms < 0) { timeout_ms = 0; }
     }
 
@@ -223,9 +220,10 @@ int64_t sys_select(struct syscall_args *a) {
         if (pfd[i].revents & POLLOUT) { wr[w] |= (1ULL << b); count++; }
         if (pfd[i].revents & (POLLERR | POLLHUP | POLLNVAL)) { ex[w] |= (1ULL << b); count++; }
     }
-    if (urd) { for (int i = 0; i < FD_WORDS; i++) { ((uint64_t *)(uintptr_t)urd)[i] = rd[i]; } }
-    if (uwr) { for (int i = 0; i < FD_WORDS; i++) { ((uint64_t *)(uintptr_t)uwr)[i] = wr[i]; } }
-    if (uex) { for (int i = 0; i < FD_WORDS; i++) { ((uint64_t *)(uintptr_t)uex)[i] = ex[i]; } }
+    int64_t out_rc = count;
+    if (urd) { missed = copy_to_user((void *)(uintptr_t)urd, rd, sizeof rd); if (missed > 0) { out_rc = -EFAULT; } }
+    if (uwr) { missed = copy_to_user((void *)(uintptr_t)uwr, wr, sizeof wr); if (missed > 0) { out_rc = -EFAULT; } }
+    if (uex) { missed = copy_to_user((void *)(uintptr_t)uex, ex, sizeof ex); if (missed > 0) { out_rc = -EFAULT; } }
     kfree(pfd);
-    return count;
+    return out_rc;
 }

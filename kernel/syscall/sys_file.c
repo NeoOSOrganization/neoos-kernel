@@ -22,9 +22,63 @@
 #include "mm/vma.h"
 #include "mm/paging.h"
 #include "mm/heap.h"
+#include "mm/uaccess.h"
 #include "arch/cpu_local.h"
 #include "smp/smp.h"
 #include "net/socket.h"
+
+// Bounced through a kernel staging buffer: file_read/file_write's
+// underlying vnode/device implementations (fatfs_read, evdev_fop_read,
+// ...) dereference their `buf` argument directly with no user-copy
+// awareness of their own, so the safe copy has to happen at THIS
+// layer. STAGE_MAX caps the staging buffer to one page -- larger
+// reads/writes loop, each chunk safely copied to/from user memory
+// after the underlying read/write completes. read_to_user is the
+// exact call site that crashed on Doom's WAD load (kernel/fs/fatfs.c's
+// fat16_read_at_v, confirmed via addr2line against the fault RIP --
+// see docs/superpowers/specs/2026-09-06-fault-tolerant-user-copy-design.md's
+// Trigger section). Shared by sys_read/sys_write and rw_vectored
+// (readv/writev), which is why these are defined up here rather than
+// inlined into sys_read/sys_write directly.
+#define STAGE_MAX 4096
+
+static int64_t read_to_user(struct file_descriptor *f, uint64_t uptr, uint64_t remaining) {
+    uint8_t stage[STAGE_MAX];
+    int64_t total = 0;
+    while (remaining > 0) {
+        uint64_t chunk = remaining < STAGE_MAX ? remaining : STAGE_MAX;
+        int64_t rc = file_read(f, stage, chunk);
+        if (rc < 0) { return total > 0 ? total : rc; }
+        if (rc == 0) { break; }   // EOF
+        uint64_t missed = copy_to_user((void *)(uintptr_t)(uptr + (uint64_t)total), stage, (uint64_t)rc);
+        if (missed > 0) {
+            // Partial copy: report what genuinely reached user memory.
+            total += (int64_t)((uint64_t)rc - missed);
+            return total > 0 ? total : -EFAULT;
+        }
+        total += rc;
+        remaining -= (uint64_t)rc;
+        if ((uint64_t)rc < chunk) { break; }   // short read from the underlying object ends the call
+    }
+    return total;
+}
+
+static int64_t write_from_user(struct file_descriptor *f, uint64_t uptr, uint64_t remaining) {
+    uint8_t stage[STAGE_MAX];
+    int64_t total = 0;
+    while (remaining > 0) {
+        uint64_t chunk = remaining < STAGE_MAX ? remaining : STAGE_MAX;
+        uint64_t missed = copy_from_user(stage, (const void *)(uintptr_t)(uptr + (uint64_t)total), chunk);
+        uint64_t got = chunk - missed;
+        if (got == 0) { return total > 0 ? total : -EFAULT; }
+        int64_t rc = file_write(f, stage, got);
+        if (rc < 0) { return total > 0 ? total : rc; }
+        total += rc;
+        remaining -= (uint64_t)rc;
+        if ((uint64_t)rc < got || missed > 0) { break; }   // short write, or the source had a bad page: end here
+    }
+    return total;
+}
 
 // The four fd operations are now four lines each. Whether the target
 // is a file, a pipe or (later) a socket is the file layer's business;
@@ -33,13 +87,13 @@
 int64_t sys_write(struct syscall_args *a) {
     struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
     if (!f) { return -EBADF; }
-    return file_write(f, (const void *)(uintptr_t)a->a2, (uint64_t)a->a3);
+    return write_from_user(f, (uint64_t)a->a2, (uint64_t)a->a3);
 }
 
 int64_t sys_read(struct syscall_args *a) {
     struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
     if (!f) { return -EBADF; }
-    return file_read(f, (void *)(uintptr_t)a->a2, (uint64_t)a->a3);
+    return read_to_user(f, (uint64_t)a->a2, (uint64_t)a->a3);
 }
 
 int64_t sys_open(struct syscall_args *a) {
@@ -195,9 +249,21 @@ int64_t sys_getdents(struct syscall_args *a) {
     if (bytes <= 0) { return -EINVAL; }
     struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
     if (!f) { return -EBADF; }
-    void *buf = (void *)(uintptr_t)a->a2;
-    if (!buf) { return -EFAULT; }
-    return file_getdents(f, buf, bytes);
+    uint64_t uptr = a->a2;
+    if (!uptr) { return -EFAULT; }
+
+    // Page-capped: file_getdents fills the buffer directly with
+    // Linux-shaped dirent records (variable length, so it must pick
+    // how many fit itself) -- one bounded staging call gives it a
+    // buffer to fill and then a single copy_to_user relays exactly
+    // what it wrote, same as every other direct-buffer object here.
+    uint64_t chunk = (uint64_t)bytes < STAGE_MAX ? (uint64_t)bytes : STAGE_MAX;
+    uint8_t stage[STAGE_MAX];
+    int64_t rc = file_getdents(f, stage, (int)chunk);
+    if (rc <= 0) { return rc; }
+    uint64_t missed = copy_to_user((void *)(uintptr_t)uptr, stage, (uint64_t)rc);
+    if (missed > 0) { return -EFAULT; }
+    return rc;
 }
 
 int64_t sys_fcntl(struct syscall_args *a) {
@@ -319,25 +385,23 @@ int64_t sys_getcwd(struct syscall_args *a) {
     uint64_t size = (uint64_t)a->a2;
     if (size < len) { return -ERANGE; }
 
-    char *out = (char *)(uintptr_t)a->a1;
+    uint64_t out = (uint64_t)a->a1;
     if (!out) { return -EFAULT; }
-    for (uint64_t i = 0; i < len; i++) { out[i] = cwd[i]; }
+    uint64_t missed = copy_to_user((void *)(uintptr_t)out, cwd, len);
+    if (missed > 0) { return -EFAULT; }
     return (int64_t)len;
 }
 
 int64_t sys_pipe2(struct syscall_args *a) {
-    int *user_fds = (int *)(uintptr_t)a->a1;
+    uint64_t user_fds = a->a1;
     if (!user_fds) { return -EFAULT; }
-    if (!user_range_writable((uint64_t)(uintptr_t)user_fds, 2 * sizeof(int))) {
-        return -EFAULT;
-    }
     int fds[2];
     int rc = pipe_create(fds, (int)a->a2);
     if (rc != 0) { return rc; }
     // Written only after both ends exist, so a failure leaves the
     // caller's array untouched rather than half-filled.
-    user_fds[0] = fds[0];
-    user_fds[1] = fds[1];
+    uint64_t missed = copy_to_user((void *)(uintptr_t)user_fds, fds, sizeof fds);
+    if (missed > 0) { return -EFAULT; }
     return 0;
 }
 
@@ -347,8 +411,7 @@ int64_t sys_pipe2(struct syscall_args *a) {
 // vnode. They differ only in HOW the vnode is reached.
 
 static int64_t stat_by_path(int64_t uptr, int64_t ulen, int64_t out_ptr) {
-    struct stat *out = (struct stat *)(uintptr_t)out_ptr;
-    if (!out) { return -EFAULT; }
+    if (!out_ptr) { return -EFAULT; }
 
     char path[VFS_MAX_PATH];
     int rc = copy_user_path_at(uptr, ulen, path);
@@ -364,7 +427,11 @@ static int64_t stat_by_path(int64_t uptr, int64_t ulen, int64_t out_ptr) {
     vnode_put(vn);
     fs_lock_release();
 
-    *out = st;
+    // fs_lock (LOCK_RANK_MOUNTTABLE = 4) is released above, before this
+    // touches user memory: copy_to_user's fault path takes mm_lock
+    // (LOCK_RANK_MM = 3), and 3 < 4 would be a rank violation held live.
+    uint64_t missed = copy_to_user((void *)(uintptr_t)out_ptr, &st, sizeof st);
+    if (missed > 0) { return -EFAULT; }
     return 0;
 }
 
@@ -380,7 +447,7 @@ int64_t sys_lstat(struct syscall_args *a) {
 }
 
 int64_t sys_fstat(struct syscall_args *a) {
-    struct stat *out = (struct stat *)(uintptr_t)a->a2;
+    uint64_t out = (uint64_t)a->a2;
     if (!out) { return -EFAULT; }
 
     struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
@@ -395,7 +462,8 @@ int64_t sys_fstat(struct syscall_args *a) {
     vfs_stat_vnode(f->vn, &st);
     fs_lock_release();
 
-    *out = st;
+    uint64_t missed = copy_to_user((void *)(uintptr_t)out, &st, sizeof st);
+    if (missed > 0) { return -EFAULT; }
     return 0;
 }
 
@@ -451,13 +519,26 @@ static int64_t rw_vectored(struct syscall_args *a, int writing) {
     struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
     if (!f) { return -EBADF; }
 
-    const struct iovec_user *iov = (const struct iovec_user *)(uintptr_t)a->a2;
+    uint64_t iov_uptr = a->a2;
     int n = (int)a->a3;
-    if (!iov && n != 0) { return -EFAULT; }
+    if (!iov_uptr && n != 0) { return -EFAULT; }
     if (n < 0) { return -EINVAL; }
     // Linux caps this at IOV_MAX (1024) with -EINVAL. NeoOS's cap is
     // lower and reported the same way, rather than silently truncating.
     if (n > IOV_MAX_NEOOS) { return -EINVAL; }
+
+    // The iovec array itself lives in user memory -- indexing it
+    // directly (the pre-uaccess code above did exactly that) is the
+    // same class of bug as the WAD-load crash, just on the descriptor
+    // array instead of the data buffer. Bounced through a stack copy
+    // once, up front: IOV_MAX_NEOOS is small enough that this needs no
+    // staging loop of its own.
+    struct iovec_user iov[IOV_MAX_NEOOS];
+    if (n > 0) {
+        uint64_t missed = copy_from_user(iov, (const void *)(uintptr_t)iov_uptr,
+                                          (uint64_t)n * sizeof(struct iovec_user));
+        if (missed > 0) { return -EFAULT; }
+    }
 
     int64_t total = 0;
     for (int i = 0; i < n; i++) {
@@ -466,8 +547,8 @@ static int64_t rw_vectored(struct syscall_args *a, int writing) {
         if (len == 0) { continue; }
         if (!base) { return total > 0 ? total : -EFAULT; }
 
-        int64_t rc = writing ? file_write(f, (const void *)(uintptr_t)base, len)
-                             : file_read(f, (void *)(uintptr_t)base, len);
+        int64_t rc = writing ? write_from_user(f, base, len)
+                             : read_to_user(f, base, len);
         if (rc < 0) {
             // Bytes already transferred are reported; the error surfaces
             // on the next call. That is Linux's rule, and stdio depends

@@ -22,6 +22,7 @@
 #include "drivers/char/serial.h"
 #include "mm/heap.h"
 #include "mm/paging.h"
+#include "mm/uaccess.h"
 #include "sched/proc.h"
 #include "ipc/signal.h"
 #include "sched/fd_table.h"
@@ -297,26 +298,23 @@ static struct socket *sock_ref_of(int fd, int *nonblock) {
 static int addr_in(const struct k_sockaddr *addr, uint32_t len,
                    uint32_t *ip_n, uint16_t *port_n) {
     if (!addr || len < sizeof(struct k_sockaddr_in)) { return -EINVAL; }
-    if (!user_range_writable((uint64_t)(uintptr_t)addr,
-                             sizeof(struct k_sockaddr_in))) {
-        return -EFAULT;
-    }
-    const struct k_sockaddr_in *in = (const struct k_sockaddr_in *)addr;
-    if (in->sin_family != AF_INET) { return -EAFNOSUPPORT; }
-    *ip_n   = in->sin_addr.s_addr;
-    *port_n = in->sin_port;
+    struct k_sockaddr_in in;
+    uint64_t missed = copy_from_user(&in, addr, sizeof in);
+    if (missed > 0) { return -EFAULT; }
+    if (in.sin_family != AF_INET) { return -EAFNOSUPPORT; }
+    *ip_n   = in.sin_addr.s_addr;
+    *port_n = in.sin_port;
     return 0;
 }
 
 static int addr_out(struct k_sockaddr *addr, uint32_t *len,
                     uint32_t ip_n, uint16_t port_n) {
     if (!addr || !len) { return 0; }   // both optional, as POSIX has them
-    if (!user_range_writable((uint64_t)(uintptr_t)len, sizeof(uint32_t))) {
-        return -EFAULT;
-    }
-    uint32_t want = sizeof(struct k_sockaddr_in);
-    if (!user_range_writable((uint64_t)(uintptr_t)addr, want)) { return -EFAULT; }
+    uint32_t caller_len;
+    uint64_t missed = copy_from_user(&caller_len, len, sizeof caller_len);
+    if (missed > 0) { return -EFAULT; }
 
+    uint32_t want = sizeof(struct k_sockaddr_in);
     struct k_sockaddr_in in;
     for (unsigned i = 0; i < sizeof(in); i++) { ((uint8_t *)&in)[i] = 0; }
     in.sin_family      = AF_INET;
@@ -325,9 +323,11 @@ static int addr_out(struct k_sockaddr *addr, uint32_t *len,
 
     // POSIX truncates rather than failing, and reports the size it
     // WOULD have needed -- so a caller with a small buffer can tell.
-    uint32_t give = *len < want ? *len : want;
-    for (uint32_t i = 0; i < give; i++) { ((uint8_t *)addr)[i] = ((uint8_t *)&in)[i]; }
-    *len = want;
+    uint32_t give = caller_len < want ? caller_len : want;
+    missed = copy_to_user(addr, &in, give);
+    if (missed > 0) { return -EFAULT; }
+    missed = copy_to_user(len, &want, sizeof want);
+    if (missed > 0) { return -EFAULT; }
     return 0;
 }
 
@@ -467,17 +467,30 @@ int64_t socket_sendto(int fd, const void *buf, uint64_t len, int flags,
     (void)flags;   // MSG_* are all unimplemented; see docs/stdlib.md
     struct socket *s = sock_ref_of(fd, 0);
     if (!s) { return -EBADF; }
-    // send only READS buf -- a string literal in .rodata is a valid
-    // source (it stopped being writable when the ELF loader started
-    // honouring p_flags).
-    if (!user_range_readable((uint64_t)(uintptr_t)buf, len)) { sock_put(s); return -EFAULT; }
+    // net_udp_output's own copy loop dereferences `data` directly with
+    // no user-copy awareness (it was written to take a kernel buffer,
+    // and every OTHER caller -- dhcp.c, icmp.c, dnsprobe.c -- passes
+    // one). Bounced through a kernel staging buffer HERE rather than
+    // teaching net_udp_output about user memory, so its one job stays
+    // "build and send a UDP datagram from bytes it already has".
+    // 8 == sizeof(struct udp_header) in net.c (a UDP header is fixed by
+    // the protocol at 8 bytes; net_udp_output _Static_asserts this
+    // itself, but the type is private to that file, so the check here
+    // uses the literal rather than a struct it cannot see).
+    if (len > 65535 - 8) { sock_put(s); return -EMSGSIZE; }
+    uint8_t *kbuf = len ? (uint8_t *)kmalloc(len) : 0;
+    if (len && !kbuf) { sock_put(s); return -ENOBUFS; }
+    if (len) {
+        uint64_t missed = copy_from_user(kbuf, buf, len);
+        if (missed > 0) { kfree(kbuf); sock_put(s); return -EFAULT; }
+    }
 
     uint32_t dst_ip_n; uint16_t dst_port_n;
     if (dest) {
         int rc = addr_in(dest, dest_len, &dst_ip_n, &dst_port_n);
-        if (rc != 0) { sock_put(s); return rc; }
+        if (rc != 0) { if (kbuf) { kfree(kbuf); } sock_put(s); return rc; }
     } else {
-        if (!s->connected) { sock_put(s); return -EDESTADDRREQ; }
+        if (!s->connected) { if (kbuf) { kfree(kbuf); } sock_put(s); return -EDESTADDRREQ; }
         dst_ip_n   = s->peer_ip_n;
         dst_port_n = s->peer_port_n;
     }
@@ -490,6 +503,7 @@ int64_t socket_sendto(int fd, const void *buf, uint64_t len, int flags,
             uint16_t p = alloc_ephemeral(0);
             if (!p) {
                 spin_unlock_irqrestore(&sock_table_lock, tf);
+                if (kbuf) { kfree(kbuf); }
                 sock_put(s);
                 return -EADDRINUSE;
             }
@@ -508,7 +522,8 @@ int64_t socket_sendto(int fd, const void *buf, uint64_t len, int flags,
     uint32_t src_ip_n = s->local_ip_n ? s->local_ip_n : IP_LOOPBACK_N;
     int rc = net_udp_output(src_ip_n, s->local_port_n,
                             dst_ip_n ? dst_ip_n : IP_LOOPBACK_N, dst_port_n,
-                            (const uint8_t *)buf, (uint32_t)len);
+                            kbuf, (uint32_t)len);
+    if (kbuf) { kfree(kbuf); }
     sock_put(s);
     if (rc != 0) { return rc; }
     return (int64_t)len;
@@ -557,7 +572,8 @@ static int64_t recv_one(struct socket *s, int nonblock, void *buf, uint64_t len,
     // via MSG_TRUNC, which is not implemented; the return value is the
     // number of bytes actually delivered.
     uint32_t give = d->len < len ? d->len : (uint32_t)len;
-    for (uint32_t i = 0; i < give; i++) { ((uint8_t *)buf)[i] = d->data[i]; }
+    uint64_t missed = copy_to_user(buf, d->data, give);
+    if (missed > 0) { kfree(d); return -EFAULT; }
 
     int rc = addr_out(src, src_len, d->src_ip_n, d->src_port_n);
     kfree(d);
@@ -571,10 +587,6 @@ int64_t socket_recvfrom(int fd, void *buf, uint64_t len, int flags,
     int nonblock = 0;
     struct socket *s = sock_ref_of(fd, &nonblock);
     if (!s) { return -EBADF; }
-    if (!user_range_writable((uint64_t)(uintptr_t)buf, len)) {
-        sock_put(s);
-        return -EFAULT;
-    }
     int64_t rc = recv_one(s, nonblock, buf, len, src, src_len);
     sock_put(s);
     return rc;
@@ -754,10 +766,10 @@ int64_t socket_getpeername(int fd, struct k_sockaddr *addr, uint32_t *len) {
 int64_t socket_setsockopt(int fd, int level, int opt, const void *val, uint32_t len) {
     struct socket *s = sock_ref_of(fd, 0);
     if (!s) { return -EBADF; }
-    if (len < 4 || !user_range_readable((uint64_t)(uintptr_t)val, 4)) {
-        sock_put(s); return -EFAULT;
-    }
-    int v = *(const int *)val;
+    if (len < 4) { sock_put(s); return -EFAULT; }
+    int v;
+    uint64_t missed = copy_from_user(&v, val, sizeof v);
+    if (missed > 0) { sock_put(s); return -EFAULT; }
     int rc = 0;
     if (level == SOL_SOCKET && opt == SO_REUSEADDR) {
         if (s->tcb) { s->tcb->reuseaddr = v ? 1 : 0; }
@@ -781,10 +793,6 @@ int64_t socket_setsockopt(int fd, int level, int opt, const void *val, uint32_t 
 int64_t socket_getsockopt(int fd, int level, int opt, void *val, uint32_t *len) {
     struct socket *s = sock_ref_of(fd, 0);
     if (!s) { return -EBADF; }
-    if (!user_range_writable((uint64_t)(uintptr_t)val, 4) ||
-        !user_range_writable((uint64_t)(uintptr_t)len, 4)) {
-        sock_put(s); return -EFAULT;
-    }
     int v = 0;
     int rc = 0;
     if (level == SOL_SOCKET && opt == SO_ERROR) {
@@ -804,7 +812,12 @@ int64_t socket_getsockopt(int fd, int level, int opt, void *val, uint32_t *len) 
     } else {
         rc = -ENOPROTOOPT;
     }
-    if (rc == 0) { *(int *)val = v; *len = 4; }
+    if (rc == 0) {
+        uint32_t four = 4;
+        uint64_t missed = copy_to_user(val, &v, sizeof v);
+        if (missed == 0) { missed = copy_to_user(len, &four, sizeof four); }
+        if (missed > 0) { rc = -EFAULT; }
+    }
     sock_put(s);
     return rc;
 }
@@ -853,12 +866,19 @@ static int64_t stream_recv(struct socket *s, int nonblock, void *buf, uint64_t l
 // read/write on a socket are recvfrom/sendto with no address, which is
 // exactly what POSIX says they are. They work only on a connected
 // socket, because an unconnected one has nowhere to send.
+// buf here is ALWAYS kernel memory now, never a raw user pointer:
+// sys_read/sys_write (kernel/syscall/sys_file.c) are the only callers
+// of file_read/file_write, which is what reaches these through
+// f->ops->read/write, and both now bounce every transfer through a
+// kernel staging buffer before/after this call -- see read_to_user
+// and write_from_user. Checking user_range_writable/readable on a
+// KERNEL address here would always fail (it is well above
+// USER_ADDR_LIMIT), so those checks are gone rather than wrong.
 static int64_t sock_read(struct file_descriptor *f, void *buf, uint64_t len) {
     struct socket *s = (struct socket *)f->priv;
     if (!s) { return -EBADF; }
     if (s->type == SOCK_STREAM) {
         if (!s->tcb) { return -ENOTCONN; }
-        if (!user_range_writable((uint64_t)(uintptr_t)buf, len)) { return -EFAULT; }
         return stream_recv(s, f->nonblock, buf, len);
     }
     if (!s->bound) { return -ENOTCONN; }
@@ -870,7 +890,6 @@ static int64_t sock_write(struct file_descriptor *f, const void *buf, uint64_t l
     if (!s) { return -EBADF; }
     if (s->type == SOCK_STREAM) {
         if (!s->tcb) { return -ENOTCONN; }
-        if (!user_range_readable((uint64_t)(uintptr_t)buf, len)) { return -EFAULT; }
         return stream_send(s, f->nonblock, buf, len);
     }
     if (!s->connected) { return -ENOTCONN; }

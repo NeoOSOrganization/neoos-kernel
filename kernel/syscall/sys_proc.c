@@ -19,6 +19,7 @@
 #include "mm/vma.h"
 #include "mm/paging.h"
 #include "mm/heap.h"
+#include "mm/uaccess.h"
 #include "arch/cpu_local.h"
 #include "smp/smp.h"
 #include "net/socket.h"
@@ -329,7 +330,10 @@ int64_t sys_exec(struct syscall_args *a) {
 int64_t sys_wait4(struct syscall_args *a) {
     int st = 0;
     int64_t rc = wait4((int)a->a1, &st, (int)a->a3);
-    if (rc > 0 && a->a2) { *(int *)(uintptr_t)a->a2 = st; }
+    if (rc > 0 && a->a2) {
+        uint64_t missed = copy_to_user((void *)(uintptr_t)a->a2, &st, sizeof st);
+        if (missed > 0) { return -EFAULT; }
+    }
     return rc;
 }
 
@@ -383,7 +387,8 @@ int64_t sys_thread_join(struct syscall_args *a) {
     int code = 0;
     int rc = thread_join((int)a->a1, &code);
     if (rc == 0 && a->a2) {
-        *(int *)(uintptr_t)a->a2 = code;
+        uint64_t missed = copy_to_user((void *)(uintptr_t)a->a2, &code, sizeof code);
+        if (missed > 0) { return -EFAULT; }
     }
     return rc;
 }

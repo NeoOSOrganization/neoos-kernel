@@ -27,6 +27,7 @@
 #include "arch/cpu_local.h"
 #include "smp/smp.h"
 #include "net/socket.h"
+#include "mm/uaccess.h"
 
 int64_t sys_cpu_count(struct syscall_args *a) {
     (void)a;
@@ -68,7 +69,7 @@ int64_t sys_futex(struct syscall_args *a) {
 
 int64_t sys_clock_gettime(struct syscall_args *a) {
     int clk = (int)a->a1;
-    struct k_timespec *out = (struct k_timespec *)(uintptr_t)a->a2;
+    uint64_t out = (uint64_t)a->a2;
     if (!out) { return -EFAULT; }
 
     switch (clk) {
@@ -91,8 +92,9 @@ int64_t sys_clock_gettime(struct syscall_args *a) {
     // clocks now, which they were not when both were tick counters.
     if (clk == CLOCK_REALTIME) { sec += rtc_boot_epoch(); }
 
-    out->tv_sec  = sec;
-    out->tv_nsec = nsec;
+    struct k_timespec ts = { .tv_sec = sec, .tv_nsec = nsec };
+    uint64_t missed = copy_to_user((void *)(uintptr_t)out, &ts, sizeof ts);
+    if (missed > 0) { return -EFAULT; }
     return 0;
 }
 
@@ -103,13 +105,16 @@ int64_t sys_clock_gettime(struct syscall_args *a) {
 // DIVERGES: the remaining-time argument is ignored, because nothing
 // here can interrupt a sleep partway and report a remainder yet.
 int64_t sys_nanosleep(struct syscall_args *a) {
-    const struct k_timespec *req = (const struct k_timespec *)(uintptr_t)a->a1;
-    if (!req) { return -EFAULT; }
-    if (req->tv_nsec < 0 || req->tv_nsec >= 1000000000L || req->tv_sec < 0) {
+    uint64_t uptr = (uint64_t)a->a1;
+    if (!uptr) { return -EFAULT; }
+    struct k_timespec req;
+    uint64_t missed = copy_from_user(&req, (const void *)(uintptr_t)uptr, sizeof req);
+    if (missed > 0) { return -EFAULT; }
+    if (req.tv_nsec < 0 || req.tv_nsec >= 1000000000L || req.tv_sec < 0) {
         return -EINVAL;
     }
 
-    uint64_t ns    = (uint64_t)req->tv_sec * 1000000000ULL + (uint64_t)req->tv_nsec;
+    uint64_t ns    = (uint64_t)req.tv_sec * 1000000000ULL + (uint64_t)req.tv_nsec;
     uint64_t ticks = (ns + NS_PER_TICK - 1) / NS_PER_TICK;
     if (ticks == 0 && ns > 0) { ticks = 1; }
     if (ticks == 0) { return 0; }

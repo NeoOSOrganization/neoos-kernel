@@ -20,6 +20,7 @@
 #include "mm/vma.h"
 #include "mm/paging.h"
 #include "mm/heap.h"
+#include "mm/uaccess.h"
 #include "arch/cpu_local.h"
 #include "arch/msr.h"
 #include "smp/smp.h"
@@ -77,11 +78,9 @@ int64_t sys_arch_prctl(struct syscall_args *a) {
         return 0;
     }
     if ((int)a->a1 == ARCH_GET_FS) {
-        uint64_t *out = (uint64_t *)(uintptr_t)a->a2;
-        if (!user_range_writable((uint64_t)(uintptr_t)out, sizeof(uint64_t))) {
-            return -EFAULT;
-        }
-        *out = t->fs_base;
+        uint64_t out = a->a2;
+        uint64_t missed = copy_to_user((void *)(uintptr_t)out, &t->fs_base, sizeof t->fs_base);
+        if (missed > 0) { return -EFAULT; }
         return 0;
     }
     // ARCH_SET_GS / ARCH_GET_GS are deliberately absent. NeoOS uses GS
@@ -106,6 +105,8 @@ int64_t sys_arch_prctl(struct syscall_args *a) {
 #define GRND_RANDOM   0x0002
 #define GRND_INSECURE 0x0004
 
+#define GETRANDOM_STAGE_MAX 256
+
 int64_t sys_getrandom(struct syscall_args *a) {
     uint64_t uptr  = a->a1;
     uint64_t len   = a->a2;
@@ -115,8 +116,22 @@ int64_t sys_getrandom(struct syscall_args *a) {
         return -EINVAL;
     }
     if (len == 0) { return 0; }
-    if (!user_range_writable(uptr, len)) { return -EFAULT; }
+    if (!uptr) { return -EFAULT; }
 
-    rand_bytes((void *)(uintptr_t)uptr, len);
+    // Staged through a small kernel buffer, same reasoning as
+    // sys_file.c's read_to_user: rand_bytes fills its destination
+    // directly with no user-copy awareness, so the safe copy happens
+    // here. The stage buffer is small (256 bytes, not a full page) --
+    // getrandom() calls are typically for a key or a seed, never a bulk
+    // transfer, so there is no reason to reserve a page of stack for it.
+    uint8_t stage[GETRANDOM_STAGE_MAX];
+    uint64_t done = 0;
+    while (done < len) {
+        uint64_t chunk = len - done < GETRANDOM_STAGE_MAX ? len - done : GETRANDOM_STAGE_MAX;
+        rand_bytes(stage, chunk);
+        uint64_t missed = copy_to_user((void *)(uintptr_t)(uptr + done), stage, chunk);
+        if (missed > 0) { return done > 0 ? (int64_t)done : -EFAULT; }
+        done += chunk;
+    }
     return (int64_t)len;
 }
