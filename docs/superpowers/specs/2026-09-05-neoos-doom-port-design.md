@@ -96,9 +96,13 @@ neoos-doom/
 
 `DG_Init` opens and `mmap`s `/dev/fb0`, reads geometry via
 `FBIOGET_VSCREENINFO`/`FBIOGET_FSCREENINFO` (already implemented,
-`docs/stdlib.md`'s `/dev/fb0` section). `DG_ScreenBuffer` is sized
-320×200 (doomgeneric's native resolution — no internal upscaling asked
-of doomgeneric itself).
+`docs/stdlib.md`'s `/dev/fb0` section). `DOOMGENERIC_RESX`/
+`DOOMGENERIC_RESY` default to 640×400 in `doomgeneric.h` (doomgeneric's
+own 2x upscale of Doom's true 320×200 render) — overridden to `320`/
+`200` via `-D` compile flags (the header's `#ifndef` guard supports
+this) so `DG_ScreenBuffer` is the genuinely native buffer and this
+port's own integer-scale-to-fit (below) is the only scaling that
+happens, not doomgeneric's baked-in 2x stacked with a second one.
 
 `DG_DrawFrame` computes `scale = max(1, min(fb_width/320,
 fb_height/200))`, then blits `DG_ScreenBuffer` into the mmapped
@@ -215,7 +219,8 @@ DOOM_SRCS := $(filter-out \
 
 Same `MUSL_CFLAGS`/link pattern as `neoos-3d-ascii-viewer`'s Makefile
 (`-mcmodel=large -fno-pic -mno-red-zone -static -nostdlib`, linked
-against `$(MUSL_DIR)/lib/crt1.o` + `-lc -lgcc`).
+against `$(MUSL_DIR)/lib/crt1.o` + `-lc -lgcc`), plus
+`-DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200` (see §3.2).
 
 ## 4. Testing
 
