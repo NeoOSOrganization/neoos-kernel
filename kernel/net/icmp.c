@@ -145,6 +145,14 @@ void icmp_input(struct netdev *dev, const struct ipv4_header *ip,
     }
     if (h->type != ICMP_ECHO_REQUEST || h->code != 0) { return; }
 
+    // NEVER answer an echo sent to a broadcast or multicast address.
+    // One packet in, one reply out of every machine on the segment, is
+    // the oldest amplification there is -- and the same rule the
+    // unreachable path already follows, for the same reason. Linux
+    // makes this a sysctl and defaults it off.
+    if (ip->dst_n == IP_BROADCAST_N) { return; }
+    if ((ntohl_k(ip->dst_n) >> 28) == 0xE) { return; }   // 224.0.0.0/4
+
     stat_echo_rx++;
     uint32_t payload_len = len - (uint32_t)sizeof(struct icmp_header);
     if (payload_len > ICMP_MAX_PAYLOAD) { return; }

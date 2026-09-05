@@ -381,8 +381,15 @@ void tcp_output(struct tcb *t) {
         if (t->txq_n >= burst_max) { break; }
         uint32_t in_flight = t->snd_nxt - t->snd_una;
         if (in_flight >= window) { break; }
+        // COMPARE BEFORE SUBTRACTING. Once the FIN is out, snd_nxt is
+        // one PAST the buffered data -- the FIN occupies a sequence
+        // number without being a byte -- so in_flight is snd_len + 1 and
+        // `snd_len - in_flight` underflows to about four billion. The
+        // loop then reads past the send ring and transmits stale bytes
+        // after the FIN, which is a stream corruption the peer has no
+        // way to detect.
+        if (in_flight >= t->snd_len) { break; }
         uint32_t unsent = t->snd_len - in_flight;
-        if (!unsent) { break; }
 
         uint32_t can = window - in_flight;
         uint32_t n = unsent < can ? unsent : can;
