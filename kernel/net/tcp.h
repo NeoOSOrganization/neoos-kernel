@@ -17,10 +17,13 @@
 // THE LIFETIME RULE, because it is the one thing here that surprises
 // everybody: a TCB's lifetime IS NOT its socket's. close() on an
 // established connection sends FIN and leaves the TCB behind to finish
-// closing -- through FIN_WAIT_1, FIN_WAIT_2 and TIME_WAIT -- long after
-// the file descriptor is gone. That is what `refs` is for: the socket
-// holds one, the state machine holds one until CLOSED, and the block is
-// reclaimed when both are released.
+// closing -- through FIN_WAIT_1, FIN_WAIT_2, LAST_ACK and TIME_WAIT --
+// long after the file descriptor is gone.
+//
+// So the block is released when BOTH claims are done: `sock_gone` says
+// the socket has closed, and `state == TCP_CLOSED` says the machine has
+// finished. The timer checks that pair; it is the only place a slot
+// comes back.
 
 struct netdev;
 struct ipv4_header;
@@ -100,7 +103,6 @@ struct tcb {
 
     enum tcp_state state;
     int      in_use;
-    int      refs;                  // see THE LIFETIME RULE above
 
     uint32_t local_n, remote_n;
     uint16_t lport_n, rport_n;
@@ -183,9 +185,18 @@ void tcp_timer_start(void);
 
 // Allocation and lifetime. Both halves of TCP use these; nothing else
 // should.
+//
+// There is no reference COUNT, and the absence is deliberate. A block is
+// claimed by exactly two things -- the socket, and the state machine --
+// and it is released when BOTH are done: the socket has closed
+// (sock_gone) and the machine has reached CLOSED. A counter suggested
+// otherwise and was never incremented by anybody, which is a worse lie
+// than no counter at all.
+//
+// tcb_release is therefore IDEMPOTENT, because both the closing thread
+// and the timer can reach it for the same block at the same moment.
 struct tcb *tcp_alloc(void);
-void        tcp_ref(struct tcb *t);
-void        tcp_unref(struct tcb *t);
+void        tcp_release(struct tcb *t);
 struct tcb *tcp_find(uint32_t local_n, uint16_t lport_n,
                      uint32_t remote_n, uint16_t rport_n);
 struct tcb *tcp_find_listener(uint32_t local_n, uint16_t lport_n);

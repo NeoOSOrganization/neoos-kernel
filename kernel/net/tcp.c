@@ -125,7 +125,7 @@ struct tcb *tcp_alloc(void) {
         // which outlive a connection because a sleeper may still be
         // holding a reference to them.
         t->state = TCP_CLOSED;
-        t->in_use = 1; t->refs = 1;
+        t->in_use = 1;
         t->local_n = t->remote_n = 0; t->lport_n = t->rport_n = 0;
         t->snd_una = t->snd_nxt = t->snd_wnd = t->snd_wl1 = t->snd_wl2 = t->iss = 0;
         t->rcv_nxt = t->irs = 0;
@@ -154,16 +154,26 @@ struct tcb *tcp_alloc(void) {
     return 0;
 }
 
-void tcp_ref(struct tcb *t) {
-    uint64_t f = spin_lock_irqsave(&table_lock);
-    t->refs++;
-    spin_unlock_irqrestore(&table_lock, f);
-}
+// Idempotent, and it has to be: tcp_close and the timer's reclaim can
+// both reach the same block at the same moment -- the closing thread
+// sets sock_gone and then releases, while the timer, between those two
+// steps, sees sock_gone with the machine already CLOSED and releases
+// first. With a counter that raced to -1 and freed the slot twice, the
+// second time quite possibly after it had been handed to somebody else.
+//
+// `reclaimed` is claimed under t->lock and the slot freed under
+// table_lock, in that order and NOT nested: table_lock ranks below
+// t->lock, so holding one to take the other is a descending acquire.
+void tcp_release(struct tcb *t) {
+    uint64_t f = spin_lock_irqsave(&t->lock);
+    if (t->reclaimed) { spin_unlock_irqrestore(&t->lock, f); return; }
+    t->reclaimed = 1;
+    spin_unlock_irqrestore(&t->lock, f);
 
-void tcp_unref(struct tcb *t) {
-    uint64_t f = spin_lock_irqsave(&table_lock);
-    if (--t->refs <= 0) { t->in_use = 0; t->state = TCP_CLOSED; }
-    spin_unlock_irqrestore(&table_lock, f);
+    uint64_t g = spin_lock_irqsave(&table_lock);
+    t->state  = TCP_CLOSED;
+    t->in_use = 0;
+    spin_unlock_irqrestore(&table_lock, g);
 }
 
 // An exact 4-tuple match. A listener has remote 0/0 and is found by
@@ -923,9 +933,8 @@ void tcp_timer_tick(void) {
         // gone, the state machine has finished, so nothing can reach
         // this block again.
         if (t->sock_gone && t->state == TCP_CLOSED && !t->reclaimed) {
-            t->reclaimed = 1;
             spin_unlock_irqrestore(&t->lock, f);
-            tcp_unref(t);
+            tcp_release(t);      // idempotent; the closer may beat us here
             continue;
         }
 
@@ -1156,7 +1165,7 @@ void tcp_close(struct tcb *t) {
         set_state(c, TCP_CLOSED);
         spin_unlock_irqrestore(&c->lock, g);
         tcp_tx_flush(c);
-        tcp_unref(c);
+        tcp_release(c);
     }
 
     if (st == TCP_ESTABLISHED || st == TCP_CLOSE_WAIT) {
@@ -1173,7 +1182,7 @@ void tcp_close(struct tcb *t) {
         set_state(t, TCP_CLOSED);
         spin_unlock_irqrestore(&t->lock, g);
         tcp_tx_flush(t);
-        tcp_unref(t);
+        tcp_release(t);
     }
 }
 
@@ -1364,7 +1373,7 @@ void tcp_selftest(void) {
             failed = 1;
         }
         t->state = TCP_CLOSED;
-        tcp_unref(t);
+        tcp_release(t);
     }
 
     // ---- 5. The table is finite, and a full table REFUSES.
@@ -1377,7 +1386,7 @@ void tcp_selftest(void) {
     if (tcp_alloc() != 0) {
         failed |= tcp_fail("allocated past the end of the connection table");
     }
-    for (int i = 0; i < n; i++) { held[i]->state = TCP_CLOSED; tcp_unref(held[i]); }
+    for (int i = 0; i < n; i++) { held[i]->state = TCP_CLOSED; tcp_release(held[i]); }
 
     serial_write_string(failed ? "[tcp] FAILED\n" : "[tcp] ALL PASSED\n");
 }
