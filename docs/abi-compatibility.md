@@ -501,3 +501,49 @@ high-bandwidth-delay path will be poor — correct, but poor. No
 `getaddrinfo`, so any program that resolves a name needs patching, which
 is the single most likely reason a network application will not run
 unmodified today.
+
+## Refresh — AC97 audio driver (2026-09-05)
+
+The first audio device: an AC97 controller (QEMU's `-device AC97`,
+Intel 82801AA emulation), with an ALSA-shaped userland surface at
+`/dev/snd/controlC0` and `/dev/snd/pcmC0D0p`.
+
+**Implemented:** `open`/`ioctl`/`write` on both nodes, with real
+`SNDRV_*` ioctl numbers and `struct snd_pcm_hw_params`/
+`snd_pcm_sw_params`/`snd_ctl_card_info` layouts (byte-verified against
+upstream Linux's `include/uapi/sound/asound.h` via `_Static_assert` and
+a standalone compile check, not reconstructed from memory) for
+`PVERSION`, `CARD_INFO`, `HW_PARAMS`, `SW_PARAMS`, `PREPARE`, `START`,
+`DROP`.
+
+**Stubbed/absent:** capture (`/dev/snd/pcmC0D0c`), any mixer control
+beyond `PVERSION`/`CARD_INFO`, format negotiation beyond one fixed
+16-bit/stereo/48kHz configuration, `mmap`-based playback (real ALSA
+clients commonly prefer mmap; this driver only supports the `write()`
+path).
+
+**What a real ported application would hit:** any app that calls
+`snd_pcm_hw_params_set_format_first`/similar to auto-negotiate the
+"best" format rather than asking for S16_LE/2ch/48kHz directly may see
+`-EINVAL` where real hardware would have offered a different format
+that also happened to work. An app hard-coded to CD-quality stereo PCM
+(extremely common for game sound effects, this driver's actual
+motivating use case) works unmodified.
+
+**A real hardware-sharing lesson, not an ABI note:** AC97 and
+virtio-net can land on the same PCI interrupt line under QEMU's
+default slot assignment. The first attempt at handling that shared a
+single IOAPIC vector between both drivers' interrupt handlers — the
+standard way real operating systems handle shared PCI IRQs, but unsafe
+here because `virtio_net_irq()` unconditionally acknowledges its
+device's ISR register with a real side effect, and was never written
+to tolerate a spurious call. Every AC97 completion interrupt then
+caused an extra ack on the virtio device, which surfaced as an
+unrelated TLB shootdown selftest failing intermittently. The shipped
+fix places AC97 at a distinct PCI address (`addr=0x6` in the Makefile's
+`QEMU_COMMON`) so the two never share a line at all; the vector-sharing
+code remains only as an honest fallback that skips routing (rather than
+sharing unsafely) if some future configuration collides again. Any
+future driver sharing an IOAPIC vector with an existing one must
+confirm that existing one's IRQ handler is provably safe to call
+spuriously before doing so.

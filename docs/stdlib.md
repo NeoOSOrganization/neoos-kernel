@@ -1799,3 +1799,54 @@ take the screen without the kernel drawing over it.
   `VT_ACTIVATE` got two different terminals and the setting appeared not
   to stick.) A program that wants a stable terminal must open a specific
   `/dev/ttyN`, not `/dev/CONSOLE`.
+
+## Audio: `/dev/snd/controlC0`, `/dev/snd/pcmC0D0p` (AC97)
+
+NeoOS's one audio backend is an AC97 controller (QEMU's `-device
+AC97`, Intel 82801AA emulation). The userland surface is ALSA-shaped:
+real Linux `SNDRV_*` ioctl numbers and `struct snd_pcm_hw_params`/
+`snd_pcm_sw_params`/`snd_ctl_card_info` layouts (verified against
+upstream Linux's `include/uapi/sound/asound.h`), reached through the
+existing `open`/`write`/`ioctl` syscalls — no new syscall numbers.
+
+- `open("/dev/snd/controlC0", ...)` — the card's control device.
+  `ioctl(fd, SNDRV_CTL_IOCTL_PVERSION, &ver)` returns `0x02000108`.
+  `ioctl(fd, SNDRV_CTL_IOCTL_CARD_INFO, &info)` fills `struct
+  snd_ctl_card_info` with `id="AC97"`, `driver="neoos-ac97"`,
+  `name="AC97 (NeoOS)"`. Every other control ioctl is `-ENOTTY`.
+- `open("/dev/snd/pcmC0D0p", ...)` — the playback PCM device.
+  - `ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hp)` — accepts exactly one
+    configuration (`SNDRV_PCM_FORMAT_S16_LE`, 2 channels, 48000 Hz) and
+    narrows every field to that fixed value on success; any request
+    outside that range returns `-EINVAL`.
+  - `ioctl(fd, SNDRV_PCM_IOCTL_SW_PARAMS, &sp)` — always succeeds; the
+    buffer/period sizes are fixed, so there is nothing to negotiate.
+  - `ioctl(fd, SNDRV_PCM_IOCTL_PREPARE, 0)` — resets the write cursor.
+  - `ioctl(fd, SNDRV_PCM_IOCTL_START, 0)` / `SNDRV_PCM_IOCTL_DROP` —
+    marks the stream started/stopped (bookkeeping only; the DMA engine
+    itself runs continuously once `ac97_init()` brings the device up).
+  - `write(fd, pcm_data, len)` — copies raw interleaved 16-bit stereo
+    PCM frames into the next free DMA segment, blocking until space is
+    available if the ring is full.
+
+### DIVERGENCE
+
+- **Fixed format only.** `SNDRV_PCM_IOCTL_HW_PARAMS` accepts exactly
+  one configuration — 16-bit signed LE, stereo, 48000 Hz — and returns
+  `-EINVAL` for anything else. A real driver reports a richer (but
+  still hardware-limited) capability set; NeoOS's AC97 driver reports
+  the narrowest possible one. An application that queries capabilities
+  before asking for this exact format works correctly; one that
+  assumes a wider format set gets `-EINVAL` where Linux might have
+  accepted its request.
+- **Playback only.** `/dev/snd/pcmC0D0c` (capture) does not exist —
+  opening it is `-ENOENT`, the same as any other absent device, not a
+  special-cased divergence.
+- **No mixer tree.** `/dev/snd/controlC0` answers `PVERSION` and
+  `CARD_INFO` only; every other control ioctl is `-ENOTTY`. A real
+  ALSA mixer (volume controls, jack detection, etc.) does not exist.
+- **No `mmap`-based playback.** Real ALSA clients commonly prefer
+  mmap'd ring-buffer access; only the `write()` path is supported here.
+- **QEMU-emulated hardware only.** This driver has never been run
+  against real AC97 silicon — only QEMU's `-device AC97` emulation,
+  the same validation story as every other NeoOS driver.
