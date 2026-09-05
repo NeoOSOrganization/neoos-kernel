@@ -531,9 +531,10 @@ chain*, and a call chain belongs to a thread.
   splitting would have meant exporting four statics out of a working
   file to move four hundred lines out of it. It is a marked section
   instead.
-- **`BOOT_TIMEOUT` 150 → 240**, and the gauntlet now reads that number
-  from the Makefile rather than keeping its own. The two had already
-  drifted: the script used 60 while its own header claimed 150.
+- **The gauntlet now reads `BOOT_TIMEOUT` from the Makefile** rather
+  than keeping its own. The two had already drifted: the script used 60
+  while its own header claimed 150. `BOOT_TIMEOUT` itself was raised to
+  240 and then put back to 150 — see §11.
 
 ### Proving the detectors
 
@@ -603,3 +604,90 @@ held (`net_udp_deliver` does exactly that, deliberately) leaves the
 stack labelled with the wrong lock. That is why this panic has always
 pointed at socktable, and the return address is the thing that does not
 lie.
+
+---
+
+## 11. What the gauntlet found afterwards, and what it cost to find
+
+The suite was green and the wire test worked, and the gauntlet still
+failed 14/15. Chasing that was worth more than the fix it produced,
+because most of what it turned up was method rather than code.
+
+### The first two gauntlets were measuring nothing
+
+Two runs were live against the same `build/` tree at once — an earlier
+one that had not actually died. They starved each other, and their
+timeouts were read as *the suite has grown*, which is how `BOOT_TIMEOUT`
+went from 150 to 240. Measured properly afterwards, from the tick log:
+**a healthy boot is forty-eight seconds** and `tcptest` costs about one
+of them. The timeout went back to 150, which is three times a healthy
+boot — what a hang detector should be. Raising it had only made a real
+hang slower to report.
+
+The lesson generalises: `tools/gauntlet.sh` shares `build/` with `make`,
+and any concurrent build kills it **silently**, leaving output that
+stops after the header and looks exactly like a run still in progress.
+
+### The bisect, and why its conclusion was weaker than it looked
+
+| Point | Result |
+|---|---|
+| D1 (before this track) | 8/8, no retries |
+| D4 (everything but TCP) | 8/8, no retries |
+| TCP state machine | 8/8, one small retry |
+| main | the long-tail hang |
+
+That reads as "D5 introduced it", and it is not that solid: the failure
+rate is roughly one run in seven, so **eight clean runs is about a 27%
+outcome even if the bug predates the track**. The bisect narrowed
+suspicion; it did not establish blame, and it is recorded here as the
+former rather than the latter.
+
+### What the hang actually was
+
+`bbspike` is a `wait` entry, so when BusyBox stalled partway through a
+shell pipeline (`ps | grep init`) it blocked init and every entry after
+it — which is why the symptom was eighteen suites that never printed a
+line. **The stalling pipeline touches no sockets at all.**
+
+Three defects were fixed on the way, none of which had failed a test:
+
+- **Loopback dropped datagrams it had no right to drop.** A packet too
+  large for the 2 KiB defer slot was discarded, on the reasoning that
+  "loopback is a network and UDP may lose a datagram". True of a
+  network, false of this one: MPI sends 8 KiB datagrams over loopback
+  and has no retransmission, so one loss means `mpitest` waits forever.
+  Oversized packets are now delivered INLINE — safe precisely where the
+  depth limit matters, since the limit exists for TCP's ping-pong and a
+  TCP segment always fits in a slot.
+- **Pollers were registered on the TCB.** A `poll_reg` lives on the
+  poller's stack and is threaded into the object's list; the TCB
+  outlives its socket and is then RECYCLED, carrying that list into the
+  next connection. Pollers now use the socket's head, whose lifetime is
+  the descriptor's, and stream readiness reaches them through the
+  global broadcast.
+- **The TCP timer thread woke 100 times a second forever**, including
+  with an empty connection table — scheduler churn charged to every
+  other test in the suite. It now sleeps 200 ms while there is nothing
+  to time.
+
+After those, the gauntlet is **15/15**. Two runs still needed a solo
+retry for a two-marker contention artifact, so it is not yet the
+zero-retry bar the previous milestone set, and that gap is real and
+unclosed.
+
+### Still open
+
+- **`bbspike`'s shell pipeline stalls intermittently.** It uses no
+  sockets, and it belongs to the same family as the pre-existing
+  musl/BusyBox flake already recorded in this project. Whether this
+  track made an old race easier to hit — by changing timing — or
+  introduced one, is not established.
+- **`tcptest`'s loss phase has segfaulted once** in userland, at a point
+  where the code has no large stack frame. Seen once, not reproduced.
+- **The known `socktable` panic** remains, whitelisted in the gauntlet
+  as a Phase 13.6 residual. This track added the diagnostic that should
+  locate it: the held-lock stack now records where each lock was
+  ACQUIRED, because the name alone lies — `spin_unlock_irqrestore`
+  assumes strict LIFO and simply decrements, and `net_udp_deliver`
+  deliberately releases an outer lock while holding an inner one.
