@@ -495,7 +495,8 @@ CORE_REQUIRED_MARKERS := \
 	"[rtc] selftest passed" \
 	"[keyboard] decode selftest passed" \
 	"[input] selftest passed" \
-	"[ac97] selftest passed"
+	"[ac97] selftest passed" \
+	"[ac97] /dev/snd selftest passed"
 
 # `=` (recursive), not `:=`: this must re-read embedfs-markers.txt at
 # RECIPE-EXECUTION time, after $(BUILD_DIR)/embedfs_table.c's rule has

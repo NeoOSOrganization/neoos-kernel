@@ -41,4 +41,17 @@ uint8_t ac97_irq_line(void);
 // Called from kernel/arch/isr.c's VECTOR_AC97 branch.
 void ac97_irq(void);
 
+struct file_descriptor;
+struct file_ops;
+extern const struct file_ops ac97_control_file_ops;
+extern const struct file_ops ac97_pcm_file_ops;
+int ac97_control_open(struct file_descriptor *f);
+int ac97_pcm_open(struct file_descriptor *f);
+
+// "[ac97] /dev/snd selftest ..." -- exercises the file_ops surface
+// directly (open/hw_params/write) in-kernel. Does not prove a real
+// userland ALSA-shaped client works end-to-end through actual
+// syscalls; see the plan's closing note on that scope boundary.
+void ac97_snd_selftest(void);
+
 #endif

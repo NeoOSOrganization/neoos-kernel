@@ -349,6 +349,7 @@ void kmain(void *multiboot_info) {
     // itself runs this late (after PCI enumeration), so its selftest
     // must too.
     ac97_selftest();
+    ac97_snd_selftest();
     // AFTER process_init: it starts a kernel thread. The queue would
     // simply fill and drop without one, which is why the driver may be
     // brought up first.

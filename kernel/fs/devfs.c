@@ -8,6 +8,7 @@
 #include "tty/tty.h"
 #include "drivers/input/evdev.h"
 #include "drivers/video/fb.h"
+#include "drivers/audio/ac97.h"
 #include "tty/pty.h"
 #include "tty/vt.h"
 #include <stddef.h>
@@ -244,6 +245,9 @@ static const struct devfs_dev devices[] = {
     { "tty6",    VNODE_DEVICE, &vt_file_ops,  vt_dev_open },
     // Static parent for the dynamic /dev/pts/N entries (Task 6/7).
     // Must stay last: DEVFS_PTS_INODE == DEVFS_COUNT.
+    { "snd",              VNODE_DIR,    NULL,                    NULL },
+    { "snd/controlC0",    VNODE_DEVICE, &ac97_control_file_ops,  ac97_control_open },
+    { "snd/pcmC0D0p",     VNODE_DEVICE, &ac97_pcm_file_ops,      ac97_pcm_open },
     { "pts",     VNODE_DIR,    NULL,          NULL },
 };
 #define DEVFS_COUNT (sizeof(devices) / sizeof(devices[0]))
@@ -400,6 +404,12 @@ static int devfs_lookup(struct vnode *dir, const char *name, uint64_t *out_inode
         return -ENOENT;
     }
 
+    if (dir && dir->inode_id == 20) {   // "snd" directory
+        if (name_eq(name, "controlC0")) { *out_inode_id = 21; return 0; }
+        if (name_eq(name, "pcmC0D0p"))  { *out_inode_id = 22; return 0; }
+        return -ENOENT;
+    }
+
     // Inside /dev/pts: dynamic entries.
     if (dir && dir->inode_id == DEVFS_PTS_INODE) {
         uint64_t id = dyn_lookup_pts(name);
@@ -425,6 +435,10 @@ static int devfs_lookup(struct vnode *dir, const char *name, uint64_t *out_inode
             // Only match the "input" part at root level
             if (name_eq(name, "input")) {
                 *out_inode_id = i + 1;  // devices[i] corresponds to inode_id i+1
+                return 0;
+            }
+            if (name_eq(name, "snd")) {
+                *out_inode_id = i + 1;
                 return 0;
             }
         } else {
@@ -477,6 +491,20 @@ static int devfs_readdir(struct vnode *dir, uint32_t index, struct vfs_dirent *o
         out->type = DT_CHR;
         out->ino = 6;  // input/event0 is at devices[5], inode_id 6
         return 0;
+    }
+
+    if (dir && dir->inode_id == 20) {   // "snd" directory
+        if (index == 0) {
+            memcpy_local(out->name, "controlC0", 10);
+            out->type = DT_CHR; out->ino = 21;
+            return 0;
+        }
+        if (index == 1) {
+            memcpy_local(out->name, "pcmC0D0p", 9);
+            out->type = DT_CHR; out->ino = 22;
+            return 0;
+        }
+        return -ENOENT;
     }
 
     // /dev/pts: the used dynamic slots, in slot order.
