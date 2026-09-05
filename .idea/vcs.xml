@@ -2,6 +2,8 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/ports/3d-ascii-viewer/upstream" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/busybox" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/third_party/musl" vcs="Git" />
   </component>
 </project>

@@ -1,0 +1,941 @@
+From fbb0dbda8f5060b4db6382985e0c743bfaca6c61 Mon Sep 17 00:00:00 2001
+From: Mohamadreza Naakhleh <neo.vortex@pm.me>
+Date: Sat, 5 Sep 2026 18:23:35 +0330
+Subject: [PATCH] wip: NeoOS syscall shim patches against musl v1.2.5
+ (preserved before NeoOS dir replacement)
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01TWuiZmH4yHH1JdKgA2JzuG
+---
+ arch/x86_64/syscall_arch.h                 |  53 ++-
+ arch/x86_64/syscall_arch.h.orig            |  70 ++++
+ src/internal/neoos_syscall.c               | 355 +++++++++++++++++++++
+ src/process/x86_64/vfork.s                 |  12 +-
+ src/process/x86_64/vfork.s.orig            |  10 +
+ src/signal/x86_64/restore.s                |  15 +-
+ src/signal/x86_64/restore.s.orig           |   8 +
+ src/thread/x86_64/__set_thread_area.s      |  31 +-
+ src/thread/x86_64/__set_thread_area.s.orig |  11 +
+ src/thread/x86_64/__unmapself.s            |  19 +-
+ src/thread/x86_64/__unmapself.s.orig       |  10 +
+ src/thread/x86_64/clone.s                  |  37 +--
+ src/thread/x86_64/clone.s.orig             |  28 ++
+ src/thread/x86_64/syscall_cp.s             |  57 +++-
+ src/thread/x86_64/syscall_cp.s.orig        |  31 ++
+ 15 files changed, 669 insertions(+), 78 deletions(-)
+ create mode 100644 arch/x86_64/syscall_arch.h.orig
+ create mode 100644 src/internal/neoos_syscall.c
+ create mode 100644 src/process/x86_64/vfork.s.orig
+ create mode 100644 src/signal/x86_64/restore.s.orig
+ create mode 100644 src/thread/x86_64/__set_thread_area.s.orig
+ create mode 100644 src/thread/x86_64/__unmapself.s.orig
+ create mode 100644 src/thread/x86_64/clone.s.orig
+ create mode 100644 src/thread/x86_64/syscall_cp.s.orig
+
+diff --git a/arch/x86_64/syscall_arch.h b/arch/x86_64/syscall_arch.h
+index 92d5c179..c2523c9c 100644
+--- a/arch/x86_64/syscall_arch.h
++++ b/arch/x86_64/syscall_arch.h
+@@ -1,64 +1,53 @@
++// NeoOS's replacement for musl's arch/x86_64/syscall_arch.h.
++//
++// Upstream issues `syscall` directly with Linux's number. NeoOS's
++// numbers are its own, and some of its calls take differently shaped
++// arguments, so every syscall is funnelled through one translator
++// instead -- see third_party/shim/neoos_syscall.c.
++//
++// The funnel is deliberate: one place that knows both numbering
++// schemes, so a call that has no NeoOS equivalent returns -ENOSYS
++// loudly rather than landing on whatever NeoOS call happens to share
++// Linux's number.
++
+ #define __SYSCALL_LL_E(x) (x)
+ #define __SYSCALL_LL_O(x) (x)
+ 
++long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6);
++
+ static __inline long __syscall0(long n)
+ {
+-	unsigned long ret;
+-	__asm__ __volatile__ ("syscall" : "=a"(ret) : "a"(n) : "rcx", "r11", "memory");
+-	return ret;
++	return __neoos_syscall(n, 0, 0, 0, 0, 0, 0);
+ }
+ 
+ static __inline long __syscall1(long n, long a1)
+ {
+-	unsigned long ret;
+-	__asm__ __volatile__ ("syscall" : "=a"(ret) : "a"(n), "D"(a1) : "rcx", "r11", "memory");
+-	return ret;
++	return __neoos_syscall(n, a1, 0, 0, 0, 0, 0);
+ }
+ 
+ static __inline long __syscall2(long n, long a1, long a2)
+ {
+-	unsigned long ret;
+-	__asm__ __volatile__ ("syscall" : "=a"(ret) : "a"(n), "D"(a1), "S"(a2)
+-						  : "rcx", "r11", "memory");
+-	return ret;
++	return __neoos_syscall(n, a1, a2, 0, 0, 0, 0);
+ }
+ 
+ static __inline long __syscall3(long n, long a1, long a2, long a3)
+ {
+-	unsigned long ret;
+-	__asm__ __volatile__ ("syscall" : "=a"(ret) : "a"(n), "D"(a1), "S"(a2),
+-						  "d"(a3) : "rcx", "r11", "memory");
+-	return ret;
++	return __neoos_syscall(n, a1, a2, a3, 0, 0, 0);
+ }
+ 
+ static __inline long __syscall4(long n, long a1, long a2, long a3, long a4)
+ {
+-	unsigned long ret;
+-	register long r10 __asm__("r10") = a4;
+-	__asm__ __volatile__ ("syscall" : "=a"(ret) : "a"(n), "D"(a1), "S"(a2),
+-						  "d"(a3), "r"(r10): "rcx", "r11", "memory");
+-	return ret;
++	return __neoos_syscall(n, a1, a2, a3, a4, 0, 0);
+ }
+ 
+ static __inline long __syscall5(long n, long a1, long a2, long a3, long a4, long a5)
+ {
+-	unsigned long ret;
+-	register long r10 __asm__("r10") = a4;
+-	register long r8 __asm__("r8") = a5;
+-	__asm__ __volatile__ ("syscall" : "=a"(ret) : "a"(n), "D"(a1), "S"(a2),
+-						  "d"(a3), "r"(r10), "r"(r8) : "rcx", "r11", "memory");
+-	return ret;
++	return __neoos_syscall(n, a1, a2, a3, a4, a5, 0);
+ }
+ 
+ static __inline long __syscall6(long n, long a1, long a2, long a3, long a4, long a5, long a6)
+ {
+-	unsigned long ret;
+-	register long r10 __asm__("r10") = a4;
+-	register long r8 __asm__("r8") = a5;
+-	register long r9 __asm__("r9") = a6;
+-	__asm__ __volatile__ ("syscall" : "=a"(ret) : "a"(n), "D"(a1), "S"(a2),
+-						  "d"(a3), "r"(r10), "r"(r8), "r"(r9) : "rcx", "r11", "memory");
+-	return ret;
++	return __neoos_syscall(n, a1, a2, a3, a4, a5, a6);
+ }
+ 
+ #define VDSO_USEFUL
+diff --git a/arch/x86_64/syscall_arch.h.orig b/arch/x86_64/syscall_arch.h.orig
+new file mode 100644
+index 00000000..92d5c179
+--- /dev/null
++++ b/arch/x86_64/syscall_arch.h.orig
+@@ -0,0 +1,70 @@
++#define __SYSCALL_LL_E(x) (x)
++#define __SYSCALL_LL_O(x) (x)
++
++static __inline long __syscall0(long n)
++{
++	unsigned long ret;
++	__asm__ __volatile__ ("syscall" : "=a"(ret) : "a"(n) : "rcx", "r11", "memory");
++	return ret;
++}
++
++static __inline long __syscall1(long n, long a1)
++{
++	unsigned long ret;
++	__asm__ __volatile__ ("syscall" : "=a"(ret) : "a"(n), "D"(a1) : "rcx", "r11", "memory");
++	return ret;
++}
++
++static __inline long __syscall2(long n, long a1, long a2)
++{
++	unsigned long ret;
++	__asm__ __volatile__ ("syscall" : "=a"(ret) : "a"(n), "D"(a1), "S"(a2)
++						  : "rcx", "r11", "memory");
++	return ret;
++}
++
++static __inline long __syscall3(long n, long a1, long a2, long a3)
++{
++	unsigned long ret;
++	__asm__ __volatile__ ("syscall" : "=a"(ret) : "a"(n), "D"(a1), "S"(a2),
++						  "d"(a3) : "rcx", "r11", "memory");
++	return ret;
++}
++
++static __inline long __syscall4(long n, long a1, long a2, long a3, long a4)
++{
++	unsigned long ret;
++	register long r10 __asm__("r10") = a4;
++	__asm__ __volatile__ ("syscall" : "=a"(ret) : "a"(n), "D"(a1), "S"(a2),
++						  "d"(a3), "r"(r10): "rcx", "r11", "memory");
++	return ret;
++}
++
++static __inline long __syscall5(long n, long a1, long a2, long a3, long a4, long a5)
++{
++	unsigned long ret;
++	register long r10 __asm__("r10") = a4;
++	register long r8 __asm__("r8") = a5;
++	__asm__ __volatile__ ("syscall" : "=a"(ret) : "a"(n), "D"(a1), "S"(a2),
++						  "d"(a3), "r"(r10), "r"(r8) : "rcx", "r11", "memory");
++	return ret;
++}
++
++static __inline long __syscall6(long n, long a1, long a2, long a3, long a4, long a5, long a6)
++{
++	unsigned long ret;
++	register long r10 __asm__("r10") = a4;
++	register long r8 __asm__("r8") = a5;
++	register long r9 __asm__("r9") = a6;
++	__asm__ __volatile__ ("syscall" : "=a"(ret) : "a"(n), "D"(a1), "S"(a2),
++						  "d"(a3), "r"(r10), "r"(r8), "r"(r9) : "rcx", "r11", "memory");
++	return ret;
++}
++
++#define VDSO_USEFUL
++#define VDSO_CGT_SYM "__vdso_clock_gettime"
++#define VDSO_CGT_VER "LINUX_2.6"
++#define VDSO_GETCPU_SYM "__vdso_getcpu"
++#define VDSO_GETCPU_VER "LINUX_2.6"
++
++#define IPC_64 0
+diff --git a/src/internal/neoos_syscall.c b/src/internal/neoos_syscall.c
+new file mode 100644
+index 00000000..bc3b2ae7
+--- /dev/null
++++ b/src/internal/neoos_syscall.c
+@@ -0,0 +1,355 @@
++// NeoOS's musl syscall shim.
++//
++// TRANSLATION, NEVER EMULATION (see /CLAUDE.md). Everything here does
++// one of exactly two things:
++//
++//   1. maps a Linux syscall number onto NeoOS's own number, or
++//   2. reshapes the ARGUMENTS of a call whose NeoOS form differs.
++//
++// It never implements a primitive musl asked for. If a call cannot be
++// forwarded, it returns -ENOSYS and the primitive belongs in the
++// kernel instead.
++//
++// The one systematic reshaping is paths. Linux passes a NUL-terminated
++// `const char *`; NeoOS's path syscalls take a (pointer, length) PAIR,
++// so the shim measures the string and shifts the remaining arguments
++// along. That is argument translation, not emulation -- the kernel
++// still does the work, and nothing is faked.
++
++#include <errno.h>
++
++// ---- NeoOS's own numbers (kernel/syscall/syscall_nr.h) --------------
++#define NEO_EXIT             0
++#define NEO_WRITE            1
++#define NEO_YIELD            2
++#define NEO_GETPID           3
++#define NEO_READ             6
++#define NEO_OPEN             7
++#define NEO_CLOSE            8
++#define NEO_MKDIR            9
++#define NEO_UNLINK          10
++#define NEO_LSEEK           11
++#define NEO_FORK            12
++#define NEO_EXEC            13
++#define NEO_GETDENTS        16
++#define NEO_RT_SIGACTION    21
++#define NEO_RT_SIGPROCMASK  22
++#define NEO_RT_SIGRETURN    23
++#define NEO_RT_SIGPENDING   24
++#define NEO_RT_SIGSUSPEND   25
++#define NEO_SIGALTSTACK     28
++#define NEO_KILL            29
++#define NEO_TKILL           30
++#define NEO_TGKILL          31
++#define NEO_WAIT4           32
++#define NEO_SETPGID         33
++#define NEO_GETPGID         34
++#define NEO_SETSID          35
++#define NEO_GETSID          36
++#define NEO_MMAP            37
++#define NEO_MUNMAP          38
++#define NEO_MPROTECT        39
++#define NEO_FUTEX           42
++#define NEO_PIPE2           43
++#define NEO_ARCH_PRCTL      44
++#define NEO_SOCKET          45
++#define NEO_BIND            46
++#define NEO_CONNECT         47
++#define NEO_SENDTO          48
++#define NEO_RECVFROM        49
++#define NEO_GETSOCKNAME     50
++#define NEO_LISTEN          83
++#define NEO_ACCEPT4         84
++#define NEO_SHUTDOWN        85
++#define NEO_GETPEERNAME     86
++#define NEO_SETSOCKOPT      87
++#define NEO_GETSOCKOPT      88
++#define NEO_FCNTL           52
++#define NEO_CHDIR           53
++#define NEO_GETCWD          54
++#define NEO_STAT            55
++#define NEO_LSTAT           56
++#define NEO_FSTAT           57
++#define NEO_NEWFSTATAT      58
++#define NEO_SET_TID_ADDRESS 59
++#define NEO_EXIT_GROUP      60
++#define NEO_WRITEV          61
++#define NEO_READV           62
++#define NEO_IOCTL           63
++#define NEO_CLOCK_GETTIME   64
++#define NEO_NANOSLEEP       65
++#define NEO_DUP             70
++#define NEO_DUP2            71
++#define NEO_DUP3            72
++#define NEO_GETPPID         73
++#define NEO_UNAME           74
++#define NEO_BRK             75
++#define NEO_GETUID          76
++#define NEO_GETEUID         77
++#define NEO_GETGID          78
++#define NEO_GETEGID         79
++#define NEO_POLL            67
++#define NEO_SELECT          68
++#define NEO_SETUID          80
++#define NEO_SETGID          81
++#define NEO_GETRANDOM       82
++
++// ---- Linux x86-64 numbers, as musl issues them ----------------------
++#define LX_READ              0
++#define LX_WRITE             1
++#define LX_OPEN              2
++#define LX_EXECVE           59
++#define LX_GETPPID         110
++#define LX_UNAME            63
++#define LX_BRK              12
++#define LX_POLL              7
++#define LX_SELECT           23
++#define LX_GETUID          102
++#define LX_GETGID          104
++#define LX_GETEUID         107
++#define LX_GETEGID         108
++#define LX_SETUID          105
++#define LX_SETGID          106
++#define LX_GETRANDOM       318
++#define LX_CLOSE             3
++#define LX_STAT              4
++#define LX_FSTAT             5
++#define LX_LSTAT             6
++#define LX_LSEEK             8
++#define LX_MMAP              9
++#define LX_MPROTECT         10
++#define LX_MUNMAP           11
++#define LX_RT_SIGACTION     13
++#define LX_RT_SIGPROCMASK   14
++#define LX_RT_SIGRETURN     15
++#define LX_IOCTL            16
++#define LX_READV            19
++#define LX_WRITEV           20
++#define LX_PIPE             22
++#define LX_SCHED_YIELD      24
++#define LX_NANOSLEEP        35
++#define LX_GETPID           39
++#define LX_SOCKET           41
++#define LX_CONNECT          42
++#define LX_SENDTO           44
++#define LX_RECVFROM         45
++#define LX_BIND             49
++#define LX_GETSOCKNAME      51
++#define LX_ACCEPT           43
++#define LX_SHUTDOWN         48
++#define LX_LISTEN           50
++#define LX_GETPEERNAME      52
++#define LX_SETSOCKOPT       54
++#define LX_GETSOCKOPT       55
++#define LX_ACCEPT4          288
++#define LX_FORK             57
++#define LX_EXIT             60
++#define LX_WAIT4            61
++#define LX_KILL             62
++#define LX_FCNTL            72
++#define LX_GETCWD           79
++#define LX_CHDIR            80
++#define LX_MKDIR            83
++#define LX_UNLINK           87
++#define LX_GETDENTS64      217
++#define LX_SETPGID         109
++#define LX_GETPGID         121
++#define LX_SETSID          112
++#define LX_GETSID          124
++#define LX_SIGALTSTACK     131
++#define LX_ARCH_PRCTL      158
++#define LX_TKILL           200
++#define LX_FUTEX           202
++#define LX_SET_TID_ADDRESS 218
++#define LX_CLOCK_GETTIME   228
++#define LX_EXIT_GROUP      231
++#define LX_TGKILL          234
++#define LX_NEWFSTATAT      262
++#define LX_PIPE2           293
++#define LX_RT_SIGPENDING   127
++#define LX_RT_SIGSUSPEND   130
++#define LX_DUP              32
++#define LX_DUP2             33
++#define LX_DUP3            292
++
++static long neo_strlen(const char *s) {
++    long n = 0;
++    if (!s) { return 0; }
++    while (s[n]) { n++; }
++    return n;
++}
++
++// The raw NeoOS syscall. Six argument slots, matching what
++// syscall_entry.asm reads.
++static long neo(long n, long a, long b, long c, long d, long e, long f) {
++    unsigned long ret;
++    register long r10 __asm__("r10") = d;
++    register long r8  __asm__("r8")  = e;
++    register long r9  __asm__("r9")  = f;
++    __asm__ __volatile__ ("syscall"
++        : "=a"(ret)
++        : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8), "r"(r9)
++        : "rcx", "r11", "memory");
++    return (long)ret;
++}
++
++// Writes "[shim] ENOSYS <n>" to /dev/kmsg, once per distinct number.
++//
++// Direct NeoOS write to fd 2, not printf: this runs underneath the C
++// library, and the program whose syscall just failed may be in the
++// middle of its own stdio. Repeats are suppressed so a program that
++// retries in a loop does not bury the log it is trying to produce.
++#define ENOSYS_SEEN_MAX 64
++static long enosys_seen[ENOSYS_SEEN_MAX];
++static int  enosys_count;
++
++static void neo_report_enosys(long n) {
++    for (int i = 0; i < enosys_count; i++) {
++        if (enosys_seen[i] == n) { return; }
++    }
++    if (enosys_count < ENOSYS_SEEN_MAX) { enosys_seen[enosys_count++] = n; }
++
++    char buf[32];
++    int k = 0;
++    buf[k++] = '['; buf[k++] = 's'; buf[k++] = 'h'; buf[k++] = 'i'; buf[k++] = 'm';
++    buf[k++] = ']'; buf[k++] = ' ';
++    buf[k++] = 'E'; buf[k++] = 'N'; buf[k++] = 'O'; buf[k++] = 'S'; buf[k++] = 'Y';
++    buf[k++] = 'S'; buf[k++] = ' ';
++    long v = n < 0 ? 0 : n;
++    char d[8];
++    int dn = 0;
++    do { d[dn++] = (char)('0' + (v % 10)); v /= 10; } while (v && dn < 8);
++    while (dn > 0) { buf[k++] = d[--dn]; }
++    buf[k++] = '\n';
++    neo(NEO_WRITE, 2, (long)(unsigned long)buf, k, 0, 0, 0);
++}
++
++long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6)
++{
++    switch (n) {
++
++    // ---- straight renumbering, arguments unchanged ------------------
++    case LX_READ:            return neo(NEO_READ, a1, a2, a3, 0, 0, 0);
++    case LX_WRITE:           return neo(NEO_WRITE, a1, a2, a3, 0, 0, 0);
++    case LX_CLOSE:           return neo(NEO_CLOSE, a1, 0, 0, 0, 0, 0);
++    case LX_LSEEK:           return neo(NEO_LSEEK, a1, a2, a3, 0, 0, 0);
++    case LX_FSTAT:           return neo(NEO_FSTAT, a1, a2, 0, 0, 0, 0);
++    case LX_MMAP:            return neo(NEO_MMAP, a1, a2, a3, a4, a5, a6);
++    case LX_MPROTECT:        return neo(NEO_MPROTECT, a1, a2, a3, 0, 0, 0);
++    case LX_MUNMAP:          return neo(NEO_MUNMAP, a1, a2, 0, 0, 0, 0);
++    case LX_IOCTL:           return neo(NEO_IOCTL, a1, a2, a3, 0, 0, 0);
++    case LX_READV:           return neo(NEO_READV, a1, a2, a3, 0, 0, 0);
++    case LX_WRITEV:          return neo(NEO_WRITEV, a1, a2, a3, 0, 0, 0);
++    case LX_SCHED_YIELD:     return neo(NEO_YIELD, 0, 0, 0, 0, 0, 0);
++    case LX_GETPID:          return neo(NEO_GETPID, 0, 0, 0, 0, 0, 0);
++    case LX_FORK:            return neo(NEO_FORK, 0, 0, 0, 0, 0, 0);
++    case LX_EXIT:            return neo(NEO_EXIT, a1, 0, 0, 0, 0, 0);
++    case LX_EXIT_GROUP:      return neo(NEO_EXIT_GROUP, a1, 0, 0, 0, 0, 0);
++    case LX_WAIT4:           return neo(NEO_WAIT4, a1, a2, a3, a4, 0, 0);
++    case LX_KILL:            return neo(NEO_KILL, a1, a2, 0, 0, 0, 0);
++    case LX_TKILL:           return neo(NEO_TKILL, a1, a2, 0, 0, 0, 0);
++    case LX_TGKILL:          return neo(NEO_TGKILL, a1, a2, a3, 0, 0, 0);
++    case LX_FCNTL:           return neo(NEO_FCNTL, a1, a2, a3, 0, 0, 0);
++    case LX_DUP:             return neo(NEO_DUP, a1, 0, 0, 0, 0, 0);
++    case LX_DUP2:            return neo(NEO_DUP2, a1, a2, 0, 0, 0, 0);
++    case LX_DUP3:            return neo(NEO_DUP3, a1, a2, a3, 0, 0, 0);
++    case LX_GETCWD:          return neo(NEO_GETCWD, a1, a2, 0, 0, 0, 0);
++    case LX_GETDENTS64:      return neo(NEO_GETDENTS, a1, a2, a3, 0, 0, 0);
++    case LX_SETPGID:         return neo(NEO_SETPGID, a1, a2, 0, 0, 0, 0);
++    case LX_GETPGID:         return neo(NEO_GETPGID, a1, 0, 0, 0, 0, 0);
++    case LX_SETSID:          return neo(NEO_SETSID, 0, 0, 0, 0, 0, 0);
++    case LX_GETSID:          return neo(NEO_GETSID, a1, 0, 0, 0, 0, 0);
++    case LX_ARCH_PRCTL:      return neo(NEO_ARCH_PRCTL, a1, a2, 0, 0, 0, 0);
++    case LX_FUTEX:           return neo(NEO_FUTEX, a1, a2, a3, a4, 0, 0);
++    case LX_SET_TID_ADDRESS: return neo(NEO_SET_TID_ADDRESS, a1, 0, 0, 0, 0, 0);
++    case LX_CLOCK_GETTIME:   return neo(NEO_CLOCK_GETTIME, a1, a2, 0, 0, 0, 0);
++    case LX_NANOSLEEP:       return neo(NEO_NANOSLEEP, a1, a2, 0, 0, 0, 0);
++    case LX_RT_SIGACTION:    return neo(NEO_RT_SIGACTION, a1, a2, a3, a4, 0, 0);
++    case LX_RT_SIGPROCMASK:  return neo(NEO_RT_SIGPROCMASK, a1, a2, a3, a4, 0, 0);
++    case LX_RT_SIGRETURN:    return neo(NEO_RT_SIGRETURN, 0, 0, 0, 0, 0, 0);
++    case LX_RT_SIGPENDING:   return neo(NEO_RT_SIGPENDING, a1, a2, 0, 0, 0, 0);
++    case LX_RT_SIGSUSPEND:   return neo(NEO_RT_SIGSUSPEND, a1, a2, 0, 0, 0, 0);
++    case LX_SIGALTSTACK:     return neo(NEO_SIGALTSTACK, a1, a2, 0, 0, 0, 0);
++    case LX_SOCKET:          return neo(NEO_SOCKET, a1, a2, a3, 0, 0, 0);
++    case LX_BIND:            return neo(NEO_BIND, a1, a2, a3, 0, 0, 0);
++    case LX_CONNECT:         return neo(NEO_CONNECT, a1, a2, a3, 0, 0, 0);
++    case LX_SENDTO:          return neo(NEO_SENDTO, a1, a2, a3, a4, a5, a6);
++    case LX_RECVFROM:        return neo(NEO_RECVFROM, a1, a2, a3, a4, a5, a6);
++    case LX_GETSOCKNAME:     return neo(NEO_GETSOCKNAME, a1, a2, a3, 0, 0, 0);
++    case LX_LISTEN:          return neo(NEO_LISTEN, a1, a2, 0, 0, 0, 0);
++    // accept() is accept4() with no flags, which is how Linux
++    // implements it too. Only the four-argument form crosses into the
++    // kernel.
++    case LX_ACCEPT:          return neo(NEO_ACCEPT4, a1, a2, a3, 0, 0, 0);
++    case LX_ACCEPT4:         return neo(NEO_ACCEPT4, a1, a2, a3, a4, 0, 0);
++    case LX_SHUTDOWN:        return neo(NEO_SHUTDOWN, a1, a2, 0, 0, 0, 0);
++    case LX_GETPEERNAME:     return neo(NEO_GETPEERNAME, a1, a2, a3, 0, 0, 0);
++    case LX_SETSOCKOPT:      return neo(NEO_SETSOCKOPT, a1, a2, a3, a4, a5, 0);
++    case LX_GETSOCKOPT:      return neo(NEO_GETSOCKOPT, a1, a2, a3, a4, a5, 0);
++
++    // ---- argument RESHAPING: Linux's char* becomes NeoOS's ptr+len --
++    //
++    // The mode argument of open and mkdir is DROPPED, not forwarded:
++    // NeoOS has no permission bits to store it in, and stat synthesizes
++    // what it reports. Passing it to a kernel that ignores it would be
++    // the same result with a misleading signature.
++    case LX_OPEN:
++        return neo(NEO_OPEN, a1, neo_strlen((const char *)a1), a2, 0, 0, 0);
++    case LX_STAT:
++        return neo(NEO_STAT, a1, neo_strlen((const char *)a1), a2, 0, 0, 0);
++    case LX_LSTAT:
++        return neo(NEO_LSTAT, a1, neo_strlen((const char *)a1), a2, 0, 0, 0);
++    case LX_MKDIR:
++        return neo(NEO_MKDIR, a1, neo_strlen((const char *)a1), 0, 0, 0, 0);
++    case LX_UNLINK:
++        return neo(NEO_UNLINK, a1, neo_strlen((const char *)a1), 0, 0, 0, 0);
++    case LX_CHDIR:
++        return neo(NEO_CHDIR, a1, neo_strlen((const char *)a1), 0, 0, 0, 0);
++    case LX_EXECVE:
++        // (path, argv, envp) -> (ptr, len, argv, envp). BB3 added the
++        // fourth argument; before it the environment was dropped and
++        // every exec'd program started with an empty one.
++        return neo(NEO_EXEC, a1, neo_strlen((const char *)a1), a2, a3, 0, 0);
++    case LX_NEWFSTATAT:
++        // (dirfd, path, buf, flags) -> (dirfd, ptr, len, buf, flags)
++        return neo(NEO_NEWFSTATAT, a1, a2, neo_strlen((const char *)a2), a3, a4, 0);
++
++    // pipe(fds) is pipe2(fds, 0). Supplying the flags word is argument
++    // translation; NeoOS deliberately has only the two-argument form,
++    // exactly as Linux does on newer architectures.
++    // BB2: the three numbers BusyBox actually reached for. All three
++    // are straight forwards -- same arguments, same shapes.
++    case LX_GETPPID:         return neo(NEO_GETPPID, 0, 0, 0, 0, 0, 0);
++    case LX_GETUID:          return neo(NEO_GETUID, 0, 0, 0, 0, 0, 0);
++    case LX_GETEUID:         return neo(NEO_GETEUID, 0, 0, 0, 0, 0, 0);
++    case LX_GETGID:          return neo(NEO_GETGID, 0, 0, 0, 0, 0, 0);
++    case LX_GETEGID:         return neo(NEO_GETEGID, 0, 0, 0, 0, 0, 0);
++    case LX_SETUID:          return neo(NEO_SETUID, a1, 0, 0, 0, 0, 0);
++    case LX_SETGID:          return neo(NEO_SETGID, a1, 0, 0, 0, 0, 0);
++    case LX_GETRANDOM:       return neo(NEO_GETRANDOM, a1, a2, a3, 0, 0, 0);
++
++    // poll and select were never mapped at all, so every musl program
++    // that waited on a descriptor got -ENOSYS -- which is how BusyBox's
++    // interactive shell came to echo the commands typed at it and then
++    // do nothing with them. Same arguments on both sides.
++    case LX_POLL:            return neo(NEO_POLL, a1, a2, a3, 0, 0, 0);
++    case LX_SELECT:          return neo(NEO_SELECT, a1, a2, a3, a4, a5, 0);
++    case LX_UNAME:           return neo(NEO_UNAME, a1, 0, 0, 0, 0, 0);
++    case LX_BRK:             return neo(NEO_BRK, a1, 0, 0, 0, 0, 0);
++
++    case LX_PIPE:            return neo(NEO_PIPE2, a1, 0, 0, 0, 0, 0);
++    case LX_PIPE2:           return neo(NEO_PIPE2, a1, a2, 0, 0, 0, 0);
++
++    default:
++        // Not forwarded. This is the signal that a primitive belongs in
++        // the kernel -- NOT an invitation to implement it here.
++        //
++        // The number is REPORTED, not swallowed. Porting a real program
++        // means meeting a wall of these, and "Function not implemented"
++        // with no number is a guess where a fact should be: BusyBox's
++        // shell failed to run an external command with exactly that
++        // message, and the number is what says which call to add.
++        neo_report_enosys(n);
++        return -ENOSYS;
++    }
++}
+diff --git a/src/process/x86_64/vfork.s b/src/process/x86_64/vfork.s
+index 91144390..f0084e4b 100644
+--- a/src/process/x86_64/vfork.s
++++ b/src/process/x86_64/vfork.s
+@@ -1,8 +1,18 @@
++// NeoOS's replacement for musl's src/process/x86_64/vfork.s.
++//
++// vfork pops its return address before the syscall and pushes it
++// after, so it cannot go through the funnel either. NeoOS's fork is
++// 12; Linux's is 58.
++//
++// DIVERGENCE: this is a real fork, not a vfork -- NeoOS has no vfork,
++// and fork is the safe direction to diverge in (vfork's contract is a
++// subset). Recorded in docs/stdlib.md.
++
+ .global vfork
+ .type vfork,@function
+ vfork:
+ 	pop %rdx
+-	mov $58,%eax
++	mov $12,%eax
+ 	syscall
+ 	push %rdx
+ 	mov %rax,%rdi
+diff --git a/src/process/x86_64/vfork.s.orig b/src/process/x86_64/vfork.s.orig
+new file mode 100644
+index 00000000..91144390
+--- /dev/null
++++ b/src/process/x86_64/vfork.s.orig
+@@ -0,0 +1,10 @@
++.global vfork
++.type vfork,@function
++vfork:
++	pop %rdx
++	mov $58,%eax
++	syscall
++	push %rdx
++	mov %rax,%rdi
++	.hidden __syscall_ret
++	jmp __syscall_ret
+diff --git a/src/signal/x86_64/restore.s b/src/signal/x86_64/restore.s
+index 27d6cf31..d1bffc98 100644
+--- a/src/signal/x86_64/restore.s
++++ b/src/signal/x86_64/restore.s
+@@ -1,8 +1,21 @@
++// NeoOS's replacement for musl's src/signal/x86_64/restore.s.
++//
++// This one translates the NUMBER INLINE rather than calling
++// __neoos_syscall, and that is deliberate: a signal restorer runs on a
++// stack the kernel laid out, and sigreturn finds the saved context at
++// a fixed offset from %rsp. Calling into the funnel would push a
++// return address and a stack argument first, moving %rsp and hiding
++// the frame the kernel is about to restore from.
++//
++// So the rule the rest of the shim follows -- one place that knows
++// both numbering schemes -- is bent here for the two files that cannot
++// disturb the stack. NeoOS's rt_sigreturn is 23; Linux's is 15.
++
+ 	nop
+ .global __restore_rt
+ .hidden __restore_rt
+ .type __restore_rt,@function
+ __restore_rt:
+-	mov $15, %rax
++	mov $23, %rax
+ 	syscall
+ .size __restore_rt,.-__restore_rt
+diff --git a/src/signal/x86_64/restore.s.orig b/src/signal/x86_64/restore.s.orig
+new file mode 100644
+index 00000000..27d6cf31
+--- /dev/null
++++ b/src/signal/x86_64/restore.s.orig
+@@ -0,0 +1,8 @@
++	nop
++.global __restore_rt
++.hidden __restore_rt
++.type __restore_rt,@function
++__restore_rt:
++	mov $15, %rax
++	syscall
++.size __restore_rt,.-__restore_rt
+diff --git a/src/thread/x86_64/__set_thread_area.s b/src/thread/x86_64/__set_thread_area.s
+index 7347ff4d..792516e3 100644
+--- a/src/thread/x86_64/__set_thread_area.s
++++ b/src/thread/x86_64/__set_thread_area.s
+@@ -1,11 +1,32 @@
+-/* Copyright 2011-2012 Nicholas J. Kain, licensed under standard MIT license */
++// NeoOS's replacement for musl's src/thread/x86_64/__set_thread_area.s.
++//
++// Upstream issues `syscall` with Linux's arch_prctl number (158)
++// directly. NeoOS's highest syscall number is far below that, so the
++// call returned -ENOSYS, __init_tp returned -1, and __init_tls hit its
++// one a_crash() -- a `hlt` in ring 3, which NeoOS reports as SIGSEGV.
++//
++// That was the entire reason a musl binary died before main: the
++// thread pointer could never be installed.
++//
++// This one goes through the funnel, because unlike the restorer and
++// __unmapself below it is an ordinary call with an ordinary stack.
++
+ .text
+ .global __set_thread_area
+ .hidden __set_thread_area
+ .type __set_thread_area,@function
+ __set_thread_area:
+-	mov %rdi,%rsi           /* shift for syscall */
+-	movl $0x1002,%edi       /* SET_FS register */
+-	movl $158,%eax          /* set fs segment to */
+-	syscall                 /* arch_prctl(SET_FS, arg)*/
++	push %rbp
++	mov %rsp,%rbp
++	// __neoos_syscall(158 /*arch_prctl*/, 0x1002 /*ARCH_SET_FS*/, p, 0,0,0,0)
++	mov %rdi,%rdx          // a2 = p
++	mov $0x1002,%esi       // a1 = ARCH_SET_FS
++	mov $158,%edi          // n  = SYS_arch_prctl
++	xor %ecx,%ecx          // a3
++	xor %r8d,%r8d          // a4
++	xor %r9d,%r9d          // a5
++	sub $16,%rsp           // a6 on the stack, and keep %rsp 16-aligned
++	movq $0,(%rsp)
++	call __neoos_syscall
++	leave
+ 	ret
+diff --git a/src/thread/x86_64/__set_thread_area.s.orig b/src/thread/x86_64/__set_thread_area.s.orig
+new file mode 100644
+index 00000000..7347ff4d
+--- /dev/null
++++ b/src/thread/x86_64/__set_thread_area.s.orig
+@@ -0,0 +1,11 @@
++/* Copyright 2011-2012 Nicholas J. Kain, licensed under standard MIT license */
++.text
++.global __set_thread_area
++.hidden __set_thread_area
++.type __set_thread_area,@function
++__set_thread_area:
++	mov %rdi,%rsi           /* shift for syscall */
++	movl $0x1002,%edi       /* SET_FS register */
++	movl $158,%eax          /* set fs segment to */
++	syscall                 /* arch_prctl(SET_FS, arg)*/
++	ret
+diff --git a/src/thread/x86_64/__unmapself.s b/src/thread/x86_64/__unmapself.s
+index e2689e65..74228469 100644
+--- a/src/thread/x86_64/__unmapself.s
++++ b/src/thread/x86_64/__unmapself.s
+@@ -1,10 +1,17 @@
+-/* Copyright 2011-2012 Nicholas J. Kain, licensed under standard MIT license */
++// NeoOS's replacement for musl's src/thread/x86_64/__unmapself.s.
++//
++// Like the signal restorer, this cannot touch the stack -- it is in
++// the middle of unmapping the very stack it runs on -- so the numbers
++// are translated inline instead of going through the funnel.
++//
++// NeoOS: munmap is 38, exit is 0. Linux: 11 and 60.
++
+ .text
+ .global __unmapself
+ .type   __unmapself,@function
+ __unmapself:
+-	movl $11,%eax   /* SYS_munmap */
+-	syscall         /* munmap(arg2,arg3) */
+-	xor %rdi,%rdi   /* exit() args: always return success */
+-	movl $60,%eax   /* SYS_exit */
+-	syscall         /* exit(0) */
++	movl $38,%eax   /* NeoOS munmap(arg2, arg3) */
++	syscall
++	xor %rdi,%rdi   /* always report success */
++	movl $0,%eax    /* NeoOS exit */
++	syscall
+diff --git a/src/thread/x86_64/__unmapself.s.orig b/src/thread/x86_64/__unmapself.s.orig
+new file mode 100644
+index 00000000..e2689e65
+--- /dev/null
++++ b/src/thread/x86_64/__unmapself.s.orig
+@@ -0,0 +1,10 @@
++/* Copyright 2011-2012 Nicholas J. Kain, licensed under standard MIT license */
++.text
++.global __unmapself
++.type   __unmapself,@function
++__unmapself:
++	movl $11,%eax   /* SYS_munmap */
++	syscall         /* munmap(arg2,arg3) */
++	xor %rdi,%rdi   /* exit() args: always return success */
++	movl $60,%eax   /* SYS_exit */
++	syscall         /* exit(0) */
+diff --git a/src/thread/x86_64/clone.s b/src/thread/x86_64/clone.s
+index 6e47bc0a..9083b4e4 100644
+--- a/src/thread/x86_64/clone.s
++++ b/src/thread/x86_64/clone.s
+@@ -1,28 +1,19 @@
++// NeoOS's replacement for musl's src/thread/x86_64/clone.s.
++//
++// NeoOS HAS NO clone. Upstream would issue `syscall` with Linux's
++// number 56 -- which in NeoOS's own numbering is lstat. A pthread
++// creation would have silently called lstat with a stack pointer as
++// its path argument.
++//
++// Returning -ENOSYS is the honest answer, and it is what tells us the
++// primitive belongs in the kernel rather than in a shim: musl's
++// pthread_create will fail cleanly with EAGAIN/ENOSYS instead of
++// corrupting something.
++
+ .text
+ .global __clone
+ .hidden __clone
+ .type   __clone,@function
+ __clone:
+-	xor %eax,%eax
+-	mov $56,%al
+-	mov %rdi,%r11
+-	mov %rdx,%rdi
+-	mov %r8,%rdx
+-	mov %r9,%r8
+-	mov 8(%rsp),%r10
+-	mov %r11,%r9
+-	and $-16,%rsi
+-	sub $8,%rsi
+-	mov %rcx,(%rsi)
+-	syscall
+-	test %eax,%eax
+-	jnz 1f
+-	xor %ebp,%ebp
+-	pop %rdi
+-	call *%r9
+-	mov %eax,%edi
+-	xor %eax,%eax
+-	mov $60,%al
+-	syscall
+-	hlt
+-1:	ret
++	mov $-38,%eax   /* -ENOSYS */
++	ret
+diff --git a/src/thread/x86_64/clone.s.orig b/src/thread/x86_64/clone.s.orig
+new file mode 100644
+index 00000000..6e47bc0a
+--- /dev/null
++++ b/src/thread/x86_64/clone.s.orig
+@@ -0,0 +1,28 @@
++.text
++.global __clone
++.hidden __clone
++.type   __clone,@function
++__clone:
++	xor %eax,%eax
++	mov $56,%al
++	mov %rdi,%r11
++	mov %rdx,%rdi
++	mov %r8,%rdx
++	mov %r9,%r8
++	mov 8(%rsp),%r10
++	mov %r11,%r9
++	and $-16,%rsi
++	sub $8,%rsi
++	mov %rcx,(%rsi)
++	syscall
++	test %eax,%eax
++	jnz 1f
++	xor %ebp,%ebp
++	pop %rdi
++	call *%r9
++	mov %eax,%edi
++	xor %eax,%eax
++	mov $60,%al
++	syscall
++	hlt
++1:	ret
+diff --git a/src/thread/x86_64/syscall_cp.s b/src/thread/x86_64/syscall_cp.s
+index 4f101716..d8165597 100644
+--- a/src/thread/x86_64/syscall_cp.s
++++ b/src/thread/x86_64/syscall_cp.s
+@@ -1,3 +1,24 @@
++// NeoOS's replacement for musl's src/thread/x86_64/syscall_cp.s.
++//
++// WHY THIS FILE EXISTS: upstream's version issues `syscall` DIRECTLY
++// with Linux's number in %rax, which walks straight past the shim in
++// syscall_arch.h. Every cancellable call -- read, write, open, close,
++// readv, writev, nanosleep, wait4 -- goes through here, so with the
++// upstream file a musl program could exit (exit_group is not a
++// cancellation point, so it took the C path and was translated) but
++// could not print a single byte. That is exactly how it presented: a
++// process that ran to completion, returned 0, and produced no output.
++//
++// So the cancel check stays, and the syscall itself is handed to
++// __neoos_syscall like every other one.
++//
++// DIVERGENCE: __cp_begin/__cp_end no longer bracket the `syscall`
++// instruction itself -- it now lives inside __neoos_syscall -- so the
++// "was the thread interrupted inside a cancellable syscall" test that
++// pthread cancellation depends on is no longer exact. Nothing uses
++// musl's pthreads on NeoOS yet. When something does, this is the file
++// that has to be revisited.
++
+ .text
+ .global __cp_begin
+ .hidden __cp_begin
+@@ -12,19 +33,35 @@
+ __syscall_cp_asm:
+ 
+ __cp_begin:
++	// rdi = &self->cancel, rsi = nr, rdx = a1, rcx = a2,
++	// r8 = a3, r9 = a4, 8(%rsp) = a5, 16(%rsp) = a6
+ 	mov (%rdi),%eax
+ 	test %eax,%eax
+ 	jnz __cp_cancel
+-	mov %rdi,%r11
+-	mov %rsi,%rax
+-	mov %rdx,%rdi
+-	mov %rcx,%rsi
+-	mov %r8,%rdx
+-	mov %r9,%r10
+-	mov 8(%rsp),%r8
+-	mov 16(%rsp),%r9
+-	mov %r11,8(%rsp)
+-	syscall
++
++	push %rbp
++	mov %rsp,%rbp
++	// 16(%rbp) = a5, 24(%rbp) = a6
++
++	// Shuffle into __neoos_syscall(nr, a1, a2, a3, a4, a5, a6).
++	// Left to right is safe: each register's old value has already
++	// been copied out by the time it is overwritten.
++	mov %rsi,%rdi          // nr
++	mov %rdx,%rsi          // a1
++	mov %rcx,%rdx          // a2
++	mov %r8,%rcx           // a3
++	mov %r9,%r8            // a4
++	mov 16(%rbp),%r9       // a5
++
++	// a6 is the seventh argument and travels on the stack. The extra
++	// 8 bytes keep %rsp 16-byte aligned at the call, as SysV requires.
++	sub $16,%rsp
++	mov 24(%rbp),%rax
++	mov %rax,(%rsp)
++
++	call __neoos_syscall
++
++	leave
+ __cp_end:
+ 	ret
+ __cp_cancel:
+diff --git a/src/thread/x86_64/syscall_cp.s.orig b/src/thread/x86_64/syscall_cp.s.orig
+new file mode 100644
+index 00000000..4f101716
+--- /dev/null
++++ b/src/thread/x86_64/syscall_cp.s.orig
+@@ -0,0 +1,31 @@
++.text
++.global __cp_begin
++.hidden __cp_begin
++.global __cp_end
++.hidden __cp_end
++.global __cp_cancel
++.hidden __cp_cancel
++.hidden __cancel
++.global __syscall_cp_asm
++.hidden __syscall_cp_asm
++.type   __syscall_cp_asm,@function
++__syscall_cp_asm:
++
++__cp_begin:
++	mov (%rdi),%eax
++	test %eax,%eax
++	jnz __cp_cancel
++	mov %rdi,%r11
++	mov %rsi,%rax
++	mov %rdx,%rdi
++	mov %rcx,%rsi
++	mov %r8,%rdx
++	mov %r9,%r10
++	mov 8(%rsp),%r8
++	mov 16(%rsp),%r9
++	mov %r11,8(%rsp)
++	syscall
++__cp_end:
++	ret
++__cp_cancel:
++	jmp __cancel
+-- 
+2.53.0
+
