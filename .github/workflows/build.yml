@@ -1,0 +1,45 @@
+name: build-and-test
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install system packages
+        run: sudo apt-get update && sudo apt-get install -y nasm grub-common grub-pc-bin mtools qemu-system-x86 xorriso
+      - name: cache cross-toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/opt/cross-x86_64-elf
+          key: x86_64-elf-toolchain-${{ hashFiles('toolchain/build.sh') }}
+      - name: build cross-toolchain (skips if cache hit)
+        run: ./toolchain/build.sh
+      - name: checkout and build neoos-libneoos
+        run: |
+          git clone --depth 1 https://github.com/NeoOSOrganization/neoos-libneoos ../neoos-libneoos
+          export PATH="$HOME/opt/cross-x86_64-elf/bin:$PATH"
+          (cd ../neoos-libneoos && make)
+      - name: checkout and build neoos-musl
+        run: |
+          git clone --depth 1 --recurse-submodules https://github.com/NeoOSOrganization/neoos-musl ../neoos-musl
+          export PATH="$HOME/opt/cross-x86_64-elf/bin:$PATH"
+          (cd ../neoos-musl && make KERNEL_SHIM_DIR=$(pwd)/third_party/shim)
+      - name: checkout and build neoos-kernel-tests-common
+        run: |
+          git clone --depth 1 https://github.com/NeoOSOrganization/neoos-kernel-tests-common ../neoos-kernel-tests-common
+          export PATH="$HOME/opt/cross-x86_64-elf/bin:$PATH"
+          (cd ../neoos-kernel-tests-common && make LIBNEOOS_DIR=$(pwd)/../neoos-libneoos/build-output MUSL_DIR=$(pwd)/../neoos-musl/build-output)
+      - name: make test (full coverage, EMBED_DIRS = the regression suite)
+        run: |
+          export PATH="$HOME/opt/cross-x86_64-elf/bin:$PATH"
+          make LIBNEOOS_DIR=../neoos-libneoos/build-output MUSL_DIR=../neoos-musl/build-output \
+              EMBED_DIRS=../neoos-kernel-tests-common/build test
+      - name: fail loudly on a gauntlet regression
+        if: always()
+        run: grep -q "PASS: no FAILED lines" build/serial.log
+      - name: upload serial log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serial-log
+          path: build/serial.log
