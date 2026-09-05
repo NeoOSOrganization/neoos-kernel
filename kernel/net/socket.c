@@ -734,7 +734,7 @@ int64_t socket_shutdown(int fd, int how) {
     if (how == SHUT_RD || how == SHUT_RDWR) { s->tcb->shut_rd = 1; }
     if (how == SHUT_WR || how == SHUT_RDWR) { tcp_shutdown_write(s->tcb); }
     waitq_wake_all(&s->tcb->waiters);
-    poll_head_notify(&s->tcb->poll);
+    poll_head_notify(&s->poll);
     sock_put(s);
     return 0;
 }
@@ -915,9 +915,23 @@ static int64_t sock_ioctl(struct file_descriptor *f, uint64_t request, void *arg
 static struct poll_head *sock_poll_head(struct file_descriptor *f) {
     struct socket *s = (struct socket *)f->priv;
     if (!s) { return 0; }
-    // A stream socket's events are raised by the TCB, on the netrx and
-    // timer threads, so that is where pollers must register.
-    return (s->type == SOCK_STREAM && s->tcb) ? &s->tcb->poll : &s->poll;
+    // ALWAYS the socket's own head, never the TCB's -- even though it is
+    // the TCB that raises the events.
+    //
+    // A poll registration is a `struct poll_reg` living on the POLLER'S
+    // STACK, threaded into the head's list for as long as that thread is
+    // inside poll(). The socket's lifetime is exactly the descriptor's,
+    // which is what the poller holds. The TCB's is NOT: it outlives the
+    // socket through TIME_WAIT and is then RECYCLED into the next
+    // connection, carrying whatever list it had. Handing pollers a head
+    // inside a recycled object is a use-after-free waiting for a busy
+    // enough machine.
+    //
+    // The cost is that a stream socket's readiness change reaches
+    // pollers through the global broadcast (see tcp_wake_pollers) rather
+    // than through this head. That is the documented fallback, and it is
+    // noise rather than a correctness gap.
+    return &s->poll;
 }
 
 static int sock_poll(struct file_descriptor *f, int events) {

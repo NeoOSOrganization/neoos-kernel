@@ -95,6 +95,11 @@ static uint16_t ip_next_id;   // only ever incremented; wrapping is fine
 // asynchronous outright is not available: there is no scheduler yet
 // when some of them run.
 #define LOOPBACK_MAX_DEPTH 4
+// The backstop. Nothing should reach it: what cannot be deferred is a
+// datagram, and datagrams do not recurse. If this ever fires it is a
+// new protocol behaving like TCP without TCP's segment size, and the
+// log line is how that gets noticed rather than guessed at.
+#define LOOPBACK_HARD_DEPTH 8
 #define LOOPBACK_DEFER_MAX 64
 
 // The deferred queue. Packets that arrived at the depth limit wait here
@@ -105,10 +110,24 @@ static uint16_t ip_next_id;   // only ever incremented; wrapping is fine
 // memcpy the freestanding kernel does not link against, and copying
 // them was pointless anyway.
 //
-// 2 KiB a slot. Only TCP ever nests deep enough to reach here and its
-// segments are at most 1500 bytes; the 8 KiB datagrams MPI sends over
-// loopback nest twice and are delivered inline. A packet too large to
-// defer is dropped, which loopback is allowed to do.
+// 2 KiB a slot, and a packet too large for one is NOT dropped -- it is
+// delivered INLINE, accepting the extra stack.
+//
+// The first version dropped it, on the reasoning that "loopback is a
+// network and UDP may lose a datagram". That is true of a network and
+// false of this one: MPI sends 8 KiB datagrams over loopback and has no
+// retransmission of any kind, so one lost datagram means mpitest waits
+// forever, init never reaps it, and the boot ends with a long tail of
+// suites that never ran. It cost a bisect to find, because the hang
+// looks nothing like a dropped packet.
+//
+// Delivering inline is safe precisely where the limit is needed. The
+// depth limit exists to stop TCP's send/acknowledge ping-pong from
+// recursing without bound, and a TCP segment is at most 1500 bytes, so
+// TCP ALWAYS fits in a slot and is ALWAYS deferred. What does not fit
+// is a large datagram, and datagrams nest at most twice: a send, and at
+// most an ICMP unreachable in reply. The hard limit below is a
+// backstop, not a working part.
 #define LOOPBACK_DEFER_SLOT 2048
 static struct {
     struct netdev *dev;
@@ -117,7 +136,7 @@ static struct {
 } loop_defer[LOOPBACK_DEFER_MAX];
 static int             loop_head, loop_tail, loop_count;
 static struct spinlock loop_lock;
-static uint64_t        stat_loop_deferred, stat_loop_dropped;
+static uint64_t        stat_loop_deferred, stat_loop_dropped, stat_loop_inline;
 
 // The counter this thread's recursion is measured with. A thread's own,
 // because the depth describes a call chain and a call chain belongs to
@@ -138,7 +157,13 @@ static int loopback_transmit(struct netdev *dev, const uint8_t *pkt, uint32_t le
     dev->tx_packets++;
 
     int *depth = loop_depth_slot();
-    if (*depth >= LOOPBACK_MAX_DEPTH) {
+    if (*depth >= LOOPBACK_MAX_DEPTH && len > LOOPBACK_DEFER_SLOT &&
+        *depth < LOOPBACK_HARD_DEPTH) {
+        // Too large to defer, and not yet deep enough to be dangerous:
+        // deliver it rather than lose it. Falls through to the inline
+        // path below.
+        stat_loop_inline++;
+    } else if (*depth >= LOOPBACK_MAX_DEPTH) {
         uint64_t f = spin_lock_irqsave(&loop_lock);
         if (loop_count < LOOPBACK_DEFER_MAX && len <= LOOPBACK_DEFER_SLOT) {
             loop_defer[loop_tail].dev = dev;
@@ -148,9 +173,20 @@ static int loopback_transmit(struct netdev *dev, const uint8_t *pkt, uint32_t le
             loop_count++;
             stat_loop_deferred++;
         } else {
-            // A full queue drops, and that is correct rather than
-            // merely convenient: loopback is a network, TCP
-            // retransmits, and UDP is allowed to lose a datagram.
+            // Still reachable if the queue itself fills, and still a
+            // silent loss for UDP -- so it is counted AND logged once,
+            // because the failure it causes (a program waiting forever
+            // for a datagram that was never delivered) is otherwise
+            // indistinguishable from a hang with no cause at all.
+            // Reachable only when the queue itself fills, or past the
+            // hard depth. Both are silent losses for UDP, so the first
+            // one is LOGGED: the failure it causes -- a program waiting
+            // forever for a datagram nobody delivered -- is otherwise
+            // indistinguishable from a hang with no cause at all.
+            if (!stat_loop_dropped) {
+                serial_write_string("[net] LOOPBACK DROP: a datagram was lost "
+                                    "(queue full, or past the hard depth)\n");
+            }
             stat_loop_dropped++;
         }
         spin_unlock_irqrestore(&loop_lock, f);

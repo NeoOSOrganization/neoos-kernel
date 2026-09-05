@@ -928,19 +928,18 @@ shell-serial:
 # qemu line keeps its leading `-` so a genuine timeout is still surfaced
 # by the marker check rather than aborting the recipe.
 #
-# 240s. Was 150, and D5 outgrew it: tcptest's lossy phase moves 32 KiB
-# through 1-in-8 injected drops, and every drop that fast retransmit
-# does not catch waits out a 200ms RTO. The suite still completed --
-# every marker was present and mpitest, the last entry, passed -- and
-# only the power-off was missing, which reads like a hang and is not
-# one.
+# 150s, and it went to 240 and back again. The raise was made from
+# CONTAMINATED evidence: two gauntlets were running against the same
+# build tree at once, starving each other, and their timeouts were read
+# as the suite having grown. Measured properly from the tick log, a
+# healthy boot is FORTY-EIGHT SECONDS and tcptest costs about one of
+# them.
 #
-# The rule the previous number was chosen by still holds: a healthy solo
-# boot was ~15s when this was first written and 33s when it became 150,
-# the suite having grown by the BusyBox track, the ports and the
-# identity work. It is "several times a healthy boot", and the network
-# track added another network's worth of waiting.
-BOOT_TIMEOUT ?= 240
+# So 150 stands, and it stands as a HANG DETECTOR: three times a healthy
+# boot. Raising it would only have made a real hang -- and there is one,
+# see docs/superpowers/specs/2026-09-04-...-design.md -- take longer to
+# report itself.
+BOOT_TIMEOUT ?= 150
 BOOT_MARKER  ?= NeoOS: interrupts enabled, starting scheduler
 
 # A suite that never RUNS is not a pass. Grepping only for FAILED lets a

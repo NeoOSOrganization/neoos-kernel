@@ -596,7 +596,14 @@ static void queue_reasm(struct tcb *t, uint32_t seq, const uint8_t *data, uint32
 // Caller holds t->lock.
 static void wake(struct tcb *t) {
     waitq_wake_all(&t->waiters);
+    // The BROADCAST, not this connection's own poll head. A poller
+    // registers on the SOCKET's head (see sock_poll_head): the TCB is
+    // recycled and the socket is not, so pollers must never be threaded
+    // onto a TCB. Everything blocked in poll() re-scans; at this
+    // machine's process count that is cheaper than the lifetime problem
+    // it avoids.
     poll_head_notify(&t->poll);
+    waitq_poll_notify();
 }
 
 // Caller holds t->lock. Everything that ends a connection abruptly.
@@ -724,6 +731,7 @@ static void tcp_segment(struct tcb *t, const struct ipv4_header *ip,
                 }
                 waitq_wake_all(&p->waiters);
                 poll_head_notify(&p->poll);
+                waitq_poll_notify();   // pollers live on the SOCKET's head
             }
             wake(t);
         } else {
@@ -1014,12 +1022,23 @@ static struct waitq timer_wait;
 static void tcp_timer_thread(void) {
     for (;;) {
         tcp_timer_tick();
-        // One pass per tick, and a THREAD rather than a tick callback
-        // because firing a timer TRANSMITS: transmitting takes the ARP
-        // lock and may spin on the device, and neither belongs in a
-        // timer interrupt. Nothing ever wakes this queue; the timeout
-        // is the whole mechanism.
-        waitq_sleep_timeout(&timer_wait, 0, timer_ticks() + 1);
+        // A THREAD rather than a tick callback because firing a timer
+        // TRANSMITS: transmitting takes the ARP lock and may spin on the
+        // device, and neither belongs in a timer interrupt. Nothing ever
+        // wakes this queue; the timeout is the whole mechanism.
+        //
+        // One pass per tick WHILE THERE ARE CONNECTIONS, and one every
+        // 200ms when there are none. The first version woke at 100 Hz
+        // forever, which on a machine that spends most of its life with
+        // no TCP at all is a hundred pointless wakeups a second --
+        // scheduler churn charged to every other test in the suite, for
+        // a table that is empty.
+        int active = 0;
+        for (int i = 0; i < TCP_MAX_CONNS; i++) {
+            if (conns[i].in_use) { active = 1; break; }
+        }
+        waitq_sleep_timeout(&timer_wait, 0,
+                            timer_ticks() + (active ? 1 : 20));
     }
 }
 

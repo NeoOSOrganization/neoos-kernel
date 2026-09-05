@@ -483,10 +483,14 @@ static void test_churn(void) {
             nap_ms(1);
         }
         close(cfd);
-        // The timer thread does the reclaiming, so give it a tick or
-        // two before counting. Without this the count includes slots
-        // that are on their way back, not slots that are stuck.
-        nap_ms(50);
+        // The timer thread does the reclaiming, so let it settle before
+        // counting: otherwise the count includes slots on their way
+        // back rather than slots that are stuck. 150ms, not 50 -- at 50
+        // this fired on a connection that was merely still finishing.
+        //
+        // Waiting longer costs the detector NOTHING. A leak is
+        // permanent, so it is just as visible after 150ms as after 5.
+        nap_ms(150);
 
         // THE ASSERTION. After cycle i, the table should hold the
         // listener plus ONE slot per cycle -- the server's TIME_WAIT,
