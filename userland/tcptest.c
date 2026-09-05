@@ -16,6 +16,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <time.h>
+#include <neoos_test.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -25,6 +26,7 @@
 #define PORT_BULK   7802
 #define PORT_HALF   7803
 #define PORT_NB     7804
+#define PORT_LOSS   7805
 
 // Larger than TCP_SNDBUF (32 KiB), on purpose: a transfer that fits in
 // the buffer never closes the window, and a window that never closes
@@ -305,6 +307,98 @@ static void test_nonblocking_connect(void) {
     printf("[tcptest] nonblocking connect passed\n");
 }
 
+// ---- 4. the recovery paths, which otherwise never run ---------------
+//
+// Loopback delivers perfectly and so does slirp. Without deliberate
+// loss the retransmission timer, fast retransmit and the reassembly
+// queue are dead code that happens to compile. This turns on 1-in-8
+// drop and 1-in-5 reordering, moves 32 KiB through it, and asserts BOTH
+// that the bytes are exact AND that the recovery counters moved -- a
+// clean transfer under 1-in-8 loss means the injector is not wired up,
+// which is a failure of the test rather than a success of the stack.
+#define LOSS_BYTES (32 * 1024)
+
+static void test_loss(void) {
+    if (neoos_test_tcp_fault(0, 0) == -ENOSYS) {
+        printf("[tcptest] SKIPPED: no test hooks in this build\n");
+        return;
+    }
+
+    int lfd = listen_on(PORT_LOSS);
+    if (lfd < 0) { return; }
+    set_nonblock(lfd);
+
+    int cfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (cfd < 0) { fail("loss socket"); close(lfd); return; }
+    set_nonblock(cfd);
+    struct sockaddr_in a;
+    addr_for(&a, INADDR_LOOPBACK, PORT_LOSS);
+    int rc = connect(cfd, (struct sockaddr *)&a, sizeof a);
+    if (rc != 0 && rc != -EINPROGRESS) { fail("loss connect"); close(cfd); close(lfd); return; }
+
+    int sfd = -1;
+    for (int spin = 0; spin < 3000 && sfd < 0; spin++) {
+        sfd = accept(lfd, 0, 0);
+        if (sfd < 0) { nap_ms(1); }
+    }
+    if (sfd < 0) { fail("loss accept never completed"); close(cfd); close(lfd); return; }
+    set_nonblock(sfd);
+
+    long rt0 = neoos_test_tcp_retrans();
+    long re0 = neoos_test_tcp_reasm();
+    neoos_test_tcp_fault(8, 5);
+
+    static unsigned char out[2048];
+    static unsigned char in[2048];
+    uint32_t sent = 0, got = 0;
+    int bad = 0, idle = 0;
+
+    while (got < LOSS_BYTES && idle < 30000) {
+        int progress = 0;
+        if (sent < LOSS_BYTES) {
+            uint32_t chunk = LOSS_BYTES - sent;
+            if (chunk > sizeof out) { chunk = (uint32_t)sizeof out; }
+            for (uint32_t i = 0; i < chunk; i++) { out[i] = pat(sent + i); }
+            int64_t w = write(cfd, out, chunk);
+            if (w > 0) { sent += (uint32_t)w; progress = 1; }
+        }
+        int64_t n = read(sfd, in, sizeof in);
+        if (n > 0) {
+            for (int64_t i = 0; i < n; i++) {
+                if (in[i] != pat(got + (uint32_t)i)) { bad = 1; }
+            }
+            got += (uint32_t)n;
+            progress = 1;
+        }
+        if (progress) { idle = 0; } else { idle++; nap_ms(1); }
+    }
+
+    neoos_test_tcp_fault(0, 0);
+    long rt1 = neoos_test_tcp_retrans();
+    long re1 = neoos_test_tcp_reasm();
+
+    if (bad)               { fail("lossy transfer corrupted a byte"); }
+    if (got != LOSS_BYTES) {
+        printf("[tcptest] FAILED: lossy transfer moved %u of %u bytes\n",
+               (unsigned)got, (unsigned)LOSS_BYTES);
+        failures++;
+    }
+    // The assertion that catches an injector that is not actually
+    // injecting -- which would make everything above pass for the wrong
+    // reason.
+    if (rt1 == rt0) { fail("1-in-8 loss produced no retransmissions"); }
+    if (re1 == re0) { fail("1-in-5 reordering queued nothing out of order"); }
+
+    close(cfd);
+    close(sfd);
+    close(lfd);
+    if (!failures) {
+        // %d, not %ld: this libc's printf has no length modifiers.
+        printf("[tcptest] 32KiB under 1-in-8 loss, retrans=%d reasm=%d\n",
+               (int)(rt1 - rt0), (int)(re1 - re0));
+    }
+}
+
 int main(void) {
     printf("[tcptest] start\n");
     test_handshake();
@@ -312,6 +406,7 @@ int main(void) {
     test_refused();
     test_options();
     test_nonblocking_connect();
+    test_loss();
     if (failures) {
         printf("[tcptest] SOME CHECKS FAILED\n");
         return 1;

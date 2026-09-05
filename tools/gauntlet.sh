@@ -8,7 +8,8 @@
 #     CONC  max concurrent boots  (default 3)
 #
 # Each run gets its own copy of the ISO and both disk images (a write
-# selftest mutates the disk), its own serial log, and a 150s timeout.
+# selftest mutates the disk), its own serial log, and BOOT_TIMEOUT
+# seconds -- read from the Makefile, not duplicated here.
 #
 # Classification of a failing run:
 #   HARD   -- a signature that is a real kernel bug regardless of load:
@@ -39,7 +40,13 @@ GAUNTLET_MAKEFLAGS=${GAUNTLET_MAKEFLAGS:-}
 if [ "${KVM:-}" = "1" ]; then GAUNTLET_MACHINE="-enable-kvm -cpu host"
 else GAUNTLET_MACHINE="-cpu Nehalem"; fi
 BOOT_MARKER="NeoOS: interrupts enabled, starting scheduler"
-TIMEOUT=60
+# Read from the Makefile rather than duplicated here, for the same
+# reason the markers are: the two drifted apart once already (this said
+# 60 while the header claimed 150 and `make test` used 150), and a
+# gauntlet that times out earlier than `make test` reports healthy runs
+# as missing markers.
+TIMEOUT=$(sed -n 's/^BOOT_TIMEOUT ?= *\([0-9]*\).*/\1/p' Makefile)
+TIMEOUT=${TIMEOUT:-240}
 
 # Real bugs -- never retried, always fail the gauntlet. The bare
 # PANIC alternative already covers the debug heap's '[heap] PANIC:

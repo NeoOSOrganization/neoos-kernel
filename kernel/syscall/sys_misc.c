@@ -5,6 +5,7 @@
 // user-copy helpers stayed behind in syscall.c.
 
 #include "syscall/syscall_internal.h"
+#include "net/tcp.h"
 #include "mm/pmm.h"
 #include "sync/waitq.h"
 #include "drivers/char/serial.h"
@@ -148,6 +149,19 @@ int64_t sys_test_hook(struct syscall_args *a) {
         waitq_poll_stats(&ev, &wk);
         // Both fit in 32 bits at any run length this suite reaches.
         return (int64_t)((ev << 32) | (wk & 0xFFFFFFFFu));
+    }
+    case TESTHOOK_TCP_FAULT:
+        tcp_fault_inject((uint32_t)a->a2, (uint32_t)a->a3);
+        return 0;
+    case TESTHOOK_TCP_RETRANS: {
+        uint64_t rt = 0;
+        tcp_stats(0, 0, &rt, 0, 0, 0);
+        return (int64_t)rt;
+    }
+    case TESTHOOK_TCP_REASM: {
+        uint64_t re = 0;
+        tcp_stats(0, 0, 0, &re, 0, 0);
+        return (int64_t)re;
     }
     case TESTHOOK_PARENT_PID: {
         struct process *p = proc_find((int)a->a2);

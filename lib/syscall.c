@@ -91,6 +91,9 @@
 #define TESTHOOK_POLL_STATS   5
 #define TESTHOOK_POLL_DEPTH   6
 #define TESTHOOK_POLL_WASTED  7
+#define TESTHOOK_TCP_FAULT    8
+#define TESTHOOK_TCP_RETRANS  9
+#define TESTHOOK_TCP_REASM   10
 
 static inline int64_t syscall0(int64_t num) {
     int64_t ret;
@@ -624,4 +627,17 @@ long neoos_test_poll_depth(void) {
 
 long neoos_test_poll_wasted(void) {
     return (long)syscall1(SYS_TEST_HOOK, TESTHOOK_POLL_WASTED);
+}
+
+int neoos_test_tcp_fault(unsigned drop_1_in_n, unsigned reorder_1_in_m) {
+    return (int)syscall3(SYS_TEST_HOOK, TESTHOOK_TCP_FAULT,
+                         (int64_t)drop_1_in_n, (int64_t)reorder_1_in_m);
+}
+
+long neoos_test_tcp_retrans(void) {
+    return (long)syscall1(SYS_TEST_HOOK, TESTHOOK_TCP_RETRANS);
+}
+
+long neoos_test_tcp_reasm(void) {
+    return (long)syscall1(SYS_TEST_HOOK, TESTHOOK_TCP_REASM);
 }

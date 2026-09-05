@@ -91,6 +91,13 @@ struct cpu {
     // had no name to pass costs a reproduction run to learn what a
     // recorded string would have said outright.
     const char       *held_names[LOCK_MAX_HELD];
+    // Where each held lock was ACQUIRED. The name alone is not enough
+    // to find a bug: spin_unlock_irqrestore assumes strict LIFO and
+    // simply decrements, so a caller that releases an outer lock while
+    // an inner one is still held (net_udp_deliver does exactly that,
+    // deliberately) leaves the stack labelled with the wrong name. The
+    // return address is the thing that does not lie.
+    void             *held_where[LOCK_MAX_HELD];
 #ifdef NEOOS_DEBUG_LOCKSTAT
     // CS1: TSC at acquire, per held-stack depth, and this block's index
     // into lock.c's lockstats[]. The histograms themselves live in

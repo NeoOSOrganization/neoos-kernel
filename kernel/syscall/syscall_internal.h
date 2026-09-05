@@ -67,6 +67,13 @@ typedef int64_t (*syscall_handler)(struct syscall_args *);
 #define TESTHOOK_POLL_STATS   5   // returns (poll_events << 32) | poll_wakeups
 #define TESTHOOK_POLL_DEPTH   6   // threads blocked on the poll broadcast now
 #define TESTHOOK_POLL_WASTED  7   // wakeups that found nothing ready
+// D5. Slirp never drops and never reorders, and neither does loopback,
+// so without deliberate loss the retransmission timer, fast retransmit
+// and reassembly queue never execute. A stack whose recovery paths have
+// never run is a stack whose recovery paths do not work.
+#define TESTHOOK_TCP_FAULT    8   // a2 = drop 1 in N, a3 = reorder 1 in M
+#define TESTHOOK_TCP_RETRANS  9   // segments retransmitted so far
+#define TESTHOOK_TCP_REASM   10   // segments queued out of order so far
 
 // ---- shared helpers, defined in syscall.c ---------------------------
 

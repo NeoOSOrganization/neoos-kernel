@@ -37,10 +37,22 @@ void tcp_stats(uint64_t *tx, uint64_t *rx, uint64_t *rt, uint64_t *re,
     if (drop) { *drop = stat_drop; }
 }
 
+// One segment held back, so the NEXT one overtakes it. That is what
+// reordering is, and it is enough to make a receiver see a gap and a
+// sender see duplicate ACKs -- which is the whole point.
+static struct { uint32_t src, dst, len; uint8_t data[1500]; int held; } fault_hold;
+
 void tcp_fault_inject(uint32_t drop_1_in_n, uint32_t reorder_1_in_n) {
     fault_drop_n    = drop_1_in_n;
     fault_reorder_n = reorder_1_in_n;
     fault_counter   = 0;
+    // A segment held when the injector is turned off would be stranded
+    // forever, and the connection would stall on a gap nothing fills.
+    if (fault_hold.held) {
+        fault_hold.held = 0;
+        net_ipv4_output(fault_hold.src, fault_hold.dst, IPPROTO_TCP,
+                        fault_hold.data, fault_hold.len);
+    }
 }
 
 // ------------------------------------------------------------- tracing
@@ -225,13 +237,37 @@ static uint32_t build_segment(uint8_t *buf,
 static void tx_now(uint32_t src_n, uint32_t dst_n,
                    const uint8_t *buf, uint32_t total) {
     stat_tx++;
+
     // The fault injector, applied HERE rather than in the driver, so it
-    // works identically over loopback and over the wire -- and loopback
-    // is where the deterministic suite runs.
-    if (fault_drop_n) {
+    // behaves identically over loopback and over the wire -- and
+    // loopback is where the deterministic suite runs.
+    if (fault_drop_n || fault_reorder_n) {
         fault_counter++;
-        if (fault_counter % fault_drop_n == 0) { stat_drop++; return; }
+        if (fault_drop_n && fault_counter % fault_drop_n == 0) {
+            stat_drop++;
+            return;
+        }
+        if (fault_reorder_n && total <= sizeof fault_hold.data) {
+            if (fault_hold.held) {
+                // Release the held one AFTER this one: the later
+                // segment arrives first, which is the reorder.
+                net_ipv4_output(src_n, dst_n, IPPROTO_TCP, buf, total);
+                net_ipv4_output(fault_hold.src, fault_hold.dst, IPPROTO_TCP,
+                                fault_hold.data, fault_hold.len);
+                fault_hold.held = 0;
+                return;
+            }
+            if (fault_counter % fault_reorder_n == 0) {
+                fault_hold.src = src_n;
+                fault_hold.dst = dst_n;
+                fault_hold.len = total;
+                for (uint32_t i = 0; i < total; i++) { fault_hold.data[i] = buf[i]; }
+                fault_hold.held = 1;
+                return;
+            }
+        }
     }
+
     net_ipv4_output(src_n, dst_n, IPPROTO_TCP, buf, total);
 }
 

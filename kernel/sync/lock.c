@@ -49,6 +49,17 @@ static void panic_puts(const char *s) {
     }
 }
 
+// Hex, without the serial lock, for the same reason panic_puts avoids it.
+static void panic_hex(uint64_t v) {
+    static const char d[] = "0123456789abcdef";
+    panic_puts("0x");
+    int started = 0;
+    for (int shift = 60; shift >= 0; shift -= 4) {
+        int nib = (int)((v >> shift) & 0xF);
+        if (nib || started || shift == 0) { serial_putc(d[nib]); started = 1; }
+    }
+}
+
 void lock_panic(const char *msg, const char *a, const char *b) {
     __asm__ volatile ("cli");
     // Freeze the other CPUs BEFORE printing, so none of them scribbles
@@ -67,6 +78,8 @@ void lock_panic(const char *msg, const char *a, const char *b) {
         for (int i = 0; i < c->held_depth; i++) {
             panic_puts(" ");
             panic_puts(c->held_names[i] ? c->held_names[i] : "?");
+            panic_puts("@");
+            panic_hex((uint64_t)(uintptr_t)c->held_where[i]);
         }
     }
     panic_puts("\n");
@@ -162,6 +175,7 @@ uint64_t spin_lock_irqsave(struct spinlock *l) {
     spin_acquire_watched(l);
 
     c->held_names[c->held_depth] = l->name;
+    c->held_where[c->held_depth] = __builtin_return_address(0);
     c->held_ranks[c->held_depth++] = l->rank;
 #ifdef NEOOS_DEBUG_LOCKSTAT
     c->lockstat_acquire_tsc[c->held_depth - 1] = lockstat_now();

@@ -921,15 +921,19 @@ shell-serial:
 # qemu line keeps its leading `-` so a genuine timeout is still surfaced
 # by the marker check rather than aborting the recipe.
 #
-# 150s, from a measurement rather than a guess: a healthy solo boot took
-# ~15s when this was written and takes 33s now (timed three times), the
-# suite having grown by the BusyBox track, the ports and the identity
-# work. At 60s the gauntlet was failing runs that were merely SLOW --
-# two CPUs' worth of contention on top of a 33s boot -- and reporting
-# them as missing markers, which reads like a kernel fault and is not
-# one. Raise this when the suite grows again; the number is only ever
-# "several times a healthy boot".
-BOOT_TIMEOUT ?= 150
+# 240s. Was 150, and D5 outgrew it: tcptest's lossy phase moves 32 KiB
+# through 1-in-8 injected drops, and every drop that fast retransmit
+# does not catch waits out a 200ms RTO. The suite still completed --
+# every marker was present and mpitest, the last entry, passed -- and
+# only the power-off was missing, which reads like a hang and is not
+# one.
+#
+# The rule the previous number was chosen by still holds: a healthy solo
+# boot was ~15s when this was first written and 33s when it became 150,
+# the suite having grown by the BusyBox track, the ports and the
+# identity work. It is "several times a healthy boot", and the network
+# track added another network's worth of waiting.
+BOOT_TIMEOUT ?= 240
 BOOT_MARKER  ?= NeoOS: interrupts enabled, starting scheduler
 
 # A suite that never RUNS is not a pass. Grepping only for FAILED lets a

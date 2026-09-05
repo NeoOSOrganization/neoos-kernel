@@ -32,4 +32,12 @@ long neoos_test_poll_depth(void);
 // -ENOSYS in production.
 long neoos_test_poll_wasted(void);
 
+// D5's fault injector: drop one transmitted TCP segment in `drop_1_in_n`
+// and reorder one in `reorder_1_in_m`; zero disables. Loopback and slirp
+// both deliver perfectly, so this is the only way the retransmission and
+// reassembly paths ever execute. Returns -ENOSYS in production.
+int  neoos_test_tcp_fault(unsigned drop_1_in_n, unsigned reorder_1_in_m);
+long neoos_test_tcp_retrans(void);
+long neoos_test_tcp_reasm(void);
+
 #endif
