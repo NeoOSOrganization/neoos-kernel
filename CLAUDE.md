@@ -45,6 +45,38 @@ syscall number with no library support. `docs/stdlib.md` documents the
 NeoOS extensions and the deliberate divergences, not a whole libc;
 musl documents itself.
 
+## Keeping neoos-os-builder in sync
+
+`neoos-os-builder` (sibling repo) assembles a bootable image from
+neoos-kernel + neoos-musl + a user-chosen set of ports, via
+`scripts/build.sh`. It does not discover ports or their dependencies
+on its own — it clones whatever `neoos-<port>` a config's `ports:`
+list names and builds each with whatever directories `build.sh`
+already knows to pass. **Adding a new port, or a new kernel feature a
+port depends on, does nothing for os-builder users until that script
+is updated to match.**
+
+Concretely, after landing a new port repo or a kernel feature/syscall
+a port needs:
+
+- If the port has build dependencies beyond musl (e.g. `neoos-curl`
+  needs `neoos-openssl` and `neoos-libssh2` built first, in that
+  order), `scripts/build.sh`'s per-port build loop must pass the right
+  `<DEP>_DIR=` variables for that port's `Makefile` — the loop
+  currently only ever passes `MUSL_DIR`, which silently breaks any
+  port with a real dependency chain (confirmed still broken for
+  `openssl`/`libssh2`/`curl` as of the curl milestone) and has no
+  notion of build ORDER between ports (a port must be built after
+  every port it depends on, not just after musl).
+- Update `docs/BUILD_ORDER.md`'s pipeline diagram and dependency list
+  to include the new port/chain.
+- Add or update an example `config/*.yaml` demonstrating the new
+  port(s), the way `busybox-doom.yaml` does for the two it names.
+
+Treat an os-builder gap surfaced this way as a real bug in that repo,
+not a documentation nicety — a port nobody can actually select and
+build through the tool that exists to do exactly that is not finished.
+
 ## Linux ABI compatibility
 
 **Internals are ours; the ABI is not.** Anything that never crosses
