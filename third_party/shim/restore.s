@@ -1,15 +1,15 @@
-// NeoOS's replacement for musl's src/signal/x86_64/restore.s.
-//
-// This one translates the NUMBER INLINE rather than calling
-// __neoos_syscall, and that is deliberate: a signal restorer runs on a
-// stack the kernel laid out, and sigreturn finds the saved context at
-// a fixed offset from %rsp. Calling into the funnel would push a
-// return address and a stack argument first, moving %rsp and hiding
-// the frame the kernel is about to restore from.
-//
-// So the rule the rest of the shim follows -- one place that knows
-// both numbering schemes -- is bent here for the two files that cannot
-// disturb the stack. NeoOS's rt_sigreturn is 23; Linux's is 15.
+# NeoOS's replacement for musl's src/signal/x86_64/restore.s.
+#
+# This one translates the NUMBER INLINE rather than calling
+# __neoos_syscall, and that is deliberate: a signal restorer runs on a
+# stack the kernel laid out, and sigreturn finds the saved context at
+# a fixed offset from %rsp. Calling into the funnel would push a
+# return address and a stack argument first, moving %rsp and hiding
+# the frame the kernel is about to restore from.
+#
+# So the rule the rest of the shim follows -- one place that knows
+# both numbering schemes -- is bent here for the two files that cannot
+# disturb the stack. NeoOS's rt_sigreturn is 23; Linux's is 15.
 
 	nop
 .global __restore_rt
