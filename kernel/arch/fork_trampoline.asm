@@ -75,6 +75,19 @@ fork_trampoline:
     pop rcx             ; user RIP (parent's, at the point it called fork())
     pop r11             ; user RFLAGS
     pop rsi             ; user RSP
+    ; The parent's r9 at the moment of the syscall. Real Linux clone(2)
+    ; preserves the ENTIRE parent register snapshot into the child --
+    ; not just the callee-saved ones -- and musl's hand-written
+    ; clone.s (src/thread/x86_64/clone.s) depends on exactly that: it
+    ; parks the thread's start function in r9 before the syscall and
+    ; does `call *%r9` immediately after, on the child side, relying
+    ; on r9 surviving untouched. fork()'s own child never reads this
+    ; (fork() is an ordinary C-callable syscall wrapper, not hand-
+    ; rolled asm with its own register convention), so restoring it
+    ; here is a no-op for fork -- but it is what makes this same
+    ; trampoline correct for sys_clone's child too (see
+    ; kernel/sched/thread.c's clone_task).
+    pop r9
 
     xor eax, eax        ; fork() returns 0 in the child
 

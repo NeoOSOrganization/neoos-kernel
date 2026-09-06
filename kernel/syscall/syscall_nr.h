@@ -190,7 +190,14 @@
 // which musl's shim otherwise has no way to satisfy at all.
 #define SYS_SOCKETPAIR      91
 
+// clone(flags, child_stack, ptid, ctid, tls) -- raw Linux argument
+// order and register convention. Accepts EXACTLY musl's own
+// pthread_create flag combination (see sys_clone's own comment);
+// anything else is -EINVAL. See docs/superpowers/plans/
+// 2026-09-07-clone-pthread.md and docs/stdlib.md.
+#define SYS_CLONE           92
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX             92
+#define SYS_MAX             93
 
 #endif

@@ -159,6 +159,7 @@ int64_t sys_getsockopt(struct syscall_args *a);
 int64_t sys_sendmsg(struct syscall_args *a);
 int64_t sys_recvmsg(struct syscall_args *a);
 int64_t sys_socketpair(struct syscall_args *a);
+int64_t sys_clone(struct syscall_args *a);
 int64_t sys_spawn(struct syscall_args *a);
 int64_t sys_spawnv(struct syscall_args *a);
 int64_t sys_tgkill(struct syscall_args *a);

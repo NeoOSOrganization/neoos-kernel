@@ -325,6 +325,74 @@ struct thread *thread_create(uint64_t entry, uint64_t arg) {
     return t;
 }
 
+// clone_task -- the mechanism behind sys_clone. Builds a new thread in
+// the CALLING thread's process (no new struct process, no new address
+// space: that is thread_create()'s half of this, already correct for
+// every existing NeoOS thread). The child resumes exactly where fork's
+// child does -- at the parent's syscall-return site, via
+// fork_trampoline's iretq -- which is exactly the raw Linux clone(2)
+// ABI's own contract: the child inherits the FULL saved register file
+// (struct syscall_frame already captures all of it) and only rsp and
+// (when CLONE_SETTLS is set, which is the only case this accepts)
+// fs_base are substituted. This is what lets musl's clone.s recover
+// `func` from r9 on the child side unchanged -- see
+// docs/superpowers/specs/2026-09-07-clone-pthread-design.md.
+//
+// ptid/ctid are NOT interpreted here (CLONE_PARENT_SETTID's write and
+// CLONE_CHILD_CLEARTID's bookkeeping are the caller's job -- sys_clone
+// and thread_exit_self respectively); this function only builds the
+// thread and resumes it.
+struct thread *clone_task(struct syscall_frame *frame, uint64_t child_stack,
+                           uint64_t tls) {
+    struct process *p = current_proc();
+    if (!p || p->exiting) { return 0; }
+
+    struct thread *t = thread_alloc(p);
+    if (!t) { return 0; }
+    t->stack_slot = -1;   // musl mmap'd this stack; NeoOS does not own it
+    t->detached   = 1;
+
+    uint64_t kstack_phys = pmm_alloc(KERNEL_STACK_ORDER);
+    if (!kstack_phys) {
+        thread_put(t);
+        return 0;
+    }
+    zero_frames(kstack_phys, KERNEL_STACK_ORDER);
+    uint64_t kstack_top = (uint64_t)(uintptr_t)phys_to_virt(kstack_phys)
+                        + (PMM_FRAME_SIZE << KERNEL_STACK_ORDER);
+
+    // Identical layout to fork_task()'s (kernel/sched/proc.c): r15..rbx,
+    // fork_trampoline, fs_base, rcx (user RIP), r11 (user RFLAGS),
+    // user_rsp, r9. The two substitutions that make this "clone"
+    // instead of "fork": user_rsp is the CALLER's child_stack, not
+    // frame->user_rsp, and the planted fs_base is `tls`, not
+    // current_thread()->fs_base -- CLONE_SETTLS is unconditionally set
+    // in the only flag combination this syscall accepts. r9 is copied
+    // from the parent's frame UNCHANGED, same as fork -- it is what
+    // carries musl's clone.s's `func` pointer into the child (see
+    // fork_trampoline.asm's own comment on the matching `pop r9`).
+    uint64_t *sp = (uint64_t *)kstack_top;
+    *(--sp) = frame->r9;
+    *(--sp) = child_stack;
+    *(--sp) = frame->r11;   // user RFLAGS (same as parent's)
+    *(--sp) = frame->rcx;   // user RIP (same as parent's -- resumes in clone.s)
+    *(--sp) = tls;          // the child's thread pointer
+    *(--sp) = (uint64_t)fork_trampoline;
+    *(--sp) = frame->rbp;
+    *(--sp) = frame->rbx;
+    *(--sp) = frame->r12;
+    *(--sp) = frame->r13;
+    *(--sp) = frame->r14;
+    *(--sp) = frame->r15;
+
+    t->saved_rsp         = (uint64_t)sp;
+    t->kernel_stack_top  = kstack_top;
+    t->kernel_stack_phys = kstack_phys;
+
+    enqueue_ready(t);
+    return t;
+}
+
 int thread_join(int tid, int *out_code) {
     struct process *p = current_proc();
     if (!p) { return -ESRCH; }

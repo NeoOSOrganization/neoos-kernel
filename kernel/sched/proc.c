@@ -831,15 +831,26 @@ struct thread *fork_task(struct syscall_frame *frame) {
 
     // Memory layout, lowest address first (i.e. pop order):
     //   r15, r14, r13, r12, rbx, rbp, fork_trampoline,
-    //   fs_base, rcx, r11, user_rsp
+    //   fs_base, rcx, r11, user_rsp, r9
     // The first six are consumed by context_switch's own epilogue, the
-    // seventh by its `ret`, and the last four by fork_trampoline.
+    // seventh by its `ret`, and the last five by fork_trampoline.
     //
     // fs_base is planted here rather than read from the thread in the
     // trampoline because the trampoline's `mov fs, dx` ZEROES
     // IA32_FS_BASE and it has to be put back with no C call available
     // -- see the comment there.
+    //
+    // r9 is the parent's r9 at the moment of the syscall -- real Linux
+    // clone(2)/fork(2) preserve it (and every other register besides
+    // rax/rsp) into the child, and musl's hand-written clone.s
+    // (src/thread/x86_64/clone.s) depends on exactly that for its own
+    // child: it stashes the thread's start function in r9 across the
+    // syscall and calls through it immediately after. fork()'s own
+    // child never reads this, but planting it here costs nothing and
+    // is what makes this same trampoline correct for sys_clone's
+    // child too (kernel/sched/thread.c's clone_task).
     uint64_t *sp = (uint64_t *)kstack_top;
+    *(--sp) = frame->r9;
     *(--sp) = frame->user_rsp;
     *(--sp) = frame->r11;   // user RFLAGS
     *(--sp) = frame->rcx;   // user RIP

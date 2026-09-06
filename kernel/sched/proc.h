@@ -201,11 +201,24 @@ struct thread {
     // the kernel stack is freed earlier, by whoever drains the zombie
     // list, and is NOT gated on this count (that is what on_cpu is for).
     uint32_t ref;
-    // set_tid_address's "clear child tid" pointer. Recorded because
-    // musl sets it before main; NOT acted on at exit -- see
-    // sys_set_tid_address for why, and docs/stdlib.md for the
-    // divergence that creates.
+    // set_tid_address's "clear child tid" pointer, and sys_clone's
+    // CLONE_CHILD_CLEARTID argument -- the same field serves both,
+    // since NeoOS's own SYS_THREAD_JOIN never uses it (only musl's
+    // pthread_join does). ACTED ON at exit for clone-created threads
+    // (thread_exit_self clears it and futex-wakes it -- that is
+    // literally what unblocks pthread_join); still NOT acted on for
+    // this process's main thread when set only via set_tid_address,
+    // since nothing on NeoOS's side ever futex_waits on the main
+    // thread's own tid. See docs/stdlib.md for the full story.
     uint64_t clear_child_tid;
+    // Set by sys_clone (never by thread_create or fork). Changes how
+    // thread_exit_self reclaims this thread: a detached thread has no
+    // NeoOS-native joiner (musl's pthread_join synchronizes purely via
+    // clear_child_tid's futex, never calling SYS_THREAD_JOIN), so it
+    // is routed to kzombies -- the same self-reap drain process-less
+    // kernel threads already use -- instead of p->zombies, which
+    // nothing would ever drain for it.
+    int detached;
     struct process *proc;           // 0 for the pre-process idle thread
     enum thread_state state;
     // Non-zero while SOME CPU is still executing on this thread's
@@ -397,6 +410,15 @@ int64_t wait_for_pid(int pid);
 void thread_kill(struct thread *t);
 void thread_kill_solo(struct thread *t);
 struct thread *thread_create(uint64_t entry, uint64_t arg);
+
+// The mechanism behind sys_clone -- see kernel/sched/thread.c's own
+// comment. Builds a new thread in the CALLING thread's process,
+// resuming (via fork_trampoline) at the parent's exact syscall-return
+// site with child_stack substituted for the parent's own stack and
+// tls substituted for the parent's fs_base. Returns 0 on allocation
+// failure.
+struct thread *clone_task(struct syscall_frame *frame, uint64_t child_stack,
+                           uint64_t tls);
 
 // Reference counting for `struct thread` (see the `ref` field). Take a
 // ref before keeping a thread pointer past the lock that pins it;

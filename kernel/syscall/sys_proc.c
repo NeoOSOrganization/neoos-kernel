@@ -378,6 +378,63 @@ int64_t sys_thread_create(struct syscall_args *a) {
     return t ? t->tid : -EAGAIN;
 }
 
+// clone(flags, child_stack, ptid, ctid, tls) -- raw Linux argument
+// order, matching musl's own __clone asm exactly (see
+// third_party/shim/clone.s and docs/superpowers/specs/
+// 2026-09-07-clone-pthread-design.md). tls is NOT in struct
+// syscall_args's a1..a4 -- it is the 5th syscall argument, which this
+// codebase's convention (see sys_mmap) reads out of frame->r8
+// directly.
+//
+// Scope: EXACTLY the flag combination musl's pthread_create.c sends.
+// Anything else is -EINVAL, not approximated -- every other clone(2)
+// use (namespaces, CLONE_VFORK, selective-sharing process creation) is
+// out of scope for this primitive; fork() already covers process
+// creation.
+//
+// These cross the syscall boundary, so their VALUES are Linux's,
+// exactly like the other flag blocks in this file. From
+// neoos-musl/upstream/include/sched.h.
+#define CLONE_VM             0x00000100
+#define CLONE_FS             0x00000200
+#define CLONE_FILES          0x00000400
+#define CLONE_SIGHAND        0x00000800
+#define CLONE_THREAD         0x00010000
+#define CLONE_SYSVSEM        0x00040000
+#define CLONE_SETTLS         0x00080000
+#define CLONE_PARENT_SETTID  0x00100000
+#define CLONE_CHILD_CLEARTID 0x00200000
+#define CLONE_DETACHED       0x00400000
+
+#define NEOOS_CLONE_FLAGS_SUPPORTED \
+    (CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD \
+     | CLONE_SYSVSEM | CLONE_SETTLS | CLONE_PARENT_SETTID \
+     | CLONE_CHILD_CLEARTID | CLONE_DETACHED)
+
+int64_t sys_clone(struct syscall_args *a) {
+    uint64_t flags       = (uint64_t)a->a1;
+    uint64_t child_stack = (uint64_t)a->a2;
+    uint64_t ptid        = (uint64_t)a->a3;
+    uint64_t ctid        = (uint64_t)a->a4;
+    uint64_t tls         = a->frame->r8;
+
+    if (flags != NEOOS_CLONE_FLAGS_SUPPORTED) { return -EINVAL; }
+    if (!child_stack) { return -EINVAL; }
+
+    struct thread *t = clone_task(a->frame, child_stack, tls);
+    if (!t) { return -EAGAIN; }
+
+    t->clear_child_tid = ctid;   // acted on by thread_exit_self
+
+    if (ptid) {
+        int tid = t->tid;
+        uint64_t missed = copy_to_user((void *)(uintptr_t)ptid, &tid, sizeof tid);
+        if (missed > 0) { return -EFAULT; }
+    }
+
+    return t->tid;
+}
+
 int64_t sys_thread_exit(struct syscall_args *a) {
     thread_exit_self((int)a->a1);
     return 0; // unreachable
