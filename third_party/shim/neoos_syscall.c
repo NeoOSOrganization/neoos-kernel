@@ -64,6 +64,8 @@
 #define NEO_GETPEERNAME     86
 #define NEO_SETSOCKOPT      87
 #define NEO_GETSOCKOPT      88
+#define NEO_SENDMSG         89
+#define NEO_RECVMSG         90
 #define NEO_FCNTL           52
 #define NEO_CHDIR           53
 #define NEO_GETCWD          54
@@ -133,6 +135,8 @@
 #define LX_CONNECT          42
 #define LX_SENDTO           44
 #define LX_RECVFROM         45
+#define LX_SENDMSG          46
+#define LX_RECVMSG          47
 #define LX_BIND             49
 #define LX_GETSOCKNAME      51
 #define LX_ACCEPT           43
@@ -286,6 +290,8 @@ long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a
     case LX_GETPEERNAME:     return neo(NEO_GETPEERNAME, a1, a2, a3, 0, 0, 0);
     case LX_SETSOCKOPT:      return neo(NEO_SETSOCKOPT, a1, a2, a3, a4, a5, 0);
     case LX_GETSOCKOPT:      return neo(NEO_GETSOCKOPT, a1, a2, a3, a4, a5, 0);
+    case LX_SENDMSG:         return neo(NEO_SENDMSG, a1, a2, a3, 0, 0, 0);
+    case LX_RECVMSG:         return neo(NEO_RECVMSG, a1, a2, a3, 0, 0, 0);
 
     // ---- argument RESHAPING: Linux's char* becomes NeoOS's ptr+len --
     //

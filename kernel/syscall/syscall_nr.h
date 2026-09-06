@@ -173,7 +173,18 @@
 #define SYS_SETSOCKOPT      87
 #define SYS_GETSOCKOPT      88
 
+// The generalized scatter/gather form of sendto/recvfrom: an iovec
+// array instead of one buffer, found missing when musl's DNS resolver
+// (res_msend.c) turned out to call recvmsg() to read a UDP reply and
+// got -ENOSYS from the shim every time -- see docs/abi-compatibility.md's
+// DNS resolution refresh. UDP (SOCK_DGRAM) only, matching sendto/
+// recvfrom's own existing scope: both are implemented by gathering/
+// scattering through those two entry points, which only ever handle
+// a socket's dgram queue.
+#define SYS_SENDMSG         89
+#define SYS_RECVMSG         90
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX             89
+#define SYS_MAX             91
 
 #endif

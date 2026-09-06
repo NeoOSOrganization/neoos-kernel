@@ -91,3 +91,13 @@ int64_t sys_recvfrom(struct syscall_args *a) {
                            (struct k_sockaddr *)(uintptr_t)a->frame->r8,
                            (uint32_t *)(uintptr_t)a->frame->r9);
 }
+
+int64_t sys_sendmsg(struct syscall_args *a) {
+    return socket_sendmsg((int)a->a1, (const struct k_msghdr *)(uintptr_t)a->a2,
+                          (int)a->a3);
+}
+
+int64_t sys_recvmsg(struct syscall_args *a) {
+    return socket_recvmsg((int)a->a1, (struct k_msghdr *)(uintptr_t)a->a2,
+                          (int)a->a3);
+}

@@ -519,7 +519,21 @@ int64_t socket_sendto(int fd, const void *buf, uint64_t len, int flags,
     // path runs straight into the receive path, which locks the
     // DESTINATION socket -- and a program sending to itself would then
     // take the same lock twice.
-    uint32_t src_ip_n = s->local_ip_n ? s->local_ip_n : IP_LOOPBACK_N;
+    //
+    // src_ip_n is passed through RAW (0 for an unbound/wildcard-bound
+    // socket), not substituted with IP_LOOPBACK_N: net_udp_output
+    // already resolves src_n==0 to the ROUTED device's own address
+    // (dev->ip_n) -- which is loopback.ip_n == IP_LOOPBACK_N when the
+    // destination really is loopback, and the real interface address
+    // otherwise. Substituting IP_LOOPBACK_N here unconditionally (the
+    // previous version of this line) made every packet from an
+    // unbound socket claim to come from 127.0.0.1 regardless of
+    // destination -- which is exactly why musl's DNS resolver
+    // (getaddrinfo -> res_msend, an unbound/wildcard-bound UDP socket
+    // sending to a real nameserver) could send a query that slirp had
+    // no sane way to reply to. See docs/abi-compatibility.md's DNS
+    // resolution refresh.
+    uint32_t src_ip_n = s->local_ip_n;
     int rc = net_udp_output(src_ip_n, s->local_port_n,
                             dst_ip_n ? dst_ip_n : IP_LOOPBACK_N, dst_port_n,
                             kbuf, (uint32_t)len);
@@ -589,6 +603,118 @@ int64_t socket_recvfrom(int fd, void *buf, uint64_t len, int flags,
     if (!s) { return -EBADF; }
     int64_t rc = recv_one(s, nonblock, buf, len, src, src_len);
     sock_put(s);
+    return rc;
+}
+
+// sendmsg/recvmsg -- the generalized scatter/gather form of sendto/
+// recvfrom, found missing when musl's DNS resolver (res_msend.c)
+// turned out to read its UDP reply via recvmsg() rather than
+// recvfrom(): the shim had no case for it at all, so every attempt
+// silently got -ENOSYS and getaddrinfo() always failed with EAI_AGAIN
+// even though the query itself (sent via the already-shimmed sendto)
+// reached the server fine. See docs/abi-compatibility.md's DNS
+// resolution refresh.
+//
+// Implemented by gathering/scattering through socket_sendto/
+// socket_recvfrom above rather than duplicating their logic -- which
+// is also why this is SOCK_DGRAM only, exactly like those two: neither
+// touches a stream socket's tcb, only a dgram socket's rx queue.
+// MSG_CTRUNC/msg_control (ancillary data, e.g. SCM_RIGHTS) are not
+// implemented; msg_control is always treated as absent.
+#define MSG_IOV_MAX 16
+
+int64_t socket_sendmsg(int fd, const struct k_msghdr *msg_ptr, int flags) {
+    if (!msg_ptr) { return -EFAULT; }
+    struct k_msghdr msg;
+    uint64_t missed = copy_from_user(&msg, msg_ptr, sizeof msg);
+    if (missed > 0) { return -EFAULT; }
+    if (msg.msg_iovlen > MSG_IOV_MAX) { return -EINVAL; }
+
+    struct k_iovec iov[MSG_IOV_MAX];
+    if (msg.msg_iovlen > 0) {
+        missed = copy_from_user(iov, (const void *)(uintptr_t)msg.msg_iov,
+                                msg.msg_iovlen * sizeof(struct k_iovec));
+        if (missed > 0) { return -EFAULT; }
+    }
+
+    uint64_t total = 0;
+    for (uint64_t i = 0; i < msg.msg_iovlen; i++) { total += iov[i].iov_len; }
+    // socket_sendto below re-validates this properly (against
+    // net_udp_output's real 65535-8 limit); this is only a sanity
+    // ceiling so a bogus total can't kmalloc something absurd first.
+    if (total > 65536) { return -EMSGSIZE; }
+
+    uint8_t *buf = total ? (uint8_t *)kmalloc(total) : 0;
+    if (total && !buf) { return -ENOBUFS; }
+    uint64_t off = 0;
+    for (uint64_t i = 0; i < msg.msg_iovlen; i++) {
+        if (iov[i].iov_len == 0) { continue; }
+        missed = copy_from_user(buf + off, (const void *)(uintptr_t)iov[i].iov_base, iov[i].iov_len);
+        if (missed > 0) { if (buf) { kfree(buf); } return -EFAULT; }
+        off += iov[i].iov_len;
+    }
+
+    const struct k_sockaddr *dest = msg.msg_name ? (const struct k_sockaddr *)(uintptr_t)msg.msg_name : 0;
+    int64_t rc = socket_sendto(fd, buf, total, flags, dest, msg.msg_namelen);
+    if (buf) { kfree(buf); }
+    return rc;
+}
+
+int64_t socket_recvmsg(int fd, struct k_msghdr *msg_ptr, int flags) {
+    if (!msg_ptr) { return -EFAULT; }
+    struct k_msghdr msg;
+    uint64_t missed = copy_from_user(&msg, msg_ptr, sizeof msg);
+    if (missed > 0) { return -EFAULT; }
+    if (msg.msg_iovlen > MSG_IOV_MAX) { return -EINVAL; }
+
+    struct k_iovec iov[MSG_IOV_MAX];
+    if (msg.msg_iovlen > 0) {
+        missed = copy_from_user(iov, (const void *)(uintptr_t)msg.msg_iov,
+                                msg.msg_iovlen * sizeof(struct k_iovec));
+        if (missed > 0) { return -EFAULT; }
+    }
+
+    uint64_t total = 0;
+    for (uint64_t i = 0; i < msg.msg_iovlen; i++) { total += iov[i].iov_len; }
+
+    uint8_t *buf = total ? (uint8_t *)kmalloc(total) : 0;
+    if (total && !buf) { return -ENOBUFS; }
+
+    struct k_sockaddr src;
+    uint32_t src_len = sizeof src;
+    int64_t rc = socket_recvfrom(fd, buf, total, flags,
+                                 msg.msg_name ? &src : 0,
+                                 msg.msg_name ? &src_len : 0);
+    if (rc < 0) { if (buf) { kfree(buf); } return rc; }
+
+    uint64_t off = 0, remaining = (uint64_t)rc;
+    for (uint64_t i = 0; i < msg.msg_iovlen && remaining > 0; i++) {
+        uint64_t chunk = iov[i].iov_len < remaining ? iov[i].iov_len : remaining;
+        if (chunk == 0) { continue; }
+        missed = copy_to_user((void *)(uintptr_t)iov[i].iov_base, buf + off, chunk);
+        if (missed > 0) { if (buf) { kfree(buf); } return -EFAULT; }
+        off += chunk;
+        remaining -= chunk;
+    }
+    if (buf) { kfree(buf); }
+
+    // Real Linux writes msg_namelen and msg_flags back into the
+    // caller's struct after the call; a datagram larger than the
+    // combined iovec space is silently truncated, same as recvfrom.
+    uint32_t out_namelen = msg.msg_name ? src_len : 0;
+    if (msg.msg_name) {
+        missed = copy_to_user((void *)(uintptr_t)msg.msg_name, &src,
+                              out_namelen < msg.msg_namelen ? out_namelen : msg.msg_namelen);
+        if (missed > 0) { return -EFAULT; }
+    }
+    uint32_t out_flags = 0;   // MSG_TRUNC is not implemented
+    missed = copy_to_user((uint8_t *)msg_ptr + __builtin_offsetof(struct k_msghdr, msg_namelen),
+                          &out_namelen, sizeof out_namelen);
+    if (missed > 0) { return -EFAULT; }
+    missed = copy_to_user((uint8_t *)msg_ptr + __builtin_offsetof(struct k_msghdr, msg_flags),
+                          &out_flags, sizeof out_flags);
+    if (missed > 0) { return -EFAULT; }
+
     return rc;
 }
 
@@ -1021,6 +1147,24 @@ void socket_selftest(void) {
     }
     if (sizeof(struct k_sockaddr) != 16) {
         serial_write_string("[socket] selftest FAILED: sockaddr is not 16 bytes\n");
+        return;
+    }
+    if (sizeof(struct k_iovec) != 16) {
+        serial_write_string("[socket] selftest FAILED: iovec is not 16 bytes\n");
+        return;
+    }
+    if (sizeof(struct k_msghdr) != 56) {
+        serial_write_string("[socket] selftest FAILED: msghdr is not 56 bytes\n");
+        return;
+    }
+    if (__builtin_offsetof(struct k_msghdr, msg_name)       != 0  ||
+        __builtin_offsetof(struct k_msghdr, msg_namelen)    != 8  ||
+        __builtin_offsetof(struct k_msghdr, msg_iov)        != 16 ||
+        __builtin_offsetof(struct k_msghdr, msg_iovlen)     != 24 ||
+        __builtin_offsetof(struct k_msghdr, msg_control)    != 32 ||
+        __builtin_offsetof(struct k_msghdr, msg_controllen) != 40 ||
+        __builtin_offsetof(struct k_msghdr, msg_flags)      != 48) {
+        serial_write_string("[socket] selftest FAILED: msghdr field offsets\n");
         return;
     }
     serial_write_string("[socket] selftest passed\n");

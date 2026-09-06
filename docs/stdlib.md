@@ -705,6 +705,8 @@ int64_t recvfrom(int fd, void *buf, uint64_t len, int flags,
                  struct sockaddr *src, socklen_t *src_len);
 int64_t send(int fd, const void *buf, uint64_t len, int flags);
 int64_t recv(int fd, void *buf, uint64_t len, int flags);
+int64_t sendmsg(int fd, const struct msghdr *msg, int flags);
+int64_t recvmsg(int fd, struct msghdr *msg, int flags);
 uint16_t htons(uint16_t); uint32_t htonl(uint32_t);   /* and ntoh* */
 uint32_t inet_addr(const char *);
 char    *inet_ntoa_r(uint32_t addr_n, char *out);
@@ -759,6 +761,14 @@ ARP. It is not a shortcut between two buffers.
 - **`inet_ntoa` is spelled `inet_ntoa_r`** and takes the output buffer.
   The standard one returns a pointer to a static buffer, which is not
   thread-safe; NeoOS has threads and no reason to reproduce that.
+- **`sendmsg`/`recvmsg` are `SOCK_DGRAM` only**, exactly like `sendto`/
+  `recvfrom` (they are implemented by gathering/scattering through
+  those two) -- calling either on a stream socket does whatever
+  `sendto`/`recvfrom` themselves do on one today (nothing correct;
+  neither has ever supported `SOCK_STREAM`). `msg_control`/
+  `msg_controllen` (ancillary data -- `SCM_RIGHTS` fd-passing, packet
+  timestamps) are not implemented; a program using them should expect
+  `msg_controllen` to always read back 0.
 
 ### TCP (D5)
 
@@ -839,9 +849,19 @@ unpicking the stack.
 
 Two consequences a program can observe:
 
-- **There is no `/etc/resolv.conf` and no resolver.** DHCP option 6 is
-  parsed and the DNS server's address is stored, and nothing reads it.
-  `gethostbyname` and `getaddrinfo` do not exist.
+- **DNS resolution works, but the nameserver is static, not DHCP-learned.**
+  `/etc/resolv.conf` (generated at disk-image build time, `nameserver
+  10.0.2.3` -- slirp's built-in resolver) is what musl's real resolver
+  (`getaddrinfo`/`gethostbyname`, unmodified upstream code) reads;
+  DHCP option 6 is still parsed and stored (`dhcp.c`) but nothing
+  wires it into `/etc/resolv.conf` yet -- a real divergence, since a
+  network with a different DNS server than slirp's would need this
+  file hand-edited. `getaddrinfo`/`gethostbyname` needed two real
+  kernel-side fixes to work at all (see docs/abi-compatibility.md's
+  DNS resolution refresh): `sendmsg`/`recvmsg` didn't exist as
+  syscalls, and an unbound/wildcard-bound UDP socket's outgoing
+  packets claimed a source address of `127.0.0.1` regardless of
+  destination.
 - **There is no way for a program to renew, release, or inspect the
   lease.** The address is simply there. `getsockname` on a bound socket
   is the only way to see it.

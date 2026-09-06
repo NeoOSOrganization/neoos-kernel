@@ -375,6 +375,14 @@ $(DISK_IMG): $(BUILD_DIR)/embedfs_table.c $(USERLAND_BUILD)/TERM.ELF $(USERLAND_
 	  > $(DISK_SRC)/passwd
 	@mcopy -o -i $(DISK_IMG) $(DISK_SRC)/passwd ::etc/passwd
 	@mmd -i $(DISK_IMG) ::home/neo 2>/dev/null || true
+	@# /etc/resolv.conf -- 10.0.2.3 is slirp's own built-in DNS
+	@# resolver (QEMU_NETDEV's default), the same server
+	@# net/dnsprobe.c's boot-time selftest already queries directly.
+	@# Without this file musl's getaddrinfo()/gethostbyname() have no
+	@# nameserver to ask and always fail -- see docs/abi-compatibility.md's
+	@# DNS resolution refresh.
+	@printf '%s\n' 'nameserver 10.0.2.3' > $(DISK_SRC)/resolv.conf
+	@mcopy -o -i $(DISK_IMG) $(DISK_SRC)/resolv.conf ::etc/resolv.conf
 
 # 64MB, not 32: FAT32 needs at least 65525 clusters, and mkfs.fat warns
 # that a 32MB image falls below that. Depends on $(DISK_IMG) only so

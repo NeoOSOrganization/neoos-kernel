@@ -623,3 +623,75 @@ are verified by the real neoos-doom regression instead — see that
 port's own history) plus a clean 15/15 gauntlet after each of the three
 conversion passes (read/write family, stat/signal/wait family,
 already-guarded migrations).
+
+## Refresh — DNS resolution (2026-09-06)
+
+The first prerequisite for porting real networked tools (curl, wget):
+musl's unmodified `getaddrinfo()`/`gethostbyname()` now genuinely
+resolve hostnames on NeoOS. Found and fixed via a feasibility spike,
+not a planned milestone — investigated because `docs/stdlib.md`
+recorded "no resolver" as a known gap, and porting curl/wget needs one.
+
+**Two real, independent kernel-side bugs, not one:**
+
+1. **`sendmsg`/`recvmsg` did not exist as syscalls at all.** musl's
+   resolver (`res_msend.c`) sends its query via `sendto()` (already
+   shimmed) but reads the reply via `recvmsg()` — the shim's `default:`
+   case caught every call and returned `-ENOSYS`, so the reply
+   genuinely sitting in the kernel's UDP queue was never read, and
+   `getaddrinfo()` always failed with `EAI_AGAIN` after exhausting its
+   retry budget. Fixed with real `SYS_SENDMSG`/`SYS_RECVMSG` syscalls
+   (`net/socket.c`'s `socket_sendmsg`/`socket_recvmsg`, `SOCK_DGRAM`
+   only — implemented by gathering/scattering through the existing
+   `socket_sendto`/`socket_recvfrom`, using the `copy_to_user`/
+   `copy_from_user` machinery from this milestone's own earlier work)
+   plus the two shim entries (`LX_SENDMSG`=46, `LX_RECVMSG`=47).
+   `struct k_msghdr`/`struct k_iovec` are Linux's x86-64 layouts,
+   byte-verified at boot in `socket_selftest()` the same way
+   `k_sockaddr_in` already was.
+
+2. **Every unbound or wildcard-bound UDP socket's outgoing packets
+   claimed a source address of `127.0.0.1`, regardless of actual
+   destination.** `socket_sendto`'s `src_ip_n = s->local_ip_n ? ... :
+   IP_LOOPBACK_N` substituted loopback unconditionally whenever a
+   socket hadn't bound to a specific address — which a DNS query
+   always does (an unbound-then-auto-bound or explicitly
+   `bind()`-to-`INADDR_ANY` socket, exactly musl's own `res_msend.c`
+   pattern). `net_udp_output` already had the CORRECT fallback for
+   `src_n == 0` (the routed device's own `dev->ip_n`, which equals
+   `IP_LOOPBACK_N` for a loopback destination and the real interface
+   address otherwise) — `socket_sendto` was substituting loopback
+   BEFORE that logic ever ran, so it never got the chance. A query
+   claiming to come from `127.0.0.1` reached slirp's resolver (it
+   replied to the raw kernel-level boot-time probe in
+   `net/dnsprobe.c`, which passes `src_n=0` straight through and so
+   was never affected), but nothing routed the reply back correctly.
+   Found by writing a raw send/poll/recvmsg probe that bypassed
+   musl's resolver entirely, tracing kernel-side UDP send/receive with
+   temporary serial instrumentation (removed once the cause was
+   confirmed), and comparing against `dnsprobe.c`'s own already-working
+   pattern. Fixed by passing `s->local_ip_n` through unsubstituted.
+
+**Also shipped:** `/etc/resolv.conf` (`nameserver 10.0.2.3` — slirp's
+built-in resolver, the address `dnsprobe.c`'s selftest already queries)
+is now generated at disk-image build time; without it musl's resolver
+has no nameserver to ask at all. The nameserver is **static, not
+DHCP-learned** — DHCP option 6 is still parsed and stored (`dhcp.c`)
+but nothing wires it into this file yet, a real divergence for a
+network whose DNS server isn't slirp's.
+
+**Verified:** a throwaway userland program calling
+`getaddrinfo("example.com", "80", ...)` resolves real addresses
+(confirmed against the live internet through slirp's NAT); the 15/15
+gauntlet stays green (MPI's UDP-over-loopback and every other existing
+network user are all loopback-destined, so `dev->ip_n` still resolves
+to `IP_LOOPBACK_N` for them exactly as the old substitution did — this
+bug fix is additive, not a behavior change for anything already
+working).
+
+**What a real ported application still hits:** only `AF_INET`/
+`SOCK_DGRAM`/`SOCK_STREAM` resolve (no `AF_INET6`, so a `getaddrinfo()`
+call requesting only IPv6 results finds none); `msg_control` (ancillary
+data — `SCM_RIGHTS`, timestamps) is not implemented; TLS is still
+entirely absent, so `https://` URLs remain out of reach until that
+lands separately.

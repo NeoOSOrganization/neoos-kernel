@@ -50,6 +50,27 @@ struct k_sockaddr_in {
     uint8_t          sin_zero[8];
 } __attribute__((packed));
 
+// sendmsg/recvmsg's scatter/gather arguments. Natural x86-64 alignment
+// already matches Linux's layout byte for byte (every field here is
+// either 8-byte-aligned or explicitly padded to be), so unlike
+// k_sockaddr_in this needs no __attribute__((packed)).
+struct k_iovec {
+    uint64_t iov_base;
+    uint64_t iov_len;
+};
+
+struct k_msghdr {
+    uint64_t msg_name;          // struct k_sockaddr* or NULL
+    uint32_t msg_namelen;
+    uint32_t _pad0;
+    uint64_t msg_iov;           // struct k_iovec*
+    uint64_t msg_iovlen;
+    uint64_t msg_control;       // always NULL here -- no cmsg support
+    uint64_t msg_controllen;
+    uint32_t msg_flags;
+    uint32_t _pad1;
+};
+
 struct file_descriptor;
 struct file_ops;
 
@@ -69,6 +90,8 @@ int64_t socket_shutdown(int fd, int how);
 int64_t socket_getpeername(int fd, struct k_sockaddr *addr, uint32_t *len);
 int64_t socket_setsockopt(int fd, int level, int opt, const void *val, uint32_t len);
 int64_t socket_getsockopt(int fd, int level, int opt, void *val, uint32_t *len);
+int64_t socket_sendmsg(int fd, const struct k_msghdr *msg, int flags);
+int64_t socket_recvmsg(int fd, struct k_msghdr *msg, int flags);
 
 const struct file_ops *socket_file_ops(void);
 
