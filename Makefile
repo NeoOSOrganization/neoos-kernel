@@ -128,11 +128,22 @@ USER_CFLAGS := -ffreestanding -fno-stack-protector -mno-red-zone -msse3 -mssse3 
 #
 # Boot-critical apps (init/login/term/nsh) are ALWAYS embedded --
 # without init.nex there is nothing for the kernel to spawn as PID 1
-# (kernel/kernel.c). Everything else (the regression suite, ports) is
+# (kernel/kernel.c). Everything else (the regression suite) is
 # optional: EMBED_DIRS is empty by default, so a bare `make` embeds
 # only these four. See docs/superpowers/specs/
 # 2026-09-05-embedded-test-and-app-architecture.md.
+#
+# Ports do NOT go through embedfs (see docs/superpowers/specs/
+# 2026-09-06-os-builder-port-install-design.md): a port is something a
+# user chooses to have available, not something that should auto-run
+# at boot, and embedfs only ever embeds *.nex files -- a port shipping
+# a data file alongside its binary (doom's doom1.wad) has no path
+# through it at all. PORT_DIRS (below, in the $(DISK_IMG) rule)
+# installs a port's build/ output onto the disk image as real files
+# instead: /opt/<name>/ gets everything, /bin/ gets a copy of each
+# .nex for nsh's $PATH lookup.
 EMBED_DIRS ?=
+PORT_DIRS ?=
 
 $(DISK_SRC)/nex-embed-boot/init.nex: $(USERLAND_BUILD)/INIT.ELF userland/boot-apps/init.test.json
 	@mkdir -p $(DISK_SRC)/nex-embed-boot
@@ -261,11 +272,36 @@ $(DISK_IMG): $(BUILD_DIR)/embedfs_table.c $(USERLAND_BUILD)/TERM.ELF $(USERLAND_
 	mcopy -i $(DISK_IMG) "$(DISK_SRC)/A Long File Name.txt" "::usr/share/test/A Long File Name.txt"
 	mcopy -i $(DISK_IMG) $(DISK_SRC)/bigfile.txt ::usr/share/test/bigfile.txt
 	mcopy -i $(DISK_IMG) $(DISK_SRC)/dir/nested.txt ::usr/share/test/dir/nested.txt
-	@# Ports and the regression suite are not built by this repo at all
-	@# (spec: "does NOT contain ports"/tests) -- they arrive purely via
-	@# EMBED_DIRS, pointed at neoos-kernel-tests-common's and each
-	@# port's build/ output. See the embedfs_table.c rule above.
+	@# The regression suite is not built by this repo at all -- it
+	@# arrives purely via EMBED_DIRS, pointed at
+	@# neoos-kernel-tests-common's build/ output. See the
+	@# embedfs_table.c rule above.
 	@echo "disk: EMBED_DIRS=$(EMBED_DIRS)"
+	@# Ports (PORT_DIRS: "name=path name=path ..."), by contrast, are
+	@# installed as REAL FILES on this disk image, not via embedfs --
+	@# see docs/superpowers/specs/
+	@# 2026-09-06-os-builder-port-install-design.md. Every file in a
+	@# port's build output lands under /opt/<name>/ (minus the
+	@# embedfs-only *.test.json/*.manifest.json manifests, which mean
+	@# nothing here); each *.nex among them ALSO gets a copy in /bin/,
+	@# since FAT has no symlinks to alias one location to the other and
+	@# nsh's $PATH only ever looks in /bin and /usr/tests.
+	@echo "disk: PORT_DIRS=$(PORT_DIRS)"
+	@for pair in $(PORT_DIRS); do \
+		name=$${pair%%=*}; path=$${pair#*=}; \
+		mmd -i $(DISK_IMG) ::opt 2>/dev/null || true; \
+		mmd -i $(DISK_IMG) "::opt/$$name" 2>/dev/null || true; \
+		for f in "$$path"/*; do \
+			base=$$(basename "$$f"); \
+			case "$$base" in \
+				*.test.json|*.manifest.json) continue ;; \
+			esac; \
+			mcopy -i $(DISK_IMG) "$$f" "::opt/$$name/$$base"; \
+			case "$$base" in \
+				*.nex) mcopy -i $(DISK_IMG) "$$f" "::bin/$$base" ;; \
+			esac; \
+		done; \
+	done
 	printf '%s\n' \
 	  '# NeoOS test workload -- launched by /sbin/init.nex (see userland/init.c)' \
 	  '# TERM runs first as a wait entry: it claims the active tty +' \
