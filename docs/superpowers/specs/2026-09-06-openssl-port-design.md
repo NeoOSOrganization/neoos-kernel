@@ -160,3 +160,16 @@ alongside their existing `-L$(MUSL_DIR)/lib -lc`. Getting the CA
 bundle (`build-output/etc/ssl/cert.pem` from this repo) onto a real
 disk image at the path OpenSSL's binary actually looks for it is,
 again, that milestone's own concern (§2).
+
+> **Refinement, found during plan self-review:** §2/§6 originally
+> listed producing a NeoOS-native `openssl` CLI binary as an in-scope
+> deliverable. Linking all of `upstream/apps/*.c` (dozens of
+> subcommand source files) against a freestanding `-static -nostdlib`
+> target is a real, open-ended sub-problem OpenSSL's own build system
+> was never designed for — and neither curl nor wget ever shells out
+> to that CLI anyway (§7: both link `libssl.a`/`libcrypto.a` directly).
+> The plan verifies this milestone instead with a small test program
+> against the public `SSL_CTX`/`SSL_connect` API — exactly how
+> curl/wget will actually use these libraries — and the CLI binary
+> itself is dropped from this milestone's scope, a deferred gap rather
+> than a silently-missing deliverable.
