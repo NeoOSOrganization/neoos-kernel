@@ -27,7 +27,9 @@
 - Modify: `kernel/syscall/syscall.c` — dispatch table entry.
 - Modify: `kernel/syscall/sys_proc.c` — new `sys_clone()` handler.
 - Modify: `kernel/sched/proc.h` — one new `struct thread` field.
-- Modify: `kernel/sched/thread.c` — new `clone_task()` (the actual mechanism), `extern fork_trampoline`.
+- Modify: `kernel/sched/thread.c` — new `clone_task()` (the actual mechanism).
+- Modify: `kernel/arch/fork_trampoline.asm` — **found during implementation, not anticipated in the design doc**: the trampoline restored `fs_base`/`rcx`/`r11`/`rsp` and the callee-saved registers into a resumed child, but never `r9`. Real Linux clone(2)/fork(2) preserve the *entire* parent register snapshot into the child, and musl's hand-written `clone.s` depends on exactly that — it parks the thread's start function in `r9` across the syscall and does `call *%r9` immediately after. Without restoring `r9`, every `pthread_create`'d thread's first instruction would jump through garbage. Fixed by adding one `pop r9` (harmless, and more correct, for `fork()`'s child too).
+- Modify: `kernel/sched/proc.c` — `fork_task()` plants the matching new stack slot (`frame->r9`), since it builds the exact same trampoline-consumed layout `clone_task()` does.
 - Test (scratch, not committed): a NeoOS test program issuing the raw `clone` syscall directly (bypassing musl's `clone.s`, which Task 3 rewrites) to prove the kernel mechanism in isolation before musl is involved at all.
 
 **Interfaces:**
@@ -494,6 +496,8 @@ workflow does with its own reference checkout.
 - Modify: `third_party/shim/clone.s` (in **this** repo, `NeoOS`) —
   currently the `-ENOSYS` stub from the earlier threading
   investigation.
+- Modify: `kernel/syscall/sys_proc.c` — `sys_exit` (see Step 4.5,
+  found during implementation).
 - Test (scratch): `thread_test.nim` (already exists from the Nim
   feasibility spike) or an equivalent C program using musl's real
   `<pthread.h>`.
@@ -601,6 +605,30 @@ not silently.
 - [ ] **Step 4: Rebuild the kernel against the new musl, run the raw-syscall test again**
 
 Repeat Task 2 Step 4's boot verification with the freshly built `neoos-musl/build-output` — this confirms Tasks 1-2's kernel mechanism still works unchanged (it does not depend on musl at all), before moving to the musl-level test.
+
+- [ ] **Step 4.5 (found during implementation): `sys_exit` must be thread-aware**
+
+The first real `pthread_create`/`pthread_join` test run hung: worker
+ran, but `pthread_join` never returned. Root cause, confirmed by
+reading `pthread_create.c`'s `__pthread_exit()` directly rather than
+guessing: its normal exit path (used by BOTH a joinable thread and a
+detached thread with no separate mmap'd stack to unmap) ends with a
+plain `__syscall(SYS_exit, 0)` — real Linux `exit(2)` semantics, which
+end ONLY the calling thread when others are still alive (`exit_group`
+is the "kill everyone" call, already separate as `SYS_EXIT_GROUP`).
+NeoOS's `sys_exit` called `process_exit()` unconditionally — correct
+before real threads existed (the calling thread was always the only
+one), but now kills the WHOLE process the instant any
+`pthread_create`'d worker finishes normally, taking the joiner down
+with it.
+
+Fix in `kernel/syscall/sys_proc.c`'s `sys_exit`: call
+`thread_exit_self(code)` instead of `process_exit(code)` when
+`p->live_threads > 1` at the moment of the call, matching real Linux
+`exit(2)` exactly. Verified: the hang is gone, `[pthreadtest] joined,
+arg now 42 (expect 42)` / `PASSED`. Ran the full gauntlet immediately
+after this fix, ahead of Task 4's scheduled run, given how widely
+`sys_exit` is used.
 
 - [ ] **Step 5: Real `pthread_create`/`pthread_join` round trip**
 

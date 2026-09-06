@@ -25,9 +25,30 @@
 #include "net/socket.h"
 #include "kernel.h"
 
+// exit(2)'s real Linux semantics, now that clone() makes them
+// observable: exit() ends ONLY the calling thread if others are still
+// alive, reserving "kill everyone regardless" for exit_group(2)
+// (sys_exit_group, already separate). Before real threads existed
+// this distinction was invisible -- the calling thread was always the
+// only one -- so sys_exit always called process_exit() outright.
+//
+// This is load-bearing for musl's own pthread_create/join, not a
+// hypothetical: __pthread_exit()'s normal path (both the joinable
+// case and the detached-without-its-own-stack-to-unmap case) ends
+// with a plain `__syscall(SYS_exit, 0)`, expecting exactly this
+// thread-only behavior. Calling process_exit() there killed the
+// WHOLE process the instant any pthread_create'd worker finished --
+// observed as pthread_join() hanging forever (the main thread was
+// dead too, along with everything else) while working on
+// docs/superpowers/plans/2026-09-07-clone-pthread.md Task 3.
 int64_t sys_exit(struct syscall_args *a) {
-    process_exit((int)a->a1);
-    return 0; // unreachable -- process_exit never returns
+    struct process *p = current_proc();
+    if (p && __atomic_load_n(&p->live_threads, __ATOMIC_ACQUIRE) > 1) {
+        thread_exit_self((int)a->a1);
+    } else {
+        process_exit((int)a->a1);
+    }
+    return 0; // unreachable -- neither call returns
 }
 
 int64_t sys_getpid(struct syscall_args *a) {
