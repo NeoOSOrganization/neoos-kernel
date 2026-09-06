@@ -774,7 +774,16 @@ ARP. It is not a shortcut between two buffers.
   the default gateway. An address with no matching route is
   `-ENETUNREACH`. The routing table is not reachable from userland:
   there is no `route(8)`, no `AF_NETLINK`, and no `ioctl` to change it.
-- **AF_INET only.** No `AF_UNIX`, no `AF_INET6`.
+- **`socket(2)` itself is `AF_INET` only** (no `AF_INET6`). `AF_UNIX`
+  exists solely via `socketpair()` (see the socketpair section above)
+  -- there is no `AF_UNIX` `socket()`/`bind()`/`connect()`, no path-
+  based Unix domain sockets.
+- **`socket()`'s `protocol` accepts `0`, `IPPROTO_TCP`, or
+  `IPPROTO_UDP`** -- anything else is `-EPROTONOSUPPORT`. A
+  standards-compliant `getaddrinfo()` fills `ai_protocol` with the real
+  protocol number for the type it describes, so a program that passes
+  `ai_protocol` straight into `socket()` (as curl does) needs
+  `IPPROTO_TCP` to work for a `SOCK_STREAM` result, not just `0`.
 - **No `MSG_*` flags at all**, and the header deliberately does not
   define them. `flags` must be 0. In particular there is no
   `MSG_DONTWAIT` and no `MSG_PEEK`, and `MSG_TRUNC` is not available to

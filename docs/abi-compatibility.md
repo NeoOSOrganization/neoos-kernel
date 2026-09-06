@@ -865,3 +865,96 @@ libssh2 milestone's own SFTP write/read/verify round trip against a
 real, independent server was re-run end to end and still passes —
 confirming the TLS/crypto backend swap is behaviorally transparent to
 everything already built on it. 15/15 gauntlet, zero retries.
+
+## Refresh — curl port: HTTP, HTTPS, SFTP (2026-09-06)
+
+curl 8.22.0 (CLI + `libcurl.a`) now builds for NeoOS and fetches real
+URLs over HTTP, HTTPS, and SFTP. One real kernel bug, plus several
+build-time overrides for probe results a cross-compile genuinely
+cannot get right on its own.
+
+**The kernel bug: `socket_create()` rejected `IPPROTO_TCP`.** It
+accepted `protocol == 0` or `IPPROTO_UDP`, but not `IPPROTO_TCP` (6) —
+asymmetric with its own `SOCK_DGRAM`/`IPPROTO_UDP` handling. A
+standards-compliant `getaddrinfo()` (musl's) fills `ai_protocol` with
+the real protocol number for the socket type it describes, and curl
+forwards that value straight into its own `socket()` call rather than
+passing 0. Every `socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)` curl
+issued after a real, successful DNS lookup was rejected with
+`EPROTONOSUPPORT` — "failed to open socket: Protocol not supported",
+for every address a hostname resolved to, while a literal IP passed to
+an internal test program that happened to call `socket()` with
+`protocol=0` worked fine. Fixed by accepting `IPPROTO_TCP` alongside
+the two values already allowed.
+
+**Three build-time overrides, all the same root shape: a CMake
+`check_function_exists()` probe correctly proving a *symbol* resolves
+(musl provides real wrapper functions for all three) while the
+*syscall underneath it* is unimplemented — the mirror image of
+libssh2's `HAVE_O_NONBLOCK` problem, where the probe failed to link
+and reported a FALSE NEGATIVE for a capability NeoOS genuinely has.
+Here, each probe reports a FALSE POSITIVE for one it does not, because
+`check_function_exists` can only prove linkability, never that calling
+the function actually works — and no cross-compile probe can run the
+target's own kernel to find out:**
+
+- **`HAVE_EVENTFD=0`**: curl's multi-handle wakeup mechanism prefers
+  `eventfd2` when available (cheaper than a pipe/socketpair — one fd,
+  no pipe buffer). NeoOS has no `eventfd2` syscall. Forced off, curl
+  falls through to its `HAVE_PIPE` implementation — NeoOS's real,
+  already-tested `pipe2()`-backed pipe — instead of adding a third
+  kernel wakeup primitive for what curl itself treats as a pure
+  optimization over an equivalent, already-working fallback.
+- **`HAVE_ALARM=0`**: the synchronous DNS resolver's legacy
+  `alarm()`+`sigsetjmp`/`siglongjmp` timeout mechanism
+  (`USE_ALARM_TIMEOUT`, `lib/vdns/hostip.c`) calls `alarm()`, which
+  calls `setitimer()` underneath — also unimplemented. Surfaced as an
+  `ENOSYS` immediately followed by a `SIGSEGV`, right after a real,
+  successful DNS lookup. Forced off; the `getaddrinfo()` call itself
+  was already proven fast and reliable in the DNS milestone, so no
+  timeout enforcement around it is a reasonable trade against
+  implementing real interval timers + `SIGALRM` delivery for a
+  fallback-of-a-fallback mechanism.
+- **`ENABLE_THREADED_RESOLVER=OFF`**: not a probe false-positive but
+  the same underlying caution — curl's *default* resolver spawns a
+  pthread per lookup and hands the result back via a socketpair/pipe
+  wakeup. A real lookup (`curl -v http://example.com`) hung forever
+  with zero output even under `-v`, while a literal-IP request (never
+  touching the resolver) connected and failed normally — pointing at
+  the cross-thread handoff, not resolution. Switched to curl's
+  synchronous resolver (`CURLRES_SYNCH`, still fully supported in
+  8.22.0): a direct `getaddrinfo()` on the transfer's own thread,
+  exactly the call already proven end-to-end. The right trade for a
+  CLI that mostly fetches one URL per invocation, where the threaded
+  resolver's real benefit (not blocking other transfers on the same
+  multi-handle) does not apply. The specific threaded-resolver hang's
+  own root cause was not chased further, since the synchronous
+  resolver is a real, supported, equally-correct alternative — not a
+  workaround for a capability curl actually needs.
+
+**Also found and fixed the same day, discovered while linking the
+first real multi-megabyte statically-linked binary this project has
+built:** OpenSSL upgraded 1.1.1w → 3.5.8 (curl requires 3.0.0+) and
+`kernel/mm/pmm.h`'s `PMM_MAX_ORDER` raised 4MiB → 64MiB (a real static
+binary linking `libcurl.a` + `libssh2.a` + `libssl.a` + `libcrypto.a`
+comfortably exceeded the previous ceiling) — see this file's own
+separate refresh entry for both, immediately above.
+
+**Verified:** `curl -sS http://example.com` and `curl -sS
+https://example.com` (real TLS 1.2/1.3 handshake, certificate chain
+validated against the installed `/opt/curl/cacert.pem`, no `-k`) both
+against the real, live internet through slirp's NAT; `curl -k -T
+<file> sftp://...` followed by `curl -k sftp://...` against the same
+`asyncssh` throwaway server the libssh2 milestone used, round-tripping
+real content end to end. 15/15 gauntlet, zero retries.
+
+**What a real ported application still hits:** HTTP/1.1 only (no
+HTTP/2 — no nghttp2 port), no compressed transfer encoding (no zlib
+port), no IDN hostnames (no libidn2 port), no `ftp://`/`ftps://` or
+any other curl-supported protocol besides HTTP/HTTPS/SFTP (disabled at
+build time by choice), no `eventfd2` or real interval timers +
+`SIGALRM` (both worked around above rather than implemented, since
+curl itself treats them as optional fast paths over working
+fallbacks), and curl's threaded async resolver specifically hangs for
+a reason not yet root-caused (its synchronous resolver is used
+instead, with no functional loss for this milestone's purposes).

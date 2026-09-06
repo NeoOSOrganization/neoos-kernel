@@ -334,7 +334,20 @@ static int addr_out(struct k_sockaddr *addr, uint32_t *len,
 int64_t socket_create(int domain, int type, int protocol) {
     if (domain != AF_INET) { return -EAFNOSUPPORT; }
     if (type != SOCK_STREAM && type != SOCK_DGRAM) { return -EPROTONOSUPPORT; }
-    if (protocol != 0 && protocol != IPPROTO_UDP) { return -EPROTONOSUPPORT; }
+    // A standards-compliant getaddrinfo() fills ai_protocol with the
+    // REAL protocol number for the socket type it's describing
+    // (IPPROTO_TCP for a SOCK_STREAM result, IPPROTO_UDP for
+    // SOCK_DGRAM) -- musl's does, and curl forwards that value
+    // straight into its own socket() call rather than passing 0. This
+    // accepted 0 or IPPROTO_UDP but never IPPROTO_TCP, so a perfectly
+    // ordinary `socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)` -- exactly
+    // what curl issues after a real DNS lookup -- was rejected with
+    // EPROTONOSUPPORT while `protocol=0` for the same type worked
+    // fine. Found via curl's own "failed to open socket: Protocol not
+    // supported" on every real address a resolved hostname produced.
+    if (protocol != 0 && protocol != IPPROTO_TCP && protocol != IPPROTO_UDP) {
+        return -EPROTONOSUPPORT;
+    }
 
     struct process *p = current_proc();
     if (!p) { return -ESRCH; }
