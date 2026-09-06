@@ -1,8 +1,8 @@
-# Hosted x86_64-neoos-musl GCC/G++ Toolchain Implementation Plan
+# Hosted x86_64-neoos-linux-musl GCC/G++ Toolchain Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a persistent, hosted `x86_64-neoos-musl` GCC/G++ cross-toolchain (real `neoos-musl` libc, real CRT startup, real C++ exception unwinding) installed at `~/opt/cross-x86_64-neoos`, proven via a real `throw`/`catch` C++ program booting on NeoOS.
+**Goal:** Build a persistent, hosted `x86_64-neoos-linux-musl` GCC/G++ cross-toolchain (real `neoos-musl` libc, real CRT startup, real C++ exception unwinding) installed at `~/opt/cross-x86_64-neoos`, proven via a real `throw`/`catch` C++ program booting on NeoOS.
 
 **Architecture:** `musl-cross-make`'s standard three-stage bootstrap (binutils → freestanding stage-1 GCC → target libc → full stage-2 GCC/G++), with ONE substitution: the libc stage builds from real musl v1.2.5 sources patched via generated diffs mirroring `NeoOS/third_party/shim/*` exactly, instead of stock musl — so the toolchain's bundled libc is genuinely NeoOS's own patched musl.
 
@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Target triple: `x86_64-neoos-musl` (new, not a variant of the existing bare-metal `x86_64-elf` triple).
+- Target triple: `x86_64-neoos-linux-musl` (new, not a variant of the existing bare-metal `x86_64-elf` triple).
 - `MUSL_VER = 1.2.5`, matching `neoos-musl/upstream`'s own pinned tag exactly (verified: `git describe --tags` → `v1.2.5`; a tarball hash for `1.2.5` already exists in `musl-cross-make/hashes/`, so no `git-` version override is needed).
 - Shim patches applied via `musl-cross-make`'s own `patches/musl-1.2.5/*.diff` mechanism (`cowpatch.sh -p1`, i.e. standard unified diffs, one leading path component stripped) — never hand-edited inside the fetched musl source tree.
 - The shim's source of truth stays `NeoOS/third_party/shim/*` — this repo's patches are a generated, regeneratable reflection of it, not a second copy to maintain by hand.
@@ -40,7 +40,7 @@
 ```bash
 cd /home/neo/projects/personal
 gh repo create NeoOSOrganization/neoos-hosted-gcc --public \
-    --description "Hosted x86_64-neoos-musl GCC/G++ toolchain for NeoOS"
+    --description "Hosted x86_64-neoos-linux-musl GCC/G++ toolchain for NeoOS"
 git clone git@github.com:NeoOSOrganization/neoos-hosted-gcc.git
 cd neoos-hosted-gcc
 ```
@@ -151,7 +151,7 @@ chmod +x regen-patches.sh
 - [ ] **Step 4: Write `config.mak`**
 
 ```make
-TARGET = x86_64-neoos-musl
+TARGET = x86_64-neoos-linux-musl
 OUTPUT = /home/neo/opt/cross-x86_64-neoos
 MUSL_VER = 1.2.5
 ```
@@ -177,11 +177,11 @@ cd "$MCM_DIR"
 make -j"$(nproc)" 2>&1 | tee "$HERE/build.log"
 make install 2>&1 | tee -a "$HERE/build.log"
 
-if [ -x "/home/neo/opt/cross-x86_64-neoos/bin/x86_64-neoos-musl-gcc" ]; then
+if [ -x "/home/neo/opt/cross-x86_64-neoos/bin/x86_64-neoos-linux-musl-gcc" ]; then
     echo ""
     echo "OK hosted toolchain built successfully at /home/neo/opt/cross-x86_64-neoos"
 else
-    echo "ERROR: build finished but x86_64-neoos-musl-gcc not found" >&2
+    echo "ERROR: build finished but x86_64-neoos-linux-musl-gcc not found" >&2
     exit 1
 fi
 ```
@@ -228,7 +228,7 @@ git push origin main
 
 **Interfaces:**
 - Consumes: `neoos-hosted-gcc/build.sh` (Task 1).
-- Produces: `~/opt/cross-x86_64-neoos/bin/x86_64-neoos-musl-{gcc,g++}` — consumed by Task 3 and Task 4.
+- Produces: `~/opt/cross-x86_64-neoos/bin/x86_64-neoos-linux-musl-{gcc,g++}` — consumed by Task 3 and Task 4.
 
 - [ ] **Step 1: Kick off the build in the background**
 
@@ -252,10 +252,10 @@ stage-2 GCC/G++ `make install`.
 
 ```bash
 export PATH="/home/neo/opt/cross-x86_64-neoos/bin:$PATH"
-x86_64-neoos-musl-gcc --version
-x86_64-neoos-musl-g++ --version
-x86_64-neoos-musl-gcc -print-file-name=crtbeginT.o
-x86_64-neoos-musl-gcc -print-file-name=libgcc_eh.a
+x86_64-neoos-linux-musl-gcc --version
+x86_64-neoos-linux-musl-g++ --version
+x86_64-neoos-linux-musl-gcc -print-file-name=crtbeginT.o
+x86_64-neoos-linux-musl-gcc -print-file-name=libgcc_eh.a
 ```
 
 Expected: both `--version` calls print real version strings (not
@@ -277,7 +277,7 @@ repo content) — proceed to Task 3's boot verification.
 - Create: `hosted_hello.c`
 
 **Interfaces:**
-- Consumes: `x86_64-neoos-musl-gcc` (Task 2).
+- Consumes: `x86_64-neoos-linux-musl-gcc` (Task 2).
 - Produces: nothing later tasks consume — this is this task's own boot proof.
 
 - [ ] **Step 1: Write the test program**
@@ -303,7 +303,7 @@ SCRATCH=<this session's scratchpad>/hosted-gcc-probe
 mkdir -p "$SCRATCH"
 cp hosted_hello.c "$SCRATCH/"
 cd "$SCRATCH"
-x86_64-neoos-musl-gcc -static hosted_hello.c -o hosted_hello.elf
+x86_64-neoos-linux-musl-gcc -static hosted_hello.c -o hosted_hello.elf
 ```
 
 Expected: links with no `-nostdlib`/`-T user.ld`/explicit `crt1.o` —
@@ -332,7 +332,7 @@ grep -i "hosted hello\|panic\|exception\|halted\|fault" build/hosted-hello-test.
 
 Expected: `hosted hello from neoos-neoos-musl-gcc`, no
 panic/exception/halted line, `nexify.sh` reports success on a binary
-built via `x86_64-neoos-musl-gcc` (note: `nexify.sh` and `x86_64-elf-`
+built via `x86_64-neoos-linux-musl-gcc` (note: `nexify.sh` and `x86_64-elf-`
 tools are still used for the disk-image/ELF-to-`.nex` conversion step
 only, not for compiling — the ELF this task boots was compiled
 entirely by the new hosted toolchain).
@@ -352,7 +352,7 @@ entirely by the new hosted toolchain).
   skip unless review finds a relevant section to note this in.
 
 **Interfaces:**
-- Consumes: `x86_64-neoos-musl-g++` (Task 2).
+- Consumes: `x86_64-neoos-linux-musl-g++` (Task 2).
 - Produces: nothing later tasks consume — this milestone's final proof.
 
 - [ ] **Step 1: Write the test program**
@@ -392,7 +392,7 @@ export PATH="/home/neo/opt/cross-x86_64-neoos/bin:$PATH"
 SCRATCH=<this session's scratchpad>/hosted-gcc-probe
 cp cpp_exceptions_test.cpp "$SCRATCH/"
 cd "$SCRATCH"
-x86_64-neoos-musl-g++ -static cpp_exceptions_test.cpp -o cpp_exceptions_test.elf
+x86_64-neoos-linux-musl-g++ -static cpp_exceptions_test.cpp -o cpp_exceptions_test.elf
 
 cd /home/neo/projects/personal/NeoOS
 export PATH="/home/neo/opt/cross-x86_64-elf/bin:$PATH"
@@ -439,7 +439,7 @@ patches mirror the existing shim read-only; they are not edits to it).
 Check `docs/` for wherever `x86_64-elf-gcc`'s own installation is
 documented (likely `docs/stdlib.md`'s intro or a dedicated toolchain
 doc, or `CLAUDE.md` itself) and add a parallel entry for
-`x86_64-neoos-musl-gcc`/`g++`: what it is, where it lives
+`x86_64-neoos-linux-musl-gcc`/`g++`: what it is, where it lives
 (`~/opt/cross-x86_64-neoos`), what it's for (real hosted C/C++,
 real exceptions — contrast with the freestanding `x86_64-elf-gcc`
 used for every existing port), and which repo owns its build recipe
@@ -450,7 +450,7 @@ used for every existing port), and which repo owns its build recipe
 ```bash
 cd /home/neo/projects/personal/NeoOS
 git add docs/  # whichever file Step 4 touched
-git commit -m "docs: document the hosted x86_64-neoos-musl toolchain"
+git commit -m "docs: document the hosted x86_64-neoos-linux-musl toolchain"
 git push origin main
 
 cd /home/neo/projects/personal/neoos-hosted-gcc
@@ -479,7 +479,7 @@ natural next step, now unblocked.
   against `musl-cross-make`'s real `cowpatch.sh -p1` convention
   (patches use `a/`/`b/` prefixes, one component stripped), not
   guessed.
-- **Type/name consistency**: `x86_64-neoos-musl` (the target triple)
+- **Type/name consistency**: `x86_64-neoos-linux-musl` (the target triple)
   and `/home/neo/opt/cross-x86_64-neoos` (the install path) are used
   identically in `config.mak`, `build.sh`, and every later task's
   `PATH` export.

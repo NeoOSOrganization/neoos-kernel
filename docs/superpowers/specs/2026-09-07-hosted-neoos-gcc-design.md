@@ -1,4 +1,4 @@
-# A Hosted `x86_64-neoos-musl` GCC/G++ Toolchain — Design
+# A Hosted `x86_64-neoos-linux-musl` GCC/G++ Toolchain — Design
 
 ## Goal
 
@@ -50,7 +50,7 @@ bare-metal ELF compiler borrowed as-is.
 
 ## Architecture
 
-### Target triple: `x86_64-neoos-musl`
+### Target triple: `x86_64-neoos-linux-musl`
 
 A new GCC target, not a variant of `x86_64-elf`. GCC/binutils bake
 real per-triple assumptions (PIC defaults, spec files, multilib
@@ -118,13 +118,13 @@ step.
 
 ## Testing plan
 
-1. **Toolchain smoke test**: `x86_64-neoos-musl-gcc --version` /
-   `x86_64-neoos-musl-g++ --version` succeed; `x86_64-neoos-musl-gcc
+1. **Toolchain smoke test**: `x86_64-neoos-linux-musl-gcc --version` /
+   `x86_64-neoos-linux-musl-g++ --version` succeed; `x86_64-neoos-linux-musl-gcc
    -print-file-name=crtbeginT.o` and `-print-file-name=libgcc_eh.a`
    resolve to real files (not literally the string back, which is
    GCC's way of saying "not found").
 2. **A real C (not C++) hosted-hello-world**, linked the NORMAL hosted
-   way this toolchain expects (`x86_64-neoos-musl-gcc -static hello.c
+   way this toolchain expects (`x86_64-neoos-linux-musl-gcc -static hello.c
    -o hello`, no manual `-nostdlib`/explicit `crt1.o` juggling — this
    toolchain's whole point is not needing that dance), booted on
    NeoOS via the existing QEMU+serial-log convention. Proves the
@@ -133,7 +133,7 @@ step.
 3. **A real C++ program using `throw`/`catch`** (e.g., a function that
    throws a `std::runtime_error` on one input and returns normally on
    another, with a caller that catches it and prints which path ran),
-   linked with `x86_64-neoos-musl-g++ -static`, booted the same way.
+   linked with `x86_64-neoos-linux-musl-g++ -static`, booted the same way.
    This is the milestone's actual proof of done: real stack unwinding
    through real exception tables, working against `neoos-musl`.
 4. Full `tools/gauntlet.sh 15 3` regression, zero retries — this
