@@ -15,6 +15,8 @@
 #include "arch/cpu_local.h"
 #include "sync/waitq.h"
 #include "errno.h"
+#include "ipc/futex.h"
+#include "mm/uaccess.h"
 
 extern void context_switch(uint64_t *old_rsp, uint64_t *new_rsp);
 extern void kernel_thread_entry_trampoline(void);
@@ -212,9 +214,23 @@ void thread_exit_self(int code) {
             thread_table_remove(p->thread_table, t);
         }
 
-        // Unlink from the live list, then park on the zombie list. We
-        // cannot free our own kernel stack -- we are running on it --
-        // so thread_join or wait_for_pid's reap frees it later.
+        // CLONE_CHILD_CLEARTID: musl's pthread_join futex_waits on
+        // exactly this word. Without this write+wake, every
+        // pthread_join call on a thread created by sys_clone hangs
+        // forever -- this is not polish, it is the join mechanism
+        // musl actually uses (it never calls NeoOS's own
+        // SYS_THREAD_JOIN). Done while the thread's own address space
+        // is still fully mapped -- this runs on the exiting thread's
+        // own context, before any teardown.
+        if (t->clear_child_tid) {
+            uint32_t zero = 0;
+            copy_to_user((void *)(uintptr_t)t->clear_child_tid, &zero, sizeof zero);
+            futex_op((uint32_t *)(uintptr_t)t->clear_child_tid, FUTEX_WAKE, 1, 0);
+        }
+
+        // Unlink from the live list. We cannot free our own kernel
+        // stack -- we are running on it -- so whoever reclaims it
+        // does so after we have left the CPU (thread_wait_off_cpu).
         //
         // p->lock is scoped to JUST this list move. It must NOT be
         // held across proc_put_live() (switches CR3, frees the address space,
@@ -228,12 +244,32 @@ void thread_exit_self(int code) {
         struct thread **pp = &p->threads;
         while (*pp && *pp != t) { pp = &(*pp)->proc_next; }
         if (*pp) { *pp = t->proc_next; }
-        t->proc_next = p->zombies;
-        p->zombies   = t;
-        spin_unlock_irqrestore(&p->lock, f);
 
-        waitq_wake_all(&p->join_waiters);
-        proc_put_live(p);
+        if (t->detached) {
+            // No NeoOS-native joiner will ever call thread_join for
+            // this tid -- musl's pthread_join already got everything
+            // it needs from the futex wake above. Route to kzombies,
+            // the same self-reap drain process-less kernel threads
+            // already use, instead of p->zombies (which nothing would
+            // ever drain for a detached thread). thread_stack_free is
+            // NOT called here or in the drain -- stack_slot is -1
+            // (set by clone_task), and thread_stack_free already
+            // no-ops on slot < 0 (see its own guard).
+            spin_unlock_irqrestore(&p->lock, f);
+            proc_put_live(p);
+
+            uint64_t zf = spin_lock_irqsave(&kzombies_lock);
+            t->proc_next = kzombies;
+            kzombies     = t;
+            spin_unlock_irqrestore(&kzombies_lock, zf);
+        } else {
+            t->proc_next = p->zombies;
+            p->zombies   = t;
+            spin_unlock_irqrestore(&p->lock, f);
+
+            waitq_wake_all(&p->join_waiters);
+            proc_put_live(p);
+        }
     } else {
         // idle_entry drains this same list under kzombies_lock. The
         // `cli` above is enough on one CPU and no protection at all on
