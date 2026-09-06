@@ -128,11 +128,17 @@ static void parse_inittab(void) {
 // the only place it can come from: there is nothing above PID 1 to
 // inherit one from, so if init does not supply it, nothing has one.
 //
-// PATH names /bin, where programs live, and /usr/tests so the suite's
-// binaries can be run by name from a shell. HOME is / until N5 gives
-// users real home directories.
+// PATH names /bin, where programs live, /usr/tests so the suite's
+// binaries can be run by name from a shell, and /usr/local/bin for
+// installed ports (see docs/superpowers/specs/
+// 2026-09-06-os-builder-port-install-design.md) -- ports install onto
+// the real FAT disk rather than through embedfs, and /bin itself is
+// an embedfs mount (kernel.c) that shadows anything written to the
+// disk's own ::bin directory, so a port's binary needs a real,
+// unshadowed disk path to be found by name at all. HOME is / until N5
+// gives users real home directories.
 static char *const base_env[] = {
-    (char *)"PATH=/bin:/usr/tests",
+    (char *)"PATH=/bin:/usr/tests:/usr/local/bin",
     (char *)"HOME=/",
     (char *)"TERM=linux",
     (char *)"PS1=neoos$ ",

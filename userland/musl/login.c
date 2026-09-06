@@ -162,7 +162,11 @@ int main(void) {
         setenv("USER", a.name, 1);
         setenv("HOME", a.home, 1);
         setenv("SHELL", a.shell, 1);
-        if (!getenv("PATH")) { setenv("PATH", "/bin:/usr/tests", 1); }
+        // Fallback only -- init.c's base_env already sets this for
+        // every process on the machine. Kept identical to that
+        // default (including /usr/local/bin for installed ports) so
+        // the two never silently diverge.
+        if (!getenv("PATH")) { setenv("PATH", "/bin:/usr/tests:/usr/local/bin", 1); }
 
         char *argv[] = { a.shell, 0 };
         execve(a.shell, argv, environ);

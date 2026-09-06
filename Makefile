@@ -140,8 +140,9 @@ USER_CFLAGS := -ffreestanding -fno-stack-protector -mno-red-zone -msse3 -mssse3 
 # a data file alongside its binary (doom's doom1.wad) has no path
 # through it at all. PORT_DIRS (below, in the $(DISK_IMG) rule)
 # installs a port's build/ output onto the disk image as real files
-# instead: /opt/<name>/ gets everything, /bin/ gets a copy of each
-# .nex for nsh's $PATH lookup.
+# instead: each *.nex lands at /usr/local/bin/ (NOT /bin/ -- that path
+# is itself an embedfs mount that shadows anything written to the
+# disk underneath it), everything else lands under /opt/<name>/.
 EMBED_DIRS ?=
 PORT_DIRS ?=
 
@@ -280,26 +281,30 @@ $(DISK_IMG): $(BUILD_DIR)/embedfs_table.c $(USERLAND_BUILD)/TERM.ELF $(USERLAND_
 	@# Ports (PORT_DIRS: "name=path name=path ..."), by contrast, are
 	@# installed as REAL FILES on this disk image, not via embedfs --
 	@# see docs/superpowers/specs/
-	@# 2026-09-06-os-builder-port-install-design.md. Every file in a
-	@# port's build output lands under /opt/<name>/ (minus the
+	@# 2026-09-06-os-builder-port-install-design.md. Each *.nex in a
+	@# port's build output lands at /usr/local/bin/<name>.nex --
+	@# NOT /bin/, which is its own embedfs mount (kernel.c) that
+	@# shadows anything written to the disk's own ::bin directory, so
+	@# a file placed there would never actually be visible at runtime.
+	@# Everything else (a data file like doom's doom1.wad; NOT the
 	@# embedfs-only *.test.json/*.manifest.json manifests, which mean
-	@# nothing here); each *.nex among them ALSO gets a copy in /bin/,
-	@# since FAT has no symlinks to alias one location to the other and
-	@# nsh's $PATH only ever looks in /bin and /usr/tests.
+	@# nothing here) lands under /opt/<name>/, for the port's own code
+	@# to find by a fixed, known path. init.c's base_env puts
+	@# /usr/local/bin on $PATH for exactly this.
 	@echo "disk: PORT_DIRS=$(PORT_DIRS)"
 	@for pair in $(PORT_DIRS); do \
 		name=$${pair%%=*}; path=$${pair#*=}; \
-		mmd -i $(DISK_IMG) ::opt 2>/dev/null || true; \
-		mmd -i $(DISK_IMG) "::opt/$$name" 2>/dev/null || true; \
+		mmd -i $(DISK_IMG) ::usr/local 2>/dev/null || true; \
+		mmd -i $(DISK_IMG) ::usr/local/bin 2>/dev/null || true; \
 		for f in "$$path"/*; do \
 			base=$$(basename "$$f"); \
 			case "$$base" in \
 				*.test.json|*.manifest.json) continue ;; \
+				*.nex) mcopy -i $(DISK_IMG) "$$f" "::usr/local/bin/$$base"; continue ;; \
 			esac; \
+			mmd -i $(DISK_IMG) ::opt 2>/dev/null || true; \
+			mmd -i $(DISK_IMG) "::opt/$$name" 2>/dev/null || true; \
 			mcopy -i $(DISK_IMG) "$$f" "::opt/$$name/$$base"; \
-			case "$$base" in \
-				*.nex) mcopy -i $(DISK_IMG) "$$f" "::bin/$$base" ;; \
-			esac; \
 		done; \
 	done
 	printf '%s\n' \
