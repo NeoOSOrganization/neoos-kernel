@@ -462,11 +462,52 @@ int64_t socket_getsockname(int fd, struct k_sockaddr *addr, uint32_t *len) {
     return rc;
 }
 
+// sendto()/recvfrom() are valid on a connected SOCK_STREAM socket too
+// (POSIX/Linux: with a NULL dest/src, they behave exactly like send()/
+// recv()) -- this was UNCONDITIONALLY treated as UDP below with no
+// socket-type check at all, so a TCP program's send()/sendto() call
+// (musl's send() goes out via the sendto() syscall with dest=NULL for
+// a connected socket) got silently misrouted into net_udp_output: a
+// stray UDP datagram to the peer's address, on a newly-allocated and
+// UNRELATED ephemeral port, while the TCP connection itself (and the
+// real data the peer's TCP stack was expecting) never saw a byte.
+// Found via the libssh2 port: the SSH banner exchange hung forever --
+// libssh2 reported the banner "sent" (this function returned success),
+// while the peer never received anything and correctly waited
+// forever, since nothing was ever wrong from ITS side. `read()`/
+// `write()` on a socket (sock_read/sock_write, above) already dispatch
+// on `s->type` correctly; this is that same dispatch, applied here.
+#define STREAM_SENDTO_STAGE 4096
+
 int64_t socket_sendto(int fd, const void *buf, uint64_t len, int flags,
                       const struct k_sockaddr *dest, uint32_t dest_len) {
     (void)flags;   // MSG_* are all unimplemented; see docs/stdlib.md
-    struct socket *s = sock_ref_of(fd, 0);
+    int nonblock = 0;
+    struct socket *s = sock_ref_of(fd, &nonblock);
     if (!s) { return -EBADF; }
+
+    if (s->type == SOCK_STREAM) {
+        // A destination on an ALREADY-connected stream socket is a
+        // real error on Linux (EISCONN) -- sendto() on a TCP socket is
+        // only ever "send() with extra ceremony" when dest is NULL.
+        if (dest) { sock_put(s); return -EISCONN; }
+        if (!s->tcb) { sock_put(s); return -ENOTCONN; }
+        uint8_t stage[STREAM_SENDTO_STAGE];
+        uint64_t total = 0;
+        while (total < len) {
+            uint64_t chunk = len - total < sizeof stage ? len - total : sizeof stage;
+            uint64_t missed = copy_from_user(stage, (const uint8_t *)buf + total, chunk);
+            uint64_t got = chunk - missed;
+            if (got == 0) { sock_put(s); return total > 0 ? (int64_t)total : -EFAULT; }
+            int64_t rc = stream_send(s, nonblock, stage, got);
+            if (rc < 0) { sock_put(s); return total > 0 ? (int64_t)total : rc; }
+            total += (uint64_t)rc;
+            if ((uint64_t)rc < got || missed > 0) { break; }
+        }
+        sock_put(s);
+        return (int64_t)total;
+    }
+
     // net_udp_output's own copy loop dereferences `data` directly with
     // no user-copy awareness (it was written to take a kernel buffer,
     // and every OTHER caller -- dhcp.c, icmp.c, dnsprobe.c -- passes
@@ -601,6 +642,34 @@ int64_t socket_recvfrom(int fd, void *buf, uint64_t len, int flags,
     int nonblock = 0;
     struct socket *s = sock_ref_of(fd, &nonblock);
     if (!s) { return -EBADF; }
+
+    // Same dispatch-by-type fix as socket_sendto above: recvfrom() on
+    // a connected SOCK_STREAM socket is valid (src NULL behaves like
+    // recv()) and must go through the TCP receive queue (stream_recv),
+    // not the UDP-only recv_one() below.
+    if (s->type == SOCK_STREAM) {
+        if (!s->tcb) { sock_put(s); return -ENOTCONN; }
+        uint8_t stage[STREAM_SENDTO_STAGE];
+        uint64_t total = 0;
+        while (total < len) {
+            uint64_t chunk = len - total < sizeof stage ? len - total : sizeof stage;
+            int64_t rc = stream_recv(s, nonblock, stage, chunk);
+            if (rc < 0) { sock_put(s); return total > 0 ? (int64_t)total : rc; }
+            if (rc == 0) { break; }   // EOF
+            uint64_t missed = copy_to_user((uint8_t *)buf + total, stage, (uint64_t)rc);
+            if (missed > 0) { sock_put(s); return total > 0 ? (int64_t)total : -EFAULT; }
+            total += (uint64_t)rc;
+            if ((uint64_t)rc < chunk) { break; }   // short read ends the call
+        }
+        if (src && src_len) {
+            // Real Linux fills in the peer's address for recvfrom() on
+            // a connected socket too, not just an error/no-op.
+            addr_out(src, src_len, s->peer_ip_n, s->peer_port_n);
+        }
+        sock_put(s);
+        return (int64_t)total;
+    }
+
     int64_t rc = recv_one(s, nonblock, buf, len, src, src_len);
     sock_put(s);
     return rc;
@@ -617,10 +686,11 @@ int64_t socket_recvfrom(int fd, void *buf, uint64_t len, int flags,
 //
 // Implemented by gathering/scattering through socket_sendto/
 // socket_recvfrom above rather than duplicating their logic -- which
-// is also why this is SOCK_DGRAM only, exactly like those two: neither
-// touches a stream socket's tcb, only a dgram socket's rx queue.
-// MSG_CTRUNC/msg_control (ancillary data, e.g. SCM_RIGHTS) are not
-// implemented; msg_control is always treated as absent.
+// means this works on SOCK_STREAM too, automatically, now that those
+// two dispatch on socket type themselves (see socket_sendto's own
+// comment for that fix's story). MSG_CTRUNC/msg_control (ancillary
+// data, e.g. SCM_RIGHTS) are not implemented; msg_control is always
+// treated as absent.
 #define MSG_IOV_MAX 16
 
 int64_t socket_sendmsg(int fd, const struct k_msghdr *msg_ptr, int flags) {
@@ -1060,22 +1130,26 @@ static int64_t sock_ioctl(struct file_descriptor *f, uint64_t request, void *arg
 static struct poll_head *sock_poll_head(struct file_descriptor *f) {
     struct socket *s = (struct socket *)f->priv;
     if (!s) { return 0; }
-    // ALWAYS the socket's own head, never the TCB's -- even though it is
-    // the TCB that raises the events.
+    // A stream socket's readiness changes (data arriving, a window
+    // reopening, a state transition) are raised by the TCB through
+    // wake() -> waitq_poll_notify(), the GLOBAL broadcast -- never
+    // through this socket's own &s->poll (see the TIME_WAIT/recycling
+    // reasoning below for why the TCB cannot own a poll head a poller
+    // registers on). Returning &s->poll here for a stream socket would
+    // make poll_core() register on a head nothing ever notifies AND,
+    // because a non-null head suppresses poll_wants_broadcast, opt
+    // this poller OUT of the one mechanism that does fire -- a poller
+    // that never wakes on data or buffer-drain events. Blocking
+    // send()/recv() never hit this path (they sleep on t->waiters
+    // directly), which is why it stayed latent: nothing exercised a
+    // real poll()/select() wait against a stream socket until a
+    // genuinely non-blocking one did.
     //
-    // A poll registration is a `struct poll_reg` living on the POLLER'S
-    // STACK, threaded into the head's list for as long as that thread is
-    // inside poll(). The socket's lifetime is exactly the descriptor's,
-    // which is what the poller holds. The TCB's is NOT: it outlives the
-    // socket through TIME_WAIT and is then RECYCLED into the next
-    // connection, carrying whatever list it had. Handing pollers a head
-    // inside a recycled object is a use-after-free waiting for a busy
-    // enough machine.
-    //
-    // The cost is that a stream socket's readiness change reaches
-    // pollers through the global broadcast (see tcp_wake_pollers) rather
-    // than through this head. That is the documented fallback, and it is
-    // noise rather than a correctness gap.
+    // Returning 0 opts a stream socket into that broadcast, matching
+    // what actually notifies it. A datagram socket keeps its own head:
+    // net_udp_deliver's poll_head_notify(&s->poll) (this file) is the
+    // real, working per-object signal for that case.
+    if (s->type == SOCK_STREAM) { return 0; }
     return &s->poll;
 }
 

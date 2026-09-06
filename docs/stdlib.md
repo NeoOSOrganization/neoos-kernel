@@ -761,14 +761,16 @@ ARP. It is not a shortcut between two buffers.
 - **`inet_ntoa` is spelled `inet_ntoa_r`** and takes the output buffer.
   The standard one returns a pointer to a static buffer, which is not
   thread-safe; NeoOS has threads and no reason to reproduce that.
-- **`sendmsg`/`recvmsg` are `SOCK_DGRAM` only**, exactly like `sendto`/
-  `recvfrom` (they are implemented by gathering/scattering through
-  those two) -- calling either on a stream socket does whatever
-  `sendto`/`recvfrom` themselves do on one today (nothing correct;
-  neither has ever supported `SOCK_STREAM`). `msg_control`/
+- **`sendmsg`/`recvmsg` work on both `SOCK_DGRAM` and `SOCK_STREAM`**
+  (they are implemented by gathering/scattering through `sendto`/
+  `recvfrom`, which themselves dispatch by socket type). `msg_control`/
   `msg_controllen` (ancillary data -- `SCM_RIGHTS` fd-passing, packet
   timestamps) are not implemented; a program using them should expect
   `msg_controllen` to always read back 0.
+- **`sendto`/`recvfrom` on a connected `SOCK_STREAM` socket** behave
+  like `send`/`recv` when `dest`/`src` is `NULL` (Linux's own rule); a
+  non-`NULL` `dest` on an already-connected stream socket is
+  `-EISCONN`, matching Linux rather than silently accepting it.
 
 ### TCP (D5)
 

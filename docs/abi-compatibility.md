@@ -695,3 +695,108 @@ call requesting only IPv6 results finds none); `msg_control` (ancillary
 data — `SCM_RIGHTS`, timestamps) is not implemented; TLS is still
 entirely absent, so `https://` URLs remain out of reach until that
 lands separately.
+
+## Refresh — libssh2 port: TCP send/recv routing and stream poll() (2026-09-06)
+
+Porting libssh2 (a real SSH client library, the first thing to drive
+NeoOS's TCP stack through anything but MPI's loopback UDP and a
+hand-rolled getaddrinfo probe) found three real bugs — two in the
+kernel, one in how the port was built — none in the design docs'
+original DNS/OpenSSL/libssh2 sequencing. All three were needed
+together: fixing only one still leaves an SSH session that cannot
+finish a handshake.
+
+**1. `socket_sendto`/`socket_recvfrom` had no `SOCK_STREAM` dispatch
+at all.** Every `send()`/`recv()`/`sendto()`/`recvfrom()` call on a
+connected TCP socket — which is what musl's libc routes `send()`/
+`recv()` through — fell straight into the UDP-only path and called
+`net_udp_output()`, firing a stray datagram at the peer's address from
+a fresh, unrelated ephemeral port while the real TCP data was silently
+never sent, yet the syscall reported success. `read()`/`write()`
+(`sock_read`/`sock_write`) already dispatched correctly by `s->type`;
+`sendto`/`recvfrom` simply never had the same check added. Invisible
+until now because nothing before libssh2 called `send()`/`recv()` on a
+stream socket — MPI uses `sendto`/`recvfrom` on UDP by design, and the
+DNS milestone's traffic is UDP end to end. Fixed by giving
+`socket_sendto`/`socket_recvfrom` the same `s->type == SOCK_STREAM`
+dispatch `sock_read`/`sock_write` already had, staged through a 4096-
+byte kernel buffer via `copy_to_user`/`copy_from_user` (this session's
+uaccess machinery). `sendmsg`/`recvmsg` inherit the fix for free, since
+they are built on `sendto`/`recvfrom`.
+
+**2. `sock_poll_head()` returned a non-null head for stream sockets,
+which silently defeats their only working wakeup path.** `poll_core()`
+registers a waiter on a file's poll head if `poll_head()` returns one,
+and OPTS OUT of the global poll broadcast (`poll_wants_broadcast = 0`)
+when it does. But a stream socket's readiness changes — data arriving,
+the send window reopening — are raised exclusively through `wake()` in
+`tcp.c`, which calls `waitq_poll_notify()` (the global broadcast) and
+never `poll_head_notify(&s->poll)`. Registering on `&s->poll` for a
+stream socket therefore opts a poller out of the one mechanism that
+actually fires, and into one that never does: `poll()`/`select()` on a
+connected TCP socket would block forever, even past the moment data
+it's waiting for has already arrived. Invisible until now for the same
+reason as bug 1's blind spot inverted: every blocking `send()`/`recv()`
+on a stream socket is implemented by `stream_send`/`stream_recv`
+sleeping directly on `t->waiters`, which never touches `poll()` at
+all — so this path is only exercised by a genuinely non-blocking
+socket doing its own `poll()`-based wait, which nothing had done
+before libssh2. Fixed by having `sock_poll_head()` return `0` for
+`SOCK_STREAM` sockets specifically, opting them into the working
+broadcast; a `SOCK_DGRAM` socket keeps its own head, since
+`net_udp_deliver`'s `poll_head_notify(&s->poll)` is a real, working
+per-object signal for that case.
+
+**3. Not a kernel bug: libssh2's own cross-compile feature detection
+silently failed shut.** `neoos-libssh2`'s CMake configure step probes
+`HAVE_O_NONBLOCK`/`HAVE_POLL`/`HAVE_SELECT` (among others) with
+`check_c_source_compiles()`/`check_function_exists()`, which compile
+*and link* a throwaway test program using the project's own
+`CMAKE_C_FLAGS` — including this port's `-nostdlib`. Without a `_start`
+or a libc to satisfy it, every one of those probes failed to link and
+was recorded as unavailable, regardless of whether musl actually
+provides the symbol (it does). With `HAVE_O_NONBLOCK` undefined,
+libssh2's `session_nonblock()` (`session.c`) falls back to a no-op:
+the fd libssh2 believes it switched to non-blocking silently stays
+blocking, so its own drain-until-`EAGAIN` loops (e.g.
+`_libssh2_channel_read`'s `do { rc = _libssh2_transport_read(session);
+} while (rc > 0);`) block on a real, indefinite `recv()` instead of the
+prompt `EAGAIN` they are written to expect — a channel read that had
+already-buffered data sitting in `session->packets` would still hang,
+because the code never got back around to returning it. Fixed in
+`neoos-libssh2/build.sh` by passing musl's `crt1.o` and `libc.a` as
+`CMAKE_REQUIRED_LIBRARIES`, so the feature probes link against what a
+real NeoOS binary actually links against and observe the truth.
+
+**Found by:** kernel-level `stream_send`/`stream_recv`/`tcp_input`
+serial tracing (temporary, removed once each cause was confirmed,
+matching this session's established practice) proving byte-for-byte
+that every TCP segment sent and received matched the host-side proxy's
+observed traffic in both directions — which ruled out the transport
+layer for bug 1 and pointed straight at the dispatch-less `sendto`
+itself; then, after fixing bug 1, a libssh2 debug-trace build
+(`ENABLE_DEBUG_LOGGING=ON`, `libssh2_trace(session, ~0)`) showing
+`_libssh2_channel_read` successfully parsing and buffering the SSH
+channel-data packet (`Conn: increasing read_avail by 18 bytes to
+18/2097152`) and then hanging anyway on the *next* transport read — a
+symptom that only made sense once `libssh2_config.h`'s `HAVE_*` block
+was actually read, which led to bug 3, whose fix then exposed bug 2
+(the very first genuinely non-blocking `poll()`-based wait NeoOS had
+ever been asked to satisfy).
+
+**Verified:** a real, independent `asyncssh` server (a second SSH
+implementation, not NeoOS's own code on both ends) — full handshake,
+password auth, channel open, `exec` with a real command-output
+`channel_read()`, and a full SFTP file write/read/verify round trip,
+all against the real cross-compiled `neoos-libssh2` binary running
+under QEMU with a genuine guest-to-host TCP path (no loopback). The
+15/15 gauntlet stays green with zero retries — bug 2's fix changes
+`poll()`/`select()` wakeup behavior for every stream socket, so this
+was the one fix in this refresh with real regression surface, and nothing else exercising it regressed.
+
+**What a real ported application still hits:** libssh2 covers the SSH
+transport and SFTP subsystem only — no interactive terminal/PTY
+allocation path has been exercised, and NeoOS still has no SSH
+*server*; both remain for a later milestone. TLS (OpenSSL) and SSH
+(libssh2) are now both proven, which is what curl's `https://` and
+`sftp://` support need next.
