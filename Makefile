@@ -146,6 +146,17 @@ USER_CFLAGS := -ffreestanding -fno-stack-protector -mno-red-zone -msse3 -mssse3 
 EMBED_DIRS ?=
 PORT_DIRS ?=
 
+# LOGIN_SHELL=1 swaps the disk image's inittab for a plain interactive
+# login prompt (respawn /bin/term.nex /sbin/login.nex login -- exactly
+# what `make shell` below already hand-writes) instead of the
+# automated test workload. Meant to be combined with PORT_DIRS: an
+# interactive image with ports installed but no unattended test suite
+# racing it for the tty. Mutually exclusive with the test-suite path
+# in practice -- a human logging in and key-injecting regression tests
+# cannot share one tty -- so this REPLACES inittab.base's content
+# entirely rather than composing with EMBED_DIRS-driven boot_entries.
+LOGIN_SHELL ?= 0
+
 $(DISK_SRC)/nex-embed-boot/init.nex: $(USERLAND_BUILD)/INIT.ELF userland/boot-apps/init.test.json
 	@mkdir -p $(DISK_SRC)/nex-embed-boot
 	./tools/nexify.sh $(USERLAND_BUILD)/INIT.ELF $@
@@ -307,13 +318,24 @@ $(DISK_IMG): $(BUILD_DIR)/embedfs_table.c $(USERLAND_BUILD)/TERM.ELF $(USERLAND_
 			mcopy -i $(DISK_IMG) "$$f" "::opt/$$name/$$base"; \
 		done; \
 	done
-	printf '%s\n' \
-	  '# NeoOS test workload -- launched by /sbin/init.nex (see userland/init.c)' \
-	  '# TERM runs first as a wait entry: it claims the active tty +' \
-	  '# framebuffer, renders TERMCHILD, self-checks, and exits before the' \
-	  '# key-injecting suites (ttytest, evtest, polltest) start.' \
-	  'wait /bin/term.nex' \
-	  > $(DISK_SRC)/inittab.base
+	@if [ "$(LOGIN_SHELL)" = "1" ]; then \
+		printf '%s\n' \
+		  '# Interactive login image (LOGIN_SHELL=1) -- boots straight to' \
+		  '# an nsh login prompt instead of the automated test workload.' \
+		  '# Accounts: god/god (uid 0), neo/neo (uid 1000).' \
+		  'respawn /bin/term.nex /sbin/login.nex login' \
+		  > $(DISK_SRC)/inittab; \
+	else \
+		printf '%s\n' \
+		  '# NeoOS test workload -- launched by /sbin/init.nex (see userland/init.c)' \
+		  '# TERM runs first as a wait entry: it claims the active tty +' \
+		  '# framebuffer, renders TERMCHILD, self-checks, and exits before the' \
+		  '# key-injecting suites (ttytest, evtest, polltest) start.' \
+		  'wait /bin/term.nex' \
+		  > $(DISK_SRC)/inittab.base; \
+		python3 tools/apply-inittab-patch.py $(DISK_SRC)/inittab.base \
+			$(BUILD_DIR)/embedfs-inittab-patch.json > $(DISK_SRC)/inittab; \
+	fi
 	@# The rest of the suite (every /usr/tests/*.nex entry, plus BusyBox's
 	@# bbspike/nshtest/bbsh) is data-driven now: each test/port ships a
 	@# manifest (userland/tests.manifest.json,
@@ -324,9 +346,8 @@ $(DISK_IMG): $(BUILD_DIR)/embedfs_table.c $(USERLAND_BUILD)/TERM.ELF $(USERLAND_
 	@# This is exactly how the hand-tuned interleaving here (BBSPIKE
 	@# right after thrdmany, PTYCHURN holding the whole pty pool alone,
 	@# POLLSTORM needing the same background load in both windows) is
-	@# preserved without hardcoding it.
-	python3 tools/apply-inittab-patch.py $(DISK_SRC)/inittab.base \
-		$(BUILD_DIR)/embedfs-inittab-patch.json > $(DISK_SRC)/inittab
+	@# preserved without hardcoding it -- but only in the non-LOGIN_SHELL
+	@# branch above: an interactive image skips it entirely.
 	mcopy -i $(DISK_IMG) $(DISK_SRC)/inittab ::etc/inittab
 	@# The shell's greeting, generated from the SAME art the kernel
 	@# banner draws (shared/neoos_logo.h) so the two cannot drift.
