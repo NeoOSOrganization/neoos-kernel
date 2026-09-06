@@ -523,6 +523,75 @@ link.
   alive until every thread finishes, which is the same outcome here by
   a different route.
 
+### `clone` — real musl pthreads, alongside the native subset above
+
+```c
+long clone(unsigned long flags, void *child_stack,
+           void *ptid, void *ctid, void *tls);
+```
+
+Raw Linux argument order and register convention
+(`rdi=flags, rsi=child_stack, rdx=ptid, r10=ctid, r8=tls`) — this is
+what lets musl's own hand-written `clone.s` reach NeoOS with only its
+embedded syscall numbers changed, not its register-shuffling logic.
+Not a `lib/`-facing API: nothing outside musl's own `pthread_create`
+calls this directly, the same way nothing calls `set_tid_address`
+directly either.
+
+**Accepts EXACTLY the flag combination musl's `pthread_create.c`
+sends** — `CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD
+|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID
+|CLONE_DETACHED` (`0x7D0F00`) — and `-EINVAL`s anything else. This is
+deliberate, not a temporary limitation: every other `clone(2)` use
+(namespaces, `CLONE_VFORK`, selective-sharing process creation) is out
+of scope for this primitive, and `fork()` already covers process
+creation. `CLONE_SYSVSEM`/`CLONE_DETACHED` are accepted and ignored
+(NeoOS has no SysV semaphore undo lists to share, and `CLONE_DETACHED`
+has been a no-op on real Linux itself for two decades).
+
+This makes musl's own `pthread_create`/`pthread_join`/
+`pthread_mutex_*`/`pthread_cond_*` work **unmodified** — they are a
+completely separate, non-interacting implementation from the native
+`<thread.h>`/`<pthread.h>` subset documented above, which stays
+exactly as it was (a NeoOS-native `thread_create`-based subset with
+its own tid space and its own mutex/condvar types). Nothing retires
+or replaces the other; pick either, but don't mix a native
+`thread_t` with a musl `pthread_t`.
+
+**Mechanism**: a new thread in the calling thread's process (no new
+address space, fd table, or signal table — NeoOS's threads already
+share all three unconditionally, which is exactly what
+`CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND` asks for), resuming at
+the parent's exact syscall-return site the same way a `fork()`'d
+child does, with the caller-supplied `child_stack` substituted for the
+parent's own stack and `tls` substituted for the parent's `fs_base`.
+
+**`CLONE_CHILD_CLEARTID`**: at thread exit, the kernel writes 0 to
+`*ctid` and `futex_wake`s it. musl's own `__pthread_exit()` actually
+does its OWN userspace futex-wake on `t->detach_state` (a different
+word) for the common join path, so this kernel-level behavior is not
+what unblocks a plain `pthread_join` — but it is real, documented
+Linux behavior other code (`__tl_sync`-based thread-list
+synchronization, in some musl configurations) can depend on, so it is
+implemented rather than silently dropped despite being requested.
+
+**Divergence, found and fixed by this same milestone**: `exit(2)`
+(`sys_exit`) is now thread-aware — it ends only the calling thread if
+`live_threads > 1`, falling back to the previous whole-process
+`process_exit()` only when this is the last thread. Before real
+`clone`-created threads existed this distinction was unobservable (the
+calling thread was always the only one); musl's `__pthread_exit()`
+ends with a plain `exit(2)` call and depends on exactly this
+Linux-correct behavior to avoid taking the whole process down every
+time a `pthread_create`'d worker finishes.
+
+Detached (clone-created) threads self-reap: since musl's
+`pthread_join` never calls NeoOS's own `thread_join` syscall (it
+synchronizes purely via the futex above), nothing would ever drain a
+clone-created thread's kernel stack from the native join-list. They
+are routed instead through the same self-reap drain process-less
+kernel threads already use.
+
 ## Pipes
 
 ```c

@@ -55,7 +55,7 @@ application hits, in order" list are now closed:
 | Was #3 | **No `stat` family** | **CLOSED.** `stat`/`lstat`/`fstat`/`newfstatat`, Linux's 144-byte `struct stat`. Field values still synthesized — §4, and `docs/stdlib.md`. |
 | Was #4 | **`struct dirent` layout** | **CLOSED.** Linux's `getdents64` record, matching `DT_*`. |
 | Was #5 | **`O_CREAT` value diverges** | **CLOSED** — fixed in Phase 14. |
-| Was #7 | **No `clone`/`futex`** | **HALF CLOSED.** `futex` exists with Linux semantics, and pthread mutexes, condvars and POSIX semaphores are built on it. There is still no `clone`. |
+| Was #7 | **No `clone`/`futex`** | **CLOSED** (2026-09-07 refresh). `futex` exists with Linux semantics; `clone` now exists too (musl's exact `pthread_create` flag combination only — see the refresh below and `docs/stdlib.md`), and real musl `pthread_create`/`pthread_join`/mutexes/condvars all work unmodified. |
 | Was #8 | **No `clock_gettime`/`nanosleep`** | **MOSTLY CLOSED.** Both exist; resolution is 10ms and there are no absolute timeouts — §8a. |
 | Was #9 | **13-character filenames** | **CLOSED** (a FAT constraint, not an ABI one): VFAT long names, read and write. |
 
@@ -321,8 +321,8 @@ at least stop the kernel drawing over it. Raw keyboard modes
    called out since Phase 10.
 2. **No `errno` variable** — every error check reads the wrong thing.
    Fixed by the musl shim, not the kernel.
-3. **No `clone`** — threads exist, but not through the call a libc
-   makes, so musl's pthreads cannot sit on them.
+3. ~~**No `clone`**~~ **CLOSED (2026-09-07)** — musl's pthreads now
+   sit on it directly, unmodified. See the refresh below.
 4. **10ms clock resolution and no absolute timeouts** — why
    `sem_timedwait` and `pthread_cond_timedwait` diverge into
    relative-timeout spellings, and why `stat` times are all 0.
@@ -375,11 +375,11 @@ dirent`, the working directory — is now in place, and a static musl
 binary runs. The **error space, signal numbers, `sockaddr_in`, the
 auxv, `struct stat`, `struct dirent` and `struct termios` all match**.
 
-What stands between NeoOS and an unmodified multi-threaded binary is now
-**`clone`** (musl's pthreads) and **`select`/`poll`**. The `O_CREAT`
-constant remains the cheapest outstanding fix. Field *values* in
-`struct stat` — timestamps especially — are the remaining semantic
-divergence, recorded in `docs/stdlib.md`.
+(Superseded by the 2026-09-07 refresh below: `clone` now exists, and
+an unmodified multi-threaded musl binary runs. `select`/`poll` gained
+a working subset earlier too — see their own entries in §9. Field
+*values* in `struct stat` — timestamps especially — remain a semantic
+divergence, recorded in `docs/stdlib.md`.)
 
 ## Refresh — end of the concurrency and BusyBox milestones (2026-09-02)
 
@@ -958,3 +958,76 @@ curl itself treats them as optional fast paths over working
 fallbacks), and curl's threaded async resolver specifically hangs for
 a reason not yet root-caused (its synchronous resolver is used
 instead, with no functional loss for this milestone's purposes).
+
+## Refresh — real clone(2), unmodified musl pthreads (2026-09-07)
+
+Closes the "No `clone`" gap called out repeatedly above (§0's table,
+§9 item 3, §10's summary), which every earlier milestone's testing
+worked around by never spawning a real OS thread through libc.
+
+`clone(flags, child_stack, ptid, ctid, tls)` — raw Linux argument
+order and register convention — now exists, accepting EXACTLY the
+flag combination musl's own `pthread_create.c` sends
+(`CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD
+|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID
+|CLONE_DETACHED`, `0x7D0F00`) and `-EINVAL` for anything else — every
+other `clone(2)` use (namespaces, `CLONE_VFORK`, selective-sharing
+process creation) is out of scope by design, not by omission. Built
+by combining two mechanisms that already existed and already worked:
+`thread_create()`'s "new thread, same address space/fd-table/
+signal-table" skeleton, and `fork_task()`/`fork_trampoline.asm`'s
+"child resumes at the parent's exact syscall-return site" trick.
+
+Two real, load-bearing bugs were found and fixed while making this
+work, neither of them clone-specific in the code they touched:
+
+- `fork_trampoline.asm` never restored `r9` into a resumed child.
+  `fork()`'s own child never needed it (an ordinary C-callable syscall
+  wrapper), but musl's hand-written `clone.s` depends on it completely
+  — it parks the thread's start function in `r9` across the syscall
+  and calls through it immediately after, relying on real Linux
+  `clone(2)`'s guarantee that the *entire* parent register snapshot
+  (not just the callee-saved registers) survives into the child. Fixed
+  by restoring `r9` too — free for `fork()`, load-bearing for `clone`.
+- `sys_exit` called `process_exit()` (kill the whole process)
+  unconditionally. Correct before real threads existed — the calling
+  thread was always the only one — but wrong the instant a second
+  thread exists: real Linux `exit(2)` ends only the calling thread if
+  others remain alive, reserving `exit_group(2)` for "kill everyone."
+  musl's own `__pthread_exit()` ends with a plain `exit(2)` call and
+  depends on exactly this distinction — without the fix, any
+  `pthread_create`'d worker returning normally killed the entire
+  process, hanging `pthread_join` forever (the joiner was dead too).
+  `sys_exit` now checks `live_threads` and routes to
+  `thread_exit_self()` instead when other threads remain.
+
+NeoOS's pre-existing native `<thread.h>`/`<pthread.h>` subset (its own
+`thread_create`/`thread_join`, its own mutex/condvar types) is
+untouched and still works — this milestone adds real musl pthreads
+alongside it, not instead of it. `CLONE_CHILD_CLEARTID`'s kernel-level
+clear+futex-wake is implemented (real Linux behavior, and depended on
+by some musl thread-list synchronization paths) even though the
+common `pthread_join` path actually resolves via musl's own userspace
+futex-wake on a different word. Detached (clone-created) threads
+self-reap through the same drain process-less kernel threads already
+used, since musl's `pthread_join` never calls NeoOS's own
+`SYS_THREAD_JOIN` and nothing else would ever reclaim their kernel
+stacks.
+
+**Verified:** a real `pthread_create`/`pthread_join` round trip; four
+real musl threads incrementing a shared counter under a real
+`pthread_mutex_t` with zero lost updates (40000/40000); a producer/
+consumer pair synchronized by a real `pthread_cond_t`. All via
+unmodified musl, none via NeoOS's native thread API. 15/15 gauntlet,
+zero retries, run twice — once immediately after the `sys_exit` fix
+given how widely that primitive is used, once as the milestone's own
+final regression.
+
+**What a real ported application still hits:** `pthread_key_create`/
+TLS keys, `pthread_cancel`, `pthread_attr_t` (custom stack sizes,
+create-detached), `pthread_once`, rwlocks, and barriers are all still
+absent — unrelated to `clone` itself, and each buildable on the same
+futex substrate when needed. Only musl's own exact
+`pthread_create` flag combination is accepted; a program using
+`clone(2)` directly for anything else (containers, `CLONE_VFORK`,
+manual process creation) gets `-EINVAL`.
