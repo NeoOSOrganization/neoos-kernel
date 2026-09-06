@@ -15,10 +15,12 @@
 #include "ipc/signal.h"
 #include "ipc/futex.h"
 #include "ipc/pipe.h"
+#include "ipc/socketpair.h"
 #include "drivers/char/timer.h"
 #include "mm/vma.h"
 #include "mm/paging.h"
 #include "mm/heap.h"
+#include "mm/uaccess.h"
 #include "arch/cpu_local.h"
 #include "smp/smp.h"
 #include "net/socket.h"
@@ -100,4 +102,18 @@ int64_t sys_sendmsg(struct syscall_args *a) {
 int64_t sys_recvmsg(struct syscall_args *a) {
     return socket_recvmsg((int)a->a1, (struct k_msghdr *)(uintptr_t)a->a2,
                           (int)a->a3);
+}
+
+int64_t sys_socketpair(struct syscall_args *a) {
+    uint64_t usv = a->a4;
+    if (!usv) { return -EFAULT; }
+    int fds[2];
+    int rc = socketpair_create((int)a->a1, (int)a->a2, (int)a->a3, fds);
+    if (rc != 0) { return rc; }
+    // Written only after both ends exist, so a failure leaves the
+    // caller's array untouched rather than half-filled -- pipe2's own
+    // sys_pipe2 (sys_file.c) does the same for the same reason.
+    uint64_t missed = copy_to_user((void *)(uintptr_t)usv, fds, sizeof fds);
+    if (missed > 0) { return -EFAULT; }
+    return 0;
 }

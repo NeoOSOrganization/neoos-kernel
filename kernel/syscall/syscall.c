@@ -251,6 +251,7 @@ static const struct syscall_desc syscall_table[SYS_MAX] = {
     [SYS_GETSOCKOPT]      = { sys_getsockopt,      "getsockopt" },
     [SYS_SENDMSG]         = { sys_sendmsg,         "sendmsg" },
     [SYS_RECVMSG]         = { sys_recvmsg,         "recvmsg" },
+    [SYS_SOCKETPAIR]      = { sys_socketpair,      "socketpair" },
     [SYS_SPAWNV]          = { sys_spawnv,          "spawnv" },
     [SYS_FCNTL]           = { sys_fcntl,           "fcntl" },
     [SYS_CHDIR]           = { sys_chdir,           "chdir" },

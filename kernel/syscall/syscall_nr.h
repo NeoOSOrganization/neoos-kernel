@@ -184,7 +184,13 @@
 #define SYS_SENDMSG         89
 #define SYS_RECVMSG         90
 
+// AF_UNIX only, backed by two of kernel/ipc/pipe.c's ring buffers --
+// see kernel/ipc/socketpair.c and docs/abi-compatibility.md's
+// socketpair refresh. Added for curl's multi-handle wakeup mechanism,
+// which musl's shim otherwise has no way to satisfy at all.
+#define SYS_SOCKETPAIR      91
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX             91
+#define SYS_MAX             92
 
 #endif

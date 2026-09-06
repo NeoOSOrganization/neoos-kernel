@@ -56,7 +56,7 @@ struct pipe {
 
 };
 
-static struct pipe *pipe_alloc(void) {
+struct pipe *pipe_alloc(void) {
     struct pipe *p = (struct pipe *)kmalloc(sizeof(struct pipe));
     if (!p) { return 0; }
     for (unsigned i = 0; i < sizeof(*p); i++) { ((uint8_t *)p)[i] = 0; }
@@ -71,9 +71,22 @@ static struct pipe *pipe_alloc(void) {
     return p;
 }
 
-static void pipe_free(struct pipe *p) {
+void pipe_free(struct pipe *p) {
     kfree(p->buf);
     kfree(p);
+}
+
+// A freshly allocated pipe about to get exactly one reader fd and one
+// writer fd -- true of both pipe_create's two ends AND each of
+// socketpair's two underlying pipes (kernel/ipc/socketpair.c), which
+// is why this is its own function rather than inlined where
+// pipe_create used to set these fields directly: "these are the
+// pipe's first ends, nothing to increment from" is a fact about any
+// fresh pipe, not just the plain-pipe case.
+void pipe_init_ends(struct pipe *p) {
+    p->refs         = 2;
+    p->readers_open = 1;
+    p->writers_open = 1;
 }
 
 // Unlocked. Caller holds p->lock.
@@ -99,8 +112,14 @@ static uint32_t ring_write(struct pipe *p, const uint8_t *in, uint32_t want) {
     return n;
 }
 
-static int64_t pipe_read(struct file_descriptor *f, void *buf, uint64_t len) {
-    struct pipe *p = (struct pipe *)f->priv;
+// The core of read()/write() on a pipe, parameterized on the pipe and
+// its blocking mode rather than reached through a file_descriptor's
+// own `priv`/`nonblock` fields. socketpair.c (a socketpair end reads
+// one pipe and writes a DIFFERENT one -- unlike a plain pipe fd, where
+// both directions of that ONE fd's sibling share a single pipe) drives
+// these directly; pipe_read/pipe_write below are the file_ops-facing
+// wrappers plain pipes still use.
+int64_t pipe_read_ep(struct pipe *p, int nonblock, void *buf, uint64_t len) {
     if (!p) { return -EBADF; }
     if (len == 0) { return 0; }
 
@@ -114,7 +133,7 @@ static int64_t pipe_read(struct file_descriptor *f, void *buf, uint64_t len) {
             spin_unlock_irqrestore(&p->lock, flags);
             return 0;
         }
-        if (f->nonblock) {
+        if (nonblock) {
             spin_unlock_irqrestore(&p->lock, flags);
             return -EAGAIN;
         }
@@ -136,12 +155,19 @@ static int64_t pipe_read(struct file_descriptor *f, void *buf, uint64_t len) {
     // no reason to contend for a lock this thread is about to drop
     // anyway.
     waitq_wake_all(&p->writers);
-    poll_head_notify(&p->poll);   // CS5.2: only this pipe's pollers
+    poll_head_notify(&p->poll);   // CS5.2: this pipe's own pollers...
+    waitq_poll_notify();          // ...and a composite object built on
+                                   // top of two pipes (socketpair),
+                                   // whose poll_head() cannot be either
+                                   // one's alone -- see sock_poll_head's
+                                   // own fix (net/socket.c) for why a
+                                   // broadcast has to exist for that
+                                   // case. A no-op for every plain-pipe
+                                   // poller, which never opts into it.
     return (int64_t)n;
 }
 
-static int64_t pipe_write(struct file_descriptor *f, const void *buf, uint64_t len) {
-    struct pipe *p = (struct pipe *)f->priv;
+int64_t pipe_write_ep(struct pipe *p, int nonblock, const void *buf, uint64_t len) {
     if (!p) { return -EBADF; }
     if (len == 0) { return 0; }
 
@@ -173,10 +199,11 @@ static int64_t pipe_write(struct file_descriptor *f, const void *buf, uint64_t l
         if (written == len) { break; }
 
         // Full. A non-blocking write reports what it managed.
-        if (f->nonblock) {
+        if (nonblock) {
             spin_unlock_irqrestore(&p->lock, flags);
             waitq_wake_all(&p->readers);
             poll_head_notify(&p->poll);   // CS5.2: only this pipe's pollers
+            waitq_poll_notify();          // see pipe_read_ep
             return written ? (int64_t)written : -EAGAIN;
         }
 
@@ -185,6 +212,7 @@ static int64_t pipe_write(struct file_descriptor *f, const void *buf, uint64_t l
         spin_unlock_irqrestore(&p->lock, flags);
         waitq_wake_all(&p->readers);
         poll_head_notify(&p->poll);   // CS5.2: only this pipe's pollers
+        waitq_poll_notify();          // see pipe_read_ep
         flags = spin_lock_irqsave(&p->lock);
 
         if (p->count == PIPE_CAPACITY) {
@@ -199,7 +227,16 @@ static int64_t pipe_write(struct file_descriptor *f, const void *buf, uint64_t l
 
     waitq_wake_all(&p->readers);
     poll_head_notify(&p->poll);   // CS5.2: only this pipe's pollers
+    waitq_poll_notify();          // see pipe_read_ep
     return (int64_t)written;
+}
+
+static int64_t pipe_read(struct file_descriptor *f, void *buf, uint64_t len) {
+    return pipe_read_ep((struct pipe *)f->priv, f->nonblock, buf, len);
+}
+
+static int64_t pipe_write(struct file_descriptor *f, const void *buf, uint64_t len) {
+    return pipe_write_ep((struct pipe *)f->priv, f->nonblock, buf, len);
 }
 
 static int64_t pipe_lseek(struct file_descriptor *f, int64_t offset, int whence) {
@@ -226,18 +263,29 @@ static int64_t pipe_getdents(struct file_descriptor *f, void *buf, int bytes) {
 // and reporting EOF while a writer is being added -- cannot happen:
 // fork copies EXISTING open descriptors, so if the count had reached
 // zero there was no write end left to copy.
-static void pipe_dup(struct file_descriptor *f) {
-    struct pipe *p = (struct pipe *)f->priv;
+// Deliberately LOCK-FREE, unlike pipe_close_ep.
+//
+// fd_table_dup copies a whole bucket under the fd bucket lock, which is
+// rank FDTABLE (15) -- above the pipe lock (10). Taking p->lock there
+// is a descending acquire and the rank checker panics on it, which is
+// exactly what it caught on the first boot of this code.
+//
+// Doing it without the lock is sound because a dup only ever
+// INCREMENTS, and every counter is touched with an atomic
+// read-modify-write on both sides, so nothing is lost. The one thing a
+// lockless increment could break -- a reader seeing writers_open == 0
+// and reporting EOF while a writer is being added -- cannot happen:
+// fork copies EXISTING open descriptors, so if the count had reached
+// zero there was no write end left to copy.
+void pipe_dup_ep(struct pipe *p, int as_reader, int as_writer) {
     if (!p) { return; }
     __atomic_fetch_add(&p->refs, 1, __ATOMIC_ACQ_REL);
-    if (f->readable) { __atomic_fetch_add(&p->readers_open, 1, __ATOMIC_ACQ_REL); }
-    if (f->writable) { __atomic_fetch_add(&p->writers_open, 1, __ATOMIC_ACQ_REL); }
+    if (as_reader) { __atomic_fetch_add(&p->readers_open, 1, __ATOMIC_ACQ_REL); }
+    if (as_writer) { __atomic_fetch_add(&p->writers_open, 1, __ATOMIC_ACQ_REL); }
 }
 
-static void pipe_close(struct file_descriptor *f) {
-    struct pipe *p = (struct pipe *)f->priv;
+void pipe_close_ep(struct pipe *p, int as_reader, int as_writer) {
     if (!p) { return; }
-    f->priv = 0;
 
     // The DECREMENTS happen under p->lock even though they are atomic,
     // and that is the load-bearing part. A reader checks writers_open
@@ -246,8 +294,8 @@ static void pipe_close(struct file_descriptor *f) {
     // slip between the check and the enqueue, and its wake would find
     // an empty queue while the reader slept on for ever.
     uint64_t flags = spin_lock_irqsave(&p->lock);
-    if (f->readable) { __atomic_fetch_sub(&p->readers_open, 1, __ATOMIC_ACQ_REL); }
-    if (f->writable) { __atomic_fetch_sub(&p->writers_open, 1, __ATOMIC_ACQ_REL); }
+    if (as_reader) { __atomic_fetch_sub(&p->readers_open, 1, __ATOMIC_ACQ_REL); }
+    if (as_writer) { __atomic_fetch_sub(&p->writers_open, 1, __ATOMIC_ACQ_REL); }
     int last = (__atomic_sub_fetch(&p->refs, 1, __ATOMIC_ACQ_REL) == 0);
     int no_writers = (__atomic_load_n(&p->writers_open, __ATOMIC_ACQUIRE) == 0);
     int no_readers = (__atomic_load_n(&p->readers_open, __ATOMIC_ACQUIRE) == 0);
@@ -261,8 +309,18 @@ static void pipe_close(struct file_descriptor *f) {
     // pipe whose last reader just went away -- it has to wake to
     // discover it should take SIGPIPE.
     if (no_writers) { waitq_wake_all(&p->readers); }
-    if (no_writers || no_readers) { poll_head_notify(&p->poll); }
+    if (no_writers || no_readers) { poll_head_notify(&p->poll); waitq_poll_notify(); }
     if (no_readers) { waitq_wake_all(&p->writers); }
+}
+
+static void pipe_dup(struct file_descriptor *f) {
+    pipe_dup_ep((struct pipe *)f->priv, f->readable, f->writable);
+}
+
+static void pipe_close(struct file_descriptor *f) {
+    struct pipe *p = (struct pipe *)f->priv;
+    f->priv = 0;
+    pipe_close_ep(p, f->readable, f->writable);
 }
 
 static int64_t pipe_ioctl(struct file_descriptor *f, uint64_t request, void *arg) {
@@ -270,20 +328,28 @@ static int64_t pipe_ioctl(struct file_descriptor *f, uint64_t request, void *arg
     return -ENOTTY;
 }
 
-static int pipe_poll(struct file_descriptor *f, int events) {
-    struct pipe *p = (struct pipe *)f->priv;
+// As with the read/write/dup/close core functions above: parameterized
+// on which direction(s) this caller holds, since a socketpair end's
+// two directions are two different pipes and cannot be checked with a
+// single call the way a plain pipe's fd (always one direction of one
+// pipe) can.
+int pipe_poll_ep(struct pipe *p, int as_reader, int as_writer, int events) {
     if (!p) { return POLLERR; }
 
     int mask = 0;
-    if (f->readable && p->count > 0) { mask |= POLLIN; }
-    if (f->writable && p->count < PIPE_CAPACITY) { mask |= POLLOUT; }
+    if (as_reader && p->count > 0) { mask |= POLLIN; }
+    if (as_writer && p->count < PIPE_CAPACITY) { mask |= POLLOUT; }
 
     // If write end is closed and empty, signal EOF.
-    if (f->readable && __atomic_load_n(&p->writers_open, __ATOMIC_ACQUIRE) == 0 && p->count == 0) {
+    if (as_reader && __atomic_load_n(&p->writers_open, __ATOMIC_ACQUIRE) == 0 && p->count == 0) {
         mask |= POLLHUP;
     }
 
     return mask & events;
+}
+
+static int pipe_poll(struct file_descriptor *f, int events) {
+    return pipe_poll_ep((struct pipe *)f->priv, f->readable, f->writable, events);
 }
 
 // CS5.2. Every fd on a pipe -- both ends -- reports the same head, so a
@@ -331,12 +397,9 @@ int pipe_create(int fds[2], int flags) {
         return -EBADF;
     }
 
-    // Reference counts are set directly rather than through pipe_dup:
-    // these are the pipe's first two ends, and there is nothing to
-    // increment from.
-    p->refs         = 2;
-    p->readers_open = 1;
-    p->writers_open = 1;
+    // These are the pipe's first two ends, and there is nothing to
+    // increment from -- see pipe_init_ends's own comment.
+    pipe_init_ends(p);
 
     int nb = (flags & PIPE_O_NONBLOCK) ? 1 : 0;
     r->ops = &pipe_ops; r->priv = p; r->readable = 1; r->writable = 0; r->nonblock = nb;

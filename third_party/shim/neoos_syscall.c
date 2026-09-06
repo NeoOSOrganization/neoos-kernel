@@ -66,6 +66,7 @@
 #define NEO_GETSOCKOPT      88
 #define NEO_SENDMSG         89
 #define NEO_RECVMSG         90
+#define NEO_SOCKETPAIR      91
 #define NEO_FCNTL           52
 #define NEO_CHDIR           53
 #define NEO_GETCWD          54
@@ -143,6 +144,7 @@
 #define LX_SHUTDOWN         48
 #define LX_LISTEN           50
 #define LX_GETPEERNAME      52
+#define LX_SOCKETPAIR       53
 #define LX_SETSOCKOPT       54
 #define LX_GETSOCKOPT       55
 #define LX_ACCEPT4          288
@@ -292,6 +294,7 @@ long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a
     case LX_GETSOCKOPT:      return neo(NEO_GETSOCKOPT, a1, a2, a3, a4, a5, 0);
     case LX_SENDMSG:         return neo(NEO_SENDMSG, a1, a2, a3, 0, 0, 0);
     case LX_RECVMSG:         return neo(NEO_RECVMSG, a1, a2, a3, 0, 0, 0);
+    case LX_SOCKETPAIR:      return neo(NEO_SOCKETPAIR, a1, a2, a3, a4, 0, 0);
 
     // ---- argument RESHAPING: Linux's char* becomes NeoOS's ptr+len --
     //

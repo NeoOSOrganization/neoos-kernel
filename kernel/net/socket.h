@@ -5,6 +5,8 @@
 
 // Linux's values for everything a program passes in or reads back.
 #define AF_UNSPEC 0
+#define AF_UNIX   1     // socketpair(2) only (kernel/ipc/socketpair.c) --
+                        // no AF_UNIX socket()/bind()/connect() exists
 #define AF_INET   2
 
 #define SOCK_STREAM 1

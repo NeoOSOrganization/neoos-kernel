@@ -45,6 +45,7 @@
 #include "fs/file.h"
 #include "fs/devfs.h"
 #include "ipc/pipe.h"
+#include "ipc/socketpair.h"
 #include "net/net.h"
 #include "net/socket.h"
 #include "net/netrx.h"
@@ -264,6 +265,7 @@ void kmain(void *multiboot_info) {
     futex_init();
     file_selftest();
     pipe_selftest();
+    socketpair_selftest();
     net_init();
     net_selftest();
     tcp_init();

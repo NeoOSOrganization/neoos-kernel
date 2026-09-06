@@ -570,6 +570,43 @@ the read end returns `-EBADF`.
 - **`pipe()` is library code over `pipe2()`**, exactly as musl does it
   on architectures where Linux dropped the legacy call.
 
+## socketpair
+
+```c
+#include <sys/socket.h>
+int socketpair(int domain, int type, int protocol, int sv[2]);
+```
+
+`AF_UNIX` only (`domain` must be `AF_UNIX`; anything else is
+`-EAFNOSUPPORT`). `type` is `SOCK_STREAM` or `SOCK_DGRAM` -- both
+accepted and treated identically, optionally OR'd with
+`SOCK_NONBLOCK`/`SOCK_CLOEXEC` exactly like `socket(2)`'s own `type`
+argument. `protocol` must be 0.
+
+Built from two of the same pipes `pipe()` uses, cross-wired: `sv[0]`
+reads what `sv[1]` writes and vice versa. Both ends behave like a
+connected, bidirectional pipe -- the pipe rules above (blocking read
+until data or EOF, `SIGPIPE`/`-EPIPE` on a write with no reader left,
+wake-on-last-close) apply to each direction independently. Added for
+`curl`'s multi-handle wakeup mechanism, which has no other way to get
+a pair of fds it can write a byte into and `poll()` on.
+
+### Divergences from Linux
+
+- **No `SCM_RIGHTS` fd-passing and no genuine out-of-band data.** A
+  pipe-backed fd has neither; `sendmsg`/`recvmsg` on a socketpair fd
+  are not implemented at all (`-ENOSYS`), unlike a real socket.
+- **Inherits every pipe divergence above**: 4096-byte capacity per
+  direction (Linux's default is a 212992-byte *socket* buffer, not a
+  pipe's 65536), no `F_SETPIPE_SZ`, `SOCK_CLOEXEC` accepted and
+  ignored for the same reason `O_CLOEXEC` is on `pipe2`.
+- **`SOCK_DGRAM` gets no datagram framing.** A pipe has no message
+  boundaries, so a `SOCK_DGRAM` socketpair on NeoOS behaves exactly
+  like `SOCK_STREAM` -- reads can return fewer bytes than a single
+  write sent, unlike Linux's real `AF_UNIX`/`SOCK_DGRAM`, which
+  preserves message boundaries. Nothing on NeoOS relies on that
+  preservation yet.
+
 ## File descriptors are objects, not vnodes
 
 An fd now carries an operations table rather than pointing straight at
