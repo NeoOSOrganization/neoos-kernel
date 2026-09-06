@@ -800,3 +800,68 @@ allocation path has been exercised, and NeoOS still has no SSH
 *server*; both remain for a later milestone. TLS (OpenSSL) and SSH
 (libssh2) are now both proven, which is what curl's `https://` and
 `sftp://` support need next.
+
+## Refresh — OpenSSL 3.5.8 upgrade and a real ELF-size ceiling (2026-09-06)
+
+Starting the curl port hit a real compile-time gate almost immediately:
+curl 8.22.0's OpenSSL backend (`lib/vtls/openssl.c`) refuses to build
+against anything older than OpenSSL 3.0.0. `neoos-openssl` was
+deliberately pinned to 1.1.1w for its own milestone ("1.1.1 now, 3.x
+later" was the explicit call at the time) — this is that later
+milestone, pulled forward because curl needed it as a prerequisite,
+the same way the libssh2 milestone pulled `socketpair()` forward.
+
+**`neoos-openssl` re-pinned to `openssl-3.5.8`** (OpenSSL's current LTS
+branch, supported into 2030 — the same conservatism as the original
+1.1.1 choice). Three real build issues, found by actually building it
+rather than assuming the old recipe would still work:
+
+1. **`engines/e_afalg.c` needs a real `linux/version.h`.** The AF_ALG
+   engine talks to a Linux kernel crypto API socket interface NeoOS
+   has no equivalent of, and OpenSSL 3.x still builds it as a static
+   engine by default even with `no-dynamic-engine` (which only
+   disables *loadable* engines). Fixed with `no-engine`, disabling the
+   whole subsystem — the right call anyway, since OpenSSL 3.x's
+   provider architecture is what actually gets used; nothing here
+   needs the legacy engine API at all.
+2. **The build installed to `lib64/`, not `lib/`.** OpenSSL 3.x's
+   `linux-x86_64` target defaults to the multilib convention real
+   64-bit Linux distros use; 1.1.1's build never exhibited this.
+   Meaningless on a single-arch freestanding target, and every
+   downstream consumer (`neoos-libssh2`, `neoos-curl`) expects
+   `$OPENSSL_DIR/lib/libssl.a`. Fixed with an explicit `--libdir=lib`.
+3. **The resulting static libraries are far larger than 1.1.1's** —
+   OpenSSL 3.x's provider architecture (default provider, legacy
+   provider, FIPS-adjacent infrastructure) bundles substantially more
+   code than the algorithm-only 1.1.1 build did, even with none of it
+   actually reachable from a program that only calls the ordinary
+   `SSL_*`/`EVP_*` API. `libcrypto.a` alone grew from a few MiB to
+   12–15MiB. Mitigated (not eliminated) with `-ffunction-sections
+   -fdata-sections` at compile time (`neoos-openssl` and
+   `neoos-libssh2`, whose own static library is linked into the same
+   binaries) so `-Wl,--gc-sections` at final link time can discard
+   whatever a given program never actually calls — necessary but not
+   sufficient on its own, which is what led to the kernel change below.
+
+**`kernel/mm/pmm.h`'s `PMM_MAX_ORDER` raised from 10 (4MiB) to 14
+(64MiB).** `build_user_address_space` (`sched/proc.c`) stages an
+entire ELF file in one `kmalloc`'d buffer before mapping it, and even
+after the dead-code-elimination above, a real static binary linking
+libcurl.a + libssh2.a + libssl.a + libcrypto.a is comfortably past
+4MiB — the previous ceiling, chosen long before any port approached
+it. Raising it costs one array of pointers (`free_lists` in
+`mm/pmm.c`) growing from 11 to 15 entries; everything else the buddy
+allocator tracks is sized by total frame count, not by this. 64MiB
+leaves real headroom for wget and whatever comes after it, without
+moving to genuinely demand-paged ELF loading — a much larger change
+this milestone did not need. Found the same way as the OpenSSL issues
+above: by actually linking a real binary and reading the exact
+failure (`[process] FAILED: kmalloc failed for ELF image`) rather than
+guessing at a size limit in advance.
+
+**Verified:** `neoos-libssh2` rebuilt clean against OpenSSL 3.5.8 with
+no source changes of its own (only its build flags changed), and the
+libssh2 milestone's own SFTP write/read/verify round trip against a
+real, independent server was re-run end to end and still passes —
+confirming the TLS/crypto backend swap is behaviorally transparent to
+everything already built on it. 15/15 gauntlet, zero retries.

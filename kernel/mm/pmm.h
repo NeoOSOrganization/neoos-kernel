@@ -4,7 +4,20 @@
 #include <stdint.h>
 
 #define PMM_FRAME_SIZE 4096
-#define PMM_MAX_ORDER  10 // largest block = 4096 * 2^10 = 4MiB
+// Largest block = 4096 * 2^14 = 64MiB. Was 10 (4MiB) until the curl
+// port: build_user_address_space (sched/proc.c) stages a whole ELF
+// file in one kmalloc'd buffer before mapping it, and a real,
+// statically-linked OpenSSL-3.x-based binary (curl links libcurl.a +
+// libssh2.a + libssl.a + libcrypto.a) is comfortably past 4MiB even
+// after -ffunction-sections/-fdata-sections + --gc-sections trims
+// everything unreferenced. Raising the ceiling costs one array of
+// pointers (free_lists in mm/pmm.c) growing from 11 to 15 entries --
+// everything else the buddy allocator tracks is sized by total frame
+// count, not by this. 64MiB leaves headroom past what any port this
+// project has built so far needs, without moving to genuinely
+// demand-paged ELF loading (a separate, much bigger change this
+// milestone does not need).
+#define PMM_MAX_ORDER  14
 
 void pmm_init(void *multiboot_info);
 void pmm_selftest(void);
