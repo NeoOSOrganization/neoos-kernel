@@ -2,6 +2,19 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Correction, found during Task 4's real end-to-end boot (not caught
+> by Task 1's own `mdir`-only check):** every `/bin/` reference below
+> is wrong. `/bin` is mounted as its own embedfs volume (`kernel.c`),
+> which shadows anything written to the underlying FAT disk's `::bin`
+> directory — a port's `.nex` installed there is bytes on disk the
+> running kernel can never see. The actual shipped fix installs `.nex`
+> files at `/usr/local/bin/` instead (kernel commit `46abeba`), with
+> `init.c`'s `$PATH` extended to match. The design doc
+> (`docs/superpowers/specs/2026-09-06-os-builder-port-install-design.md`)
+> has been corrected in place; this plan is left as the historical
+> record of what was executed and is not itself corrected line-by-line
+> — read the spec for the accurate design.
+
 **Goal:** ports chosen in an `os-builder` config land on the built OS
 image as real disk files under `/opt/<name>/` (plus a `/bin/` copy of
 each `.nex` for `nsh`'s `$PATH`), launchable by hand — `EMBED_DIRS`
