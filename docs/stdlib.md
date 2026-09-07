@@ -754,6 +754,53 @@ existing headers already declare them.
   interpreted — with one node, "which node is this address on" has
   only one possible answer regardless of which address is asked about.
 
+## `epoll_create1`, `epoll_ctl`, `epoll_wait`, `epoll_pwait`
+
+```c
+#include <sys/epoll.h>
+int epoll_create1(int flags);
+int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event);
+int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout);
+int epoll_pwait(int epfd, struct epoll_event *events, int maxevents,
+                int timeout, const sigset_t *sigmask);
+```
+
+Found missing getting a real TCP socket example running: .NET's
+`Socket`/`TcpClient` use `epoll` internally (`SocketAsyncEngine`) even
+for a single synchronous `Connect`/`Send`/`Receive` sequence, and
+unlike most of the syscalls in the section above, its absence is
+fatal rather than gracefully degraded.
+
+Built on the SAME scan-and-sleep loop `poll()`/`select()` already use
+(`poll_core`, `kernel/syscall/sys_poll.c`), not a second readiness
+mechanism: an epoll object (`kernel/sync/epoll.c`/`.h`) is just a
+stored list of `(fd, events, data)` registrations, and `epoll_wait`
+turns that list into exactly the `pollfd[]` array `poll()` builds,
+then calls the same core. `struct epoll_event` matches Linux's
+x86_64 ABI exactly, including the `__attribute__((packed))` that
+removes the padding its natural alignment would otherwise have.
+
+### Divergences from Linux
+
+- **Level-triggered only.** `EPOLLET` (edge-triggered mode) is
+  accepted in the registered `events` mask but has no distinct
+  effect — every registration behaves as level-triggered, which is
+  strictly more notifications, never fewer, than edge-triggered
+  would give. A caller using the default (level-triggered, by far
+  the common case) sees no difference; one that specifically depends
+  on edge-triggered's "only once per readiness transition" contract
+  to avoid busy-looping would need to add rate-limiting Linux
+  wouldn't have required.
+- **`epoll_pwait`'s `sigmask` is accepted and not applied** — NeoOS
+  has no per-call signal-mask swap for any blocking syscall (the one
+  place that need is met today is `rt_sigsuspend`). Every caller in
+  this milestone passes a null mask.
+- **No `EPOLLEXCLUSIVE`/`EPOLLWAKEUP` semantics** — accepted as bits
+  in the events mask, not acted on. Both are about behavior across
+  *multiple* processes/epoll-instances sharing one fd or waking a
+  suspended system, neither of which arises in NeoOS's process model
+  yet.
+
 ## File descriptors are objects, not vnodes
 
 An fd now carries an operations table rather than pointing straight at

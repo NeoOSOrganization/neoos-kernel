@@ -103,6 +103,10 @@
 #define NEO_STATFS          97
 #define NEO_GET_MEMPOLICY   98
 #define NEO_MADVISE         99
+#define NEO_EPOLL_CREATE1  100
+#define NEO_EPOLL_CTL      101
+#define NEO_EPOLL_WAIT     102
+#define NEO_EPOLL_PWAIT    103
 
 // ---- Linux x86-64 numbers, as musl issues them ----------------------
 #define LX_READ              0
@@ -191,6 +195,10 @@
 #define LX_STATFS          137
 #define LX_GET_MEMPOLICY   239
 #define LX_MADVISE          28
+#define LX_EPOLL_WAIT      232
+#define LX_EPOLL_CTL       233
+#define LX_EPOLL_PWAIT     281
+#define LX_EPOLL_CREATE1   291
 
 static long neo_strlen(const char *s) {
     long n = 0;
@@ -373,6 +381,10 @@ long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a
         return neo(NEO_STATFS, a1, neo_strlen((const char *)a1), a2, 0, 0, 0);
     case LX_GET_MEMPOLICY:     return neo(NEO_GET_MEMPOLICY, a1, a2, a3, a4, a5, 0);
     case LX_MADVISE:           return neo(NEO_MADVISE, a1, a2, a3, 0, 0, 0);
+    case LX_EPOLL_CREATE1:     return neo(NEO_EPOLL_CREATE1, a1, 0, 0, 0, 0, 0);
+    case LX_EPOLL_CTL:         return neo(NEO_EPOLL_CTL, a1, a2, a3, a4, 0, 0);
+    case LX_EPOLL_WAIT:        return neo(NEO_EPOLL_WAIT, a1, a2, a3, a4, 0, 0);
+    case LX_EPOLL_PWAIT:       return neo(NEO_EPOLL_PWAIT, a1, a2, a3, a4, a5, 0);
 
     default:
         // Not forwarded. This is the signal that a primitive belongs in

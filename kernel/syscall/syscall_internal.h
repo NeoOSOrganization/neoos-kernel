@@ -191,5 +191,9 @@ int64_t sys_membarrier(struct syscall_args *a);
 int64_t sys_sysinfo(struct syscall_args *a);
 int64_t sys_get_mempolicy(struct syscall_args *a);
 int64_t sys_statfs(struct syscall_args *a);
+int64_t sys_epoll_create1(struct syscall_args *a);
+int64_t sys_epoll_ctl(struct syscall_args *a);
+int64_t sys_epoll_wait(struct syscall_args *a);
+int64_t sys_epoll_pwait(struct syscall_args *a);
 
 #endif

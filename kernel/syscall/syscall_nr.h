@@ -255,7 +255,21 @@
 // the tell). See docs/stdlib.md.
 #define SYS_MADVISE           99
 
+// epoll_create1(flags) / epoll_ctl(epfd, op, fd, event) /
+// epoll_wait(epfd, events, maxevents, timeout) / epoll_pwait(...,
+// sigmask) -- Linux shape, built on the same poll_core() scan-and-
+// sleep loop poll()/select() already use (kernel/sync/epoll.c/.h).
+// Found missing chasing a dotnet NativeAOT TCP socket example: .NET's
+// SocketAsyncEngine uses epoll even for a single synchronous
+// connect+send+recv. Level-triggered only -- see epoll.h's own
+// comment. epoll_pwait's sigmask argument is accepted and not applied
+// (see docs/stdlib.md).
+#define SYS_EPOLL_CREATE1    100
+#define SYS_EPOLL_CTL        101
+#define SYS_EPOLL_WAIT       102
+#define SYS_EPOLL_PWAIT      103
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX              100
+#define SYS_MAX              104
 
 #endif

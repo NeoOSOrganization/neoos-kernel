@@ -13,6 +13,7 @@
 #include "fs/file.h"
 #include "sync/waitq.h"
 #include "sync/poll_head.h"
+#include "sync/epoll.h"
 #include "drivers/char/timer.h"
 #include "mm/paging.h"
 #include "mm/heap.h"
@@ -226,4 +227,139 @@ int64_t sys_select(struct syscall_args *a) {
     if (uex) { missed = copy_to_user((void *)(uintptr_t)uex, ex, sizeof ex); if (missed > 0) { out_rc = -EFAULT; } }
     kfree(pfd);
     return out_rc;
+}
+
+// ---- epoll -------------------------------------------------------------
+//
+// See kernel/sync/epoll.h/.c for the object itself. epoll_wait() below
+// is the only piece that belongs here rather than there: it is the one
+// place an epoll object's registration list meets poll_core, the exact
+// scan-and-sleep loop poll()/select() already use above.
+
+// struct epoll_event -- Linux's x86_64 ABI shape exactly: packed, so
+// the union (8 bytes) sits immediately after events (4 bytes) with no
+// padding, unlike this struct's natural alignment. Musl's own
+// <sys/epoll.h> declares the same layout with the same
+// __attribute__((packed)) for the same reason.
+struct epoll_event_abi {
+    uint32_t events;
+    uint64_t data;
+} __attribute__((packed));
+
+int64_t sys_epoll_create1(struct syscall_args *a) {
+    return epoll_create((int)a->a1);
+}
+
+int64_t sys_epoll_ctl(struct syscall_args *a) {
+    int epfd = (int)a->a1;
+    int op   = (int)a->a2;
+    int fd   = (int)a->a3;
+    uint64_t uevent = a->a4;
+
+    struct process *p = current_proc();
+    struct file_descriptor *epf = fd_get(p, epfd);
+    if (!epf) { return -EBADF; }
+
+    uint32_t events = 0;
+    uint64_t data = 0;
+    // EPOLL_CTL_DEL is the one op Linux lets pass event as NULL for --
+    // it is unused there (there is nothing left to update).
+    if (uevent) {
+        struct epoll_event_abi ev;
+        uint64_t missed = copy_from_user(&ev, (const void *)(uintptr_t)uevent, sizeof ev);
+        if (missed > 0) { return -EFAULT; }
+        events = ev.events;
+        data = ev.data;
+    }
+    return epoll_ctl_do(epf, op, fd, events, data);
+}
+
+static int64_t epoll_wait_core(struct syscall_args *a) {
+    int epfd      = (int)a->a1;
+    uint64_t uev  = a->a2;
+    int maxevents = (int)a->a3;
+    int timeout_ms = (int)a->a4;
+
+    if (maxevents <= 0) { return -EINVAL; }
+    if (!uev) { return -EFAULT; }
+
+    struct process *p = current_proc();
+    struct file_descriptor *epf = fd_get(p, epfd);
+    if (!epf || epf->ops != &epoll_file_ops) { return -EBADF; }
+    struct epoll_obj *o = (struct epoll_obj *)epf->priv;
+
+    // Snapshot the registration list into a pollfd[] array under the
+    // object's own lock, then run poll_core with the lock released --
+    // poll_core can sleep, and nothing may hold a lock across that.
+    uint64_t flags = spin_lock_irqsave(&o->lock);
+    int n = o->nfds;
+    if (n > maxevents) { n = maxevents; }
+    struct pollfd *pfd = 0;
+    uint64_t *edata = 0;
+    if (n > 0) {
+        pfd = kmalloc((uint64_t)n * sizeof(*pfd));
+        edata = kmalloc((uint64_t)n * sizeof(*edata));
+        if (!pfd || !edata) {
+            spin_unlock_irqrestore(&o->lock, flags);
+            if (pfd) { kfree(pfd); }
+            if (edata) { kfree(edata); }
+            return -ENOMEM;
+        }
+        int i = 0;
+        for (struct epoll_entry *e = o->list; e && i < n; e = e->next, i++) {
+            pfd[i].fd = e->fd;
+            pfd[i].events = (short)e->events;
+            pfd[i].revents = 0;
+            edata[i] = e->data;
+        }
+        n = i;   // the list may be shorter than nfds if it changed concurrently
+    }
+    spin_unlock_irqrestore(&o->lock, flags);
+
+    if (n == 0) {
+        // Nothing registered: still honour the timeout instead of
+        // returning immediately, matching Linux's epoll_wait on an
+        // empty set.
+        if (timeout_ms != 0) {
+            struct thread *self = current_thread();
+            waitq_poll_enter();
+            waitq_poll_wait((uint64_t)deadline_from_ms(timeout_ms), &self->poll_notified);
+            waitq_poll_leave();
+        }
+        return 0;
+    }
+
+    int64_t ready = poll_core(pfd, (unsigned)n, deadline_from_ms(timeout_ms));
+    if (ready > 0) {
+        struct epoll_event_abi *out = kmalloc((uint64_t)ready * sizeof(*out));
+        if (!out) { kfree(pfd); kfree(edata); return -ENOMEM; }
+        int64_t j = 0;
+        for (int i = 0; i < n && j < ready; i++) {
+            if (pfd[i].revents) {
+                out[j].events = (uint32_t)pfd[i].revents;
+                out[j].data = edata[i];
+                j++;
+            }
+        }
+        uint64_t missed = copy_to_user((void *)(uintptr_t)uev, out, (uint64_t)ready * sizeof(*out));
+        kfree(out);
+        if (missed > 0) { ready = -EFAULT; }
+    }
+    kfree(pfd);
+    kfree(edata);
+    return ready;
+}
+
+int64_t sys_epoll_wait(struct syscall_args *a) {
+    return epoll_wait_core(a);
+}
+
+// epoll_pwait(epfd, events, maxevents, timeout, sigmask) -- the sigmask
+// (a5, frame->r8) is not applied: NeoOS has no per-call signal-mask
+// swap for any blocking syscall yet (see docs/stdlib.md's
+// rt_sigsuspend entry for the one place that need is met today).
+// Every real caller in this milestone passes a null sigmask; recorded
+// as a divergence rather than silently ignored.
+int64_t sys_epoll_pwait(struct syscall_args *a) {
+    return epoll_wait_core(a);
 }
