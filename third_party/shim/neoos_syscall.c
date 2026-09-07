@@ -137,6 +137,12 @@
 #define NEO_PPOLL              125
 #define NEO_CLOCK_NANOSLEEP    126
 #define NEO_CLOSE_RANGE        127
+#define NEO_STATX              128
+#define NEO_FSYNC              129
+#define NEO_FDATASYNC          130
+#define NEO_FALLOCATE          131
+#define NEO_ACCESS             132
+#define NEO_FACCESSAT          133
 
 // ---- Linux x86-64 numbers, as musl issues them ----------------------
 #define LX_READ              0
@@ -255,6 +261,13 @@
 #define LX_PPOLL           271
 #define LX_CLOCK_NANOSLEEP 230
 #define LX_CLOSE_RANGE     436
+#define LX_STATX           332
+#define LX_FSYNC            74
+#define LX_FDATASYNC        75
+#define LX_FALLOCATE       285
+#define LX_ACCESS           21
+#define LX_FACCESSAT       269
+#define LX_FACCESSAT2      439
 
 static long neo_strlen(const char *s) {
     long n = 0;
@@ -494,6 +507,22 @@ long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a
     case LX_PPOLL:            return neo(NEO_PPOLL, a1, a2, a3, a4, a5, 0);
     case LX_CLOCK_NANOSLEEP:  return neo(NEO_CLOCK_NANOSLEEP, a1, a2, a3, a4, 0, 0);
     case LX_CLOSE_RANGE:      return neo(NEO_CLOSE_RANGE, a1, a2, a3, 0, 0, 0);
+
+    // MSC-3. statx / access take a path -> measure it and shift the
+    // trailing args along (the systematic path reshape). fsync /
+    // fdatasync / fallocate are straight forwards.
+    case LX_STATX:
+        // (dfd, path, flags, mask, buf) -> (dfd, ptr, len, flags, mask, buf)
+        return neo(NEO_STATX, a1, a2, neo_strlen((const char *)a2), a3, a4, a5);
+    case LX_FSYNC:            return neo(NEO_FSYNC, a1, 0, 0, 0, 0, 0);
+    case LX_FDATASYNC:        return neo(NEO_FDATASYNC, a1, 0, 0, 0, 0, 0);
+    case LX_FALLOCATE:        return neo(NEO_FALLOCATE, a1, a2, a3, a4, 0, 0);
+    case LX_ACCESS:
+        return neo(NEO_ACCESS, a1, neo_strlen((const char *)a1), a2, 0, 0, 0);
+    case LX_FACCESSAT:
+        return neo(NEO_FACCESSAT, a1, a2, neo_strlen((const char *)a2), a3, 0, 0);
+    case LX_FACCESSAT2:
+        return neo(NEO_FACCESSAT, a1, a2, neo_strlen((const char *)a2), a3, a4, 0);
 
     default:
         // Not forwarded. This is the signal that a primitive belongs in

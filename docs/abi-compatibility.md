@@ -91,6 +91,7 @@ builds; it is not part of the stable ABI.)
 | 123 | eventfd2 | `eventfd2`/`eventfd` | implemented (MSC-1) — 64-bit counter fd, `EFD_SEMAPHORE`/`EFD_NONBLOCK`; `EFD_CLOEXEC` inert. |
 | 124 | prctl | `prctl` | implemented (MSC-1) — no-op-safe subset (`PR_SET/GET_NAME` → `comm`; the rest accepted-inert); everything else `EINVAL`. |
 | 125–127 | ppoll / clock_nanosleep / close_range | same names | implemented (MSC-2). ppoll sigmask non-atomic (as `rt_sigsuspend`); `clock_nanosleep` adds `TIMER_ABSTIME`; `close_range` CLOEXEC flag → `EINVAL`. `timerfd`/`signalfd` deferred. |
+| 128–133 | statx / fsync / fdatasync / fallocate / access / faccessat | same names | implemented (MSC-3). `statx` = `STATX_BASIC_STATS` minus btime; `fsync`/`fdatasync` succeed (write-through cache); `fallocate` → `EOPNOTSUPP`; `access`/`faccessat`/`faccessat2` = existence check only. `renameat2`/`utimensat`/`*at`-metadata deferred (VFS has no rename/setattr). |
 | 3 | getpid | `getpid` | implemented |
 | 4 | spawn | *(none — NeoOS extension)* | implemented |
 | 5 | wait | *(NeoOS wait-by-pid)* | implemented |

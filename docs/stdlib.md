@@ -784,6 +784,35 @@ int close_range(unsigned int first, unsigned int last, unsigned int flags);
   no-op (NeoOS fd tables are already per-process); **`CLOSE_RANGE_CLOEXEC`
   is `-EINVAL`** — there is no close-on-exec state to set.
 
+## `statx`, `fsync`/`fdatasync`, `fallocate`, `access`/`faccessat` (MSC-3)
+
+- **`statx`** fills `STATX_BASIC_STATS` from the same vnode data as
+  `stat(2)` — mode, nlink, uid/gid, ino, size, blocks, a/c/mtime. The
+  **birth-time bit (`STATX_BTIME`) is cleared**: FAT gives NeoOS no
+  timestamps to read (the gap `stat` already has). `AT_EMPTY_PATH`
+  with a real fd is the fstat form; only `AT_FDCWD` is accepted for a
+  path (no `openat` family yet). Layout is Linux's 256-byte
+  `struct statx`.
+- **`fsync` / `fdatasync`** validate the fd and return 0. NeoOS's block
+  cache writes through — there is no dirty-writeback list — so the
+  data a successful `write()` returned from is already on the device.
+  Not a lie, but not a barrier either: there is no host-side `fsync`
+  behind it.
+- **`fallocate` returns `-EOPNOTSUPP`.** NeoOS's filesystems cannot
+  preallocate, and the vnode layer has no size-set operation beyond
+  truncate-to-zero. SQLite / .NET `FileStream` fall back to writing
+  zeros.
+- **`access` / `faccessat` / `faccessat2`** are a pure existence check
+  — NeoOS has no permission model, so `R_OK`/`W_OK`/`X_OK` on any path
+  that resolves all succeed. `faccessat2`'s `flags` are ignored. Only
+  `AT_FDCWD` for the `*at` forms.
+
+**Deferred (need FS-layer work, a future milestone — not syscall
+plumbing):** `renameat2`, `utimensat`, `linkat`/`symlinkat`,
+`fchmodat`/`fchownat`, arbitrary-length `ftruncate`, OFD `fcntl`
+locks. NeoOS's VFS currently has no rename, no set-attribute, no
+link, and no symlink operation for any mounted filesystem.
+
 **Deferred to a later MSC pass:** `timerfd_*` and `signalfd4` — both
 need an fd-object plus a tick-driven expiry/pending-signal poke that
 NeoOS's thread-only timeout machinery does not have yet. `pselect6`

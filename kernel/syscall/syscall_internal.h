@@ -221,5 +221,10 @@ int64_t sys_prctl(struct syscall_args *a);
 int64_t sys_ppoll(struct syscall_args *a);
 int64_t sys_clock_nanosleep(struct syscall_args *a);
 int64_t sys_close_range(struct syscall_args *a);
+int64_t sys_statx(struct syscall_args *a);
+int64_t sys_fsync(struct syscall_args *a);
+int64_t sys_fallocate(struct syscall_args *a);
+int64_t sys_access(struct syscall_args *a);
+int64_t sys_faccessat(struct syscall_args *a);
 
 #endif

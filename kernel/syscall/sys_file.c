@@ -440,6 +440,99 @@ int64_t sys_stat(struct syscall_args *a) {
     return stat_by_path(a->a1, a->a2, a->a3);
 }
 
+// ---- statx (MSC-3) --------------------------------------------------
+//
+// The extended stat -- git, cargo, coreutils >= 9 and musl's own stat
+// fast path use it. NeoOS fills STATX_BASIC_STATS from the same vnode
+// data as stat(2); birth time is left unreported (FAT gives NeoOS no
+// timestamps to read -- the same gap stat has, recorded in
+// docs/stdlib.md). Layout is Linux's x86_64 struct statx, 256 bytes.
+
+struct statx_timestamp { int64_t tv_sec; uint32_t tv_nsec; int32_t __reserved; };
+struct k_statx {
+    uint32_t stx_mask;
+    uint32_t stx_blksize;
+    uint64_t stx_attributes;
+    uint32_t stx_nlink;
+    uint32_t stx_uid;
+    uint32_t stx_gid;
+    uint16_t stx_mode;
+    uint16_t __spare0[1];
+    uint64_t stx_ino;
+    uint64_t stx_size;
+    uint64_t stx_blocks;
+    uint64_t stx_attributes_mask;
+    struct statx_timestamp stx_atime;
+    struct statx_timestamp stx_btime;
+    struct statx_timestamp stx_ctime;
+    struct statx_timestamp stx_mtime;
+    uint32_t stx_rdev_major;
+    uint32_t stx_rdev_minor;
+    uint32_t stx_dev_major;
+    uint32_t stx_dev_minor;
+    uint64_t stx_mnt_id;
+    uint64_t __spare2[13];
+};
+_Static_assert(sizeof(struct k_statx) == 256, "struct statx must be 256 bytes");
+
+#define STATX_BASIC_STATS 0x000007ffU
+
+int64_t sys_statx(struct syscall_args *a) {
+    int      dirfd  = (int)a->a1;
+    int      flags  = (int)a->a4;
+    uint64_t out_ptr = a->frame->r9;
+    if (!out_ptr) { return -EFAULT; }
+
+    struct stat st;
+    for (unsigned i = 0; i < sizeof(st); i++) { ((uint8_t *)&st)[i] = 0; }
+
+    if ((flags & AT_EMPTY_PATH) && dirfd >= 0) {
+        struct file_descriptor *f = fd_get(current_proc(), dirfd);
+        if (!f) { return -EBADF; }
+        if (!f->vn) { return -EINVAL; }
+        fs_lock_acquire();
+        vfs_stat_vnode(f->vn, &st);
+        fs_lock_release();
+    } else {
+        if (dirfd != AT_FDCWD) { return -EBADF; }
+        char path[VFS_MAX_PATH];
+        int rc = copy_user_path_at(a->a2, a->a3, path);
+        if (rc != 0) { return rc; }
+        fs_lock_acquire();
+        int err = 0;
+        struct vnode *vn = vfs_resolve(path, &err);
+        if (!vn) { fs_lock_release(); return err; }
+        vfs_stat_vnode(vn, &st);
+        vnode_put(vn);
+        fs_lock_release();
+    }
+
+    struct k_statx sx;
+    for (unsigned i = 0; i < sizeof(sx); i++) { ((uint8_t *)&sx)[i] = 0; }
+    sx.stx_mask     = STATX_BASIC_STATS;   // no btime -> that bit stays clear below
+    sx.stx_mask    &= ~0x800U;             // STATX_BTIME
+    sx.stx_blksize  = (uint32_t)st.st_blksize;
+    sx.stx_nlink    = (uint32_t)st.st_nlink;
+    sx.stx_uid      = st.st_uid;
+    sx.stx_gid      = st.st_gid;
+    sx.stx_mode     = (uint16_t)st.st_mode;
+    sx.stx_ino      = st.st_ino;
+    sx.stx_size     = (uint64_t)st.st_size;
+    sx.stx_blocks   = (uint64_t)st.st_blocks;
+    sx.stx_attributes_mask = 0;
+    sx.stx_atime.tv_sec = st.st_atime_sec;
+    sx.stx_atime.tv_nsec = (uint32_t)st.st_atime_nsec;
+    sx.stx_ctime.tv_sec = st.st_ctime_sec;
+    sx.stx_ctime.tv_nsec = (uint32_t)st.st_ctime_nsec;
+    sx.stx_mtime.tv_sec = st.st_mtime_sec;
+    sx.stx_mtime.tv_nsec = (uint32_t)st.st_mtime_nsec;
+
+    if (copy_to_user((void *)(uintptr_t)out_ptr, &sx, sizeof sx) != 0) {
+        return -EFAULT;
+    }
+    return 0;
+}
+
 // DIVERGES, harmlessly: identical to stat. lstat differs only on a
 // symlink, and no filesystem NeoOS mounts can represent one -- FAT has
 // no such entry type. Recorded in docs/stdlib.md.
@@ -646,4 +739,54 @@ int64_t sys_ioctl(struct syscall_args *a) {
     struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
     if (!f) { return -EBADF; }
     return file_ioctl(f, (uint64_t)a->a2, (void *)(uintptr_t)a->a3);
+}
+
+// ---- fsync / fdatasync / fallocate / access (MSC-3) ------------------
+
+// NeoOS's block cache writes through -- there is no dirty-writeback
+// list to flush (kernel/fs/blkcache.c's own comment). fsync/fdatasync
+// therefore only need to validate the fd and succeed; the data a
+// successful write() returned from is already on the device.
+// Recorded in docs/stdlib.md.
+int64_t sys_fsync(struct syscall_args *a) {
+    struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
+    if (!f) { return -EBADF; }
+    return 0;
+}
+
+// fallocate(fd, mode, offset, len). NeoOS's filesystems cannot
+// preallocate or punch holes, and the vnode layer has no size-setting
+// operation beyond truncate-to-zero. Honest -EOPNOTSUPP -- callers
+// (SQLite, .NET FileStream) fall back to writing zeros. Recorded in
+// docs/stdlib.md.
+int64_t sys_fallocate(struct syscall_args *a) {
+    struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
+    if (!f) { return -EBADF; }
+    return -EOPNOTSUPP;
+}
+
+// access(path, mode) / faccessat2(dirfd, path, mode, flags). NeoOS has
+// no permission model: the check is pure existence. R_OK/W_OK/X_OK on
+// a path that resolves all succeed; a path that does not is -ENOENT
+// (etc, from vfs_resolve). Recorded in docs/stdlib.md.
+static int64_t access_by_path(int64_t uptr, int64_t ulen) {
+    char path[VFS_MAX_PATH];
+    int rc = copy_user_path_at(uptr, ulen, path);
+    if (rc != 0) { return rc; }
+    fs_lock_acquire();
+    int err = 0;
+    struct vnode *vn = vfs_resolve(path, &err);
+    if (!vn) { fs_lock_release(); return err; }
+    vnode_put(vn);
+    fs_lock_release();
+    return 0;
+}
+
+int64_t sys_access(struct syscall_args *a) {
+    return access_by_path(a->a1, a->a2);
+}
+
+int64_t sys_faccessat(struct syscall_args *a) {
+    if ((int)a->a1 != AT_FDCWD) { return -EBADF; }
+    return access_by_path(a->a2, a->a3);
 }

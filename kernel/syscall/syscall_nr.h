@@ -332,7 +332,18 @@
 #define SYS_CLOCK_NANOSLEEP       126
 #define SYS_CLOSE_RANGE           127
 
+// MSC-3. statx (extended stat, git/cargo/coreutils); fsync/fdatasync
+// (validate + succeed -- NeoOS's block cache writes through);
+// fallocate (-EOPNOTSUPP, honest); access/faccessat (existence check,
+// no permission model).
+#define SYS_STATX                 128
+#define SYS_FSYNC                 129
+#define SYS_FDATASYNC             130
+#define SYS_FALLOCATE             131
+#define SYS_ACCESS                132
+#define SYS_FACCESSAT            133
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX              128
+#define SYS_MAX              134
 
 #endif

@@ -283,7 +283,7 @@ Tier 2.
 |---|---|---|---|
 | ~~**MSC-1**~~ ✅ | `sched_setaffinity` + `getcpu` shim (landed with SCH-1 T5, `b80026a`); `prctl` no-op ops + `eventfd2` (`kernel/ipc/eventfd.c`) landed MSC-1. Gauntlet 15/15. | .NET Server GC; the SocketAsyncEngine wake path | small |
 | **MSC-2** (partial) | ✅ `close_range`, `clock_nanosleep` (adds `TIMER_ABSTIME`), `ppoll` (non-atomic sigmask). ⏳ `timerfd_*` / `signalfd4` deferred — need an fd-object + a tick-driven expiry/pending poke (NeoOS's timeout machinery wakes threads only, not poll heads). | Go/Node/.NET event loops, `posix_spawn` | medium |
-| **MSC-3** | `*at` completeness, `statx`, `utimensat`, `renameat2`, `fallocate`, `fsync`/`fdatasync` real flush, OFD `fcntl` locks | git, cargo, dpkg, SQLite, tar, make | medium |
+| **MSC-3** (partial) | ✅ `statx`, `fsync`/`fdatasync` (succeed; write-through cache, no barrier), `fallocate` (`-EOPNOTSUPP`), `access`/`faccessat`/`faccessat2` (existence check). ⏳ `renameat2`/`utimensat`/`linkat`/`symlinkat`/`fchmodat`/`fchownat`/OFD-locks deferred — **VFS has no rename/setattr/link op** for any mounted FS; that is a filesystem milestone, not syscall plumbing. | git, cargo, dpkg, SQLite, tar, make | medium |
 | **MSC-4** | `pidfd_*`, `clone3`, `setres[ug]id`/`getgroups`/`setgroups`, `prlimit64`/`getrlimit`/`setrlimit`, `capget`/`capset` (root-all model) | su/sudo/sshd, modern process libs | medium |
 | **MSC-5** | `sendfile`, `copy_file_range`, `pread64`/`pwrite64`/`preadv2`, `flock` | static-file serving, DB engines | medium |
 | **later** | `unshare`/`setns`/namespaces, `io_uring`, `fanotify`, full `splice` | containers, top-tier IO perf | own specs |
