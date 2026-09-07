@@ -17,6 +17,7 @@
 #include "sync/lock.h"
 #include "errno.h"
 #include "smp/smp.h"
+#include "drivers/char/timer.h"
 #include "sched/rq.h"
 
 extern void context_switch(uint64_t *old_rsp, uint64_t *new_rsp);
@@ -31,6 +32,16 @@ extern void fork_trampoline(void);
 
 struct rq *cpu_rq(int cpu_index) { return &cpus[cpu_index].rq; }
 struct rq *this_rq(void)         { return &this_cpu()->rq; }
+
+// The rq clock. SCH-1 uses the 100 Hz tick counter -- 10 ms
+// granularity, coarse but monotonic and correct. A finer source
+// (rdtsc scaled) is a later refinement.
+#define NS_PER_TICK 10000000ULL
+void rq_clock_update(struct rq *rq) {
+    uint64_t now = timer_ticks() * NS_PER_TICK;
+    rq->clock = now;
+    rq->clock_task = now;   // == clock until irq/steal-time accounting (SCH-7)
+}
 
 // Blocks until no CPU is executing on `t`'s kernel stack any more.
 //
@@ -65,13 +76,16 @@ void enqueue_ready(struct thread *t) {
     wait_off_cpu(t);
     struct rq *rq = this_rq();
     uint64_t f = spin_lock_irqsave(&rq->lock);
+    rq_clock_update(rq);
     fair_enqueue(rq, t);
     spin_unlock_irqrestore(&rq->lock, f);
 }
 
+// Retained for API compatibility; schedule() calls fair_pick directly.
 struct thread *dequeue_ready(void) {
     struct rq *rq = this_rq();
     uint64_t f = spin_lock_irqsave(&rq->lock);
+    rq_clock_update(rq);
     struct thread *t = fair_pick(rq);
     spin_unlock_irqrestore(&rq->lock, f);
     return t;
@@ -122,6 +136,7 @@ void enqueue_ready_on(int cpu_index, struct thread *t) {
     wait_off_cpu(t);
     struct rq *rq = cpu_rq(cpu_index);
     uint64_t f = spin_lock_irqsave(&rq->lock);
+    rq_clock_update(rq);
     fair_enqueue(rq, t);
     spin_unlock_irqrestore(&rq->lock, f);
     // Sent AFTER the unlock: the target may be spinning on this very lock
@@ -292,11 +307,19 @@ void sched_post_switch(void) {
     if (p == c->idle) { return; }
 
     if (s == THREAD_READY) {
-        enqueue_ready(p);
+        // Preempted, not blocked -- schedule() left its sched_entity out
+        // of the tree (neither curr nor queued). Put it back keeping its
+        // vruntime, now that its context is definitely saved.
+        struct rq *rq = &c->rq;
+        uint64_t f = spin_lock_irqsave(&rq->lock);
+        fair_requeue_preempted(rq, p);
+        spin_unlock_irqrestore(&rq->lock, f);
     }
-    // THREAD_BLOCKED: parked on a wait queue, and its waker is free to
-    // enqueue it now that on_cpu is clear. THREAD_ZOMBIE: published by
-    // thread_exit_self. Nothing to do for either.
+    // THREAD_BLOCKED: fair_block_current() already removed it in
+    // schedule(); its waker re-adds it via enqueue_ready() once on_cpu
+    // is clear. THREAD_ZOMBIE: published by thread_exit_self; when it
+    // reached schedule() its state was already != RUNNING so
+    // fair_block_current() took it out. Nothing to do for either.
 }
 
 // Restores EFLAGS.IF to whatever it was on entry to schedule(). Split
@@ -353,9 +376,29 @@ void schedule(void) {
     // is now fully saved, and may be handed on.
     sched_post_switch();
 
-    struct thread *next = dequeue_ready();
+    struct thread *cur0 = c->current;
+    struct rq *rq = &c->rq;
+
+    // EEVDF pick, under rq->lock, with the rq clock current. Released
+    // before any context switch (a spinlock must never span one).
+    uint64_t rf = spin_lock_irqsave(&rq->lock);
+    rq_clock_update(rq);
+    // A prev that is no longer RUNNING is blocking or exiting -- take it
+    // out of the fair class now (Linux's deactivate_task).
+    if (cur0 && cur0->state != THREAD_RUNNING && rq->cfs.curr == &cur0->se) {
+        fair_block_current(rq, cur0);
+    }
+    struct thread *next = fair_pick(rq);
+    spin_unlock_irqrestore(&rq->lock, rf);
+
     if (!next) {
-        next = steal_work(c);
+        struct thread *stolen = steal_work(c);
+        if (stolen) {
+            rf = spin_lock_irqsave(&rq->lock);
+            fair_accept_stolen(rq, stolen);
+            next = fair_pick(rq);
+            spin_unlock_irqrestore(&rq->lock, rf);
+        }
     }
     if (!next) {
         struct thread *cur = c->current;

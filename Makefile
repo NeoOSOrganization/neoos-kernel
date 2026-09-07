@@ -556,6 +556,7 @@ CORE_REQUIRED_MARKERS := \
 	"[tty] selftest passed" \
 	"[wxorx] kernel selftest passed" \
 	"[rbtree] selftest passed" \
+	"[sched] eevdf selftest passed" \
 	"[fb] framebuffer" \
 	"[fbdev] selftest passed" \
 	"[fbcon] selftest passed" \

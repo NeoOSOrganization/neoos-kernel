@@ -46,17 +46,29 @@ struct rq {
     uint64_t clock_task;
 };
 
+// The struct rq that embeds this cfs_rq.
+#define rq_of(cfsp) \
+    ((struct rq *)((char *)(cfsp) - offsetof(struct rq, cfs)))
+
 // Defined in sched.c.
 struct rq *cpu_rq(int cpu_index);
 struct rq *this_rq(void);
 
 void cfs_rq_init(struct cfs_rq *cfs);
 
-// fair.c -- the class hooks sched.c calls (SCH-1 Task 1: FIFO via the
-// tree; Task 3: real EEVDF).
-void           fair_enqueue(struct rq *rq, struct thread *t);
-struct thread *fair_pick(struct rq *rq);
-struct thread *fair_steal(struct rq *rq);     // pop one for work-stealing
-void           fair_put_prev(struct rq *rq, struct thread *prev);
+// fair.c -- the class hooks sched.c calls. All require rq->lock held
+// and (for fair_pick) rq->clock_task current.
+void           fair_enqueue(struct rq *rq, struct thread *t);        // wake / new
+struct thread *fair_pick(struct rq *rq);                            // pick + set curr
+void           fair_block_current(struct rq *rq, struct thread *prev);   // prev blocked
+void           fair_requeue_preempted(struct rq *rq, struct thread *prev); // prev preempted
+struct thread *fair_steal(struct rq *rq);                           // pop one to migrate
+void           fair_accept_stolen(struct rq *rq, struct thread *t); // migrated-in
+
+// Set rq->clock / rq->clock_task from the monotonic ns source.
+void rq_clock_update(struct rq *rq);
+
+// Boot selftest: the EEVDF virtual-time arithmetic.
+void eevdf_selftest(void);
 
 #endif // NEOOS_SCHED_RQ_H

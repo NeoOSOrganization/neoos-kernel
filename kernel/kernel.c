@@ -264,6 +264,7 @@ void kmain(void *multiboot_info) {
     syscall_table_selftest();
     rand_selftest();
     rbtree_selftest();
+    eevdf_selftest();
     futex_init();
     file_selftest();
     pipe_selftest();
