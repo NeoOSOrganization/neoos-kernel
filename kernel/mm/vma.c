@@ -344,6 +344,20 @@ int64_t vma_mmap(struct process *p, uint64_t addr, uint64_t len,
     return rc;
 }
 
+int vma_register_image_segment(struct process *p, uint64_t start, uint64_t end,
+                                uint32_t prot) {
+    uint64_t f = spin_lock_irqsave(&p->mm_lock);
+    // MAP_PRIVATE: an ordinary process-private mapping, matching what
+    // every other non-device VMA in this list already is. Not
+    // VMA_PHYS -- these frames came from pmm_alloc() like any other
+    // demand-paged page (elf_load zeroes and copies into them the same
+    // way vma_fault does for a fresh mmap), so they are freed the
+    // normal way on exit/exec, not left for a device owner.
+    int rc = vma_insert(p, start, end, prot, MAP_PRIVATE);
+    spin_unlock_irqrestore(&p->mm_lock, f);
+    return rc;
+}
+
 int64_t vma_map_phys(struct process *p, uint64_t phys, uint64_t len, uint32_t prot) {
     uint64_t f = spin_lock_irqsave(&p->mm_lock);
     int64_t rc = vma_map_phys_locked(p, phys, len, prot);

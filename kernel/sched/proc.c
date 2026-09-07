@@ -437,6 +437,14 @@ struct process *spawn_argv(const char *path, const struct spawn_args *args) {
     p->pml4_phys   = pml4_phys;
     set_comm(p, path);
     p->elf          = info;   // the auxv and every thread's TLS come from here
+    // Give the loaded image's own segments VMA records -- see
+    // vma_register_image_segment's own comment for why this matters
+    // (a later mprotect() on the process's own code/data otherwise
+    // silently no-ops instead of taking effect).
+    for (int i = 0; i < info.num_segments; i++) {
+        vma_register_image_segment(p, info.segments[i].start,
+                                   info.segments[i].end, info.segments[i].prot);
+    }
     // A spawn from a running process inherits its cwd, as a fork does.
     // The FIRST process has no caller and keeps proc_alloc's "/".
     struct process *spawner = current_proc();
@@ -649,6 +657,13 @@ int exec_task(const char *path, struct syscall_frame *frame,
 
     p->elf = info;
     set_comm(p, path);
+    // Same reasoning as spawn_argv's own call: without this, the new
+    // image's own code/data have page-table entries but no VMA record,
+    // so a later mprotect() against them silently no-ops.
+    for (int i = 0; i < info.num_segments; i++) {
+        vma_register_image_segment(p, info.segments[i].start,
+                                   info.segments[i].end, info.segments[i].prot);
+    }
 
     // The caller's argument vector, already copied into kernel memory by
     // the syscall layer -- it HAD to be: the user pages it lived in were

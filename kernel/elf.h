@@ -35,6 +35,31 @@ struct elf_info {
     uint64_t tls_filesz;
     uint64_t tls_memsz;
     uint64_t tls_align;
+
+    // Every PT_LOAD segment actually mapped, page-aligned exactly as
+    // paging_map_into() was called (start/end) with POSIX PROT_*-style
+    // bits (kernel/mm/vma.h), not ELF's own p_flags encoding (the two
+    // use different bit positions for the same three permissions).
+    //
+    // Exists so the caller can register a VMA for each one via
+    // vma_insert() -- without it, a process's OWN initial image has
+    // page-table entries but no vma_find()-visible record at all, so a
+    // later mprotect()/munmap() against it silently no-ops instead of
+    // taking effect (vma_mprotect_locked only ever sees ranges that
+    // came through vma_insert). Real Linux tracks the initial image
+    // the same way a later mmap is tracked -- visible in
+    // /proc/self/maps. Found via a real crash: a NativeAOT C# binary
+    // (the first program in this codebase to mprotect() part of its
+    // own loaded image rather than only memory it mmap'd itself) wrote
+    // to what it believed was now a writable page and took a write-to-
+    // read-only #PF instead, because the mprotect() call that should
+    // have unlocked it found no matching VMA and did nothing.
+#define ELF_MAX_LOAD_SEGMENTS 16
+    int num_segments;
+    struct {
+        uint64_t start, end;   // page-aligned
+        uint32_t prot;         // PROT_READ/WRITE/EXEC (vma.h), always includes PROT_READ
+    } segments[ELF_MAX_LOAD_SEGMENTS];
 };
 
 // Parses the ELF64 image in `data` (length `size`) and maps its

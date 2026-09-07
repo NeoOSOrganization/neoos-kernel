@@ -35,6 +35,18 @@ struct process;
 
 int64_t vma_mmap(struct process *p, uint64_t addr, uint64_t len,
                  uint32_t prot, uint32_t flags);
+
+// Registers a VMA for [start,end) that is ALREADY mapped in `p`'s page
+// tables -- no page_table/paging_map_into work happens here, only the
+// bookkeeping vma_find()/vma_mprotect_locked() need to see it later.
+// For elf_load()'s PT_LOAD segments: those pages are mapped directly
+// by the loader, bypassing vma_mmap entirely, so without this call a
+// process's own initial image has page-table entries but no VMA record
+// at all -- a later mprotect() against it finds nothing to act on and
+// silently no-ops instead of taking effect. Returns 1, or 0 on
+// out-of-memory (matching vma_insert's own failure mode).
+int vma_register_image_segment(struct process *p, uint64_t start, uint64_t end,
+                                uint32_t prot);
 int     vma_munmap(struct process *p, uint64_t addr, uint64_t len);
 int     vma_mprotect(struct process *p, uint64_t addr, uint64_t len, uint32_t prot);
 

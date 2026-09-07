@@ -37,6 +37,10 @@ struct elf64_phdr {
 #define ELF_PF_W    2
 #define ELF_PF_R    4
 
+// See the W^X check below: the size ceiling for the one deliberate
+// exception to it.
+#define ELF_WX_EXCEPTION_MAX_BYTES (16ULL * 1024 * 1024)
+
 // Two magics are accepted: ELF's, and NeoOS's own NOX
 // (0x7F 'N' 'O' 'X') -- ELF's shape with three characters changed.
 // Everything from e_ident[4] on is identical ELF64, so a .nex file IS
@@ -113,11 +117,28 @@ int elf_load(const uint8_t *data, uint32_t size, uint64_t *pml4,
         }
 
         // W^X: a segment that is both writable and executable in the
-        // file is refused outright (no toolchain emits one; a crafted
-        // binary that does is rejected like Linux under lockdown).
+        // file is refused outright by default -- no toolchain used in
+        // this org emits one, and a crafted binary that does is
+        // rejected like Linux under lockdown.
+        //
+        // ONE deliberate, size-bounded exception: dotnet NativeAOT's
+        // unboxing stubs are genuinely self-patched at runtime with no
+        // mprotect() call (confirmed: instrumented sys_mprotect, zero
+        // calls before the crash this exception fixes), and its own
+        // linker script merges them into the writable data segment --
+        // real Linux allows this by default (W^X lockdown is an
+        // opt-in hardening feature there too, not the baseline).
+        // Bounded to ELF_WX_EXCEPTION_MAX_BYTES so this stays "one
+        // small, legitimate runtime's data+stub region", not a general
+        // amnesty for an attacker-sized RWX scratch mapping -- picked
+        // generously above what a real static-data segment needs
+        // (this milestone's own test binary: ~297KB) without being
+        // anywhere near "large enough to use as a JIT code cache."
         if ((ph->p_flags & ELF_PF_W) && (ph->p_flags & ELF_PF_X)) {
-            serial_write_string("[elf] load FAILED: W+X PT_LOAD segment\n");
-            return 0;
+            if (ph->p_memsz > ELF_WX_EXCEPTION_MAX_BYTES) {
+                serial_write_string("[elf] load FAILED: W+X PT_LOAD segment too large for the size-bounded exception\n");
+                return 0;
+            }
         }
 
         // Honour p_flags rather than mapping everything writable: a
@@ -159,6 +180,20 @@ int elf_load(const uint8_t *data, uint32_t size, uint64_t *pml4,
             }
 
             paging_map_into(pml4, page_addr, frame_phys, flags);
+        }
+
+        // Record this PT_LOAD segment's own POSIX-style prot for the
+        // caller's benefit -- see the elf_info field comment for why.
+        // seg_start/seg_end are already the page-aligned range every
+        // frame just above was mapped into.
+        if (out->num_segments < ELF_MAX_LOAD_SEGMENTS) {
+            uint32_t prot = 1;   // PROT_READ -- every loaded segment is
+            if (ph->p_flags & ELF_PF_W) { prot |= 2; }  // PROT_WRITE
+            if (ph->p_flags & ELF_PF_X) { prot |= 4; }  // PROT_EXEC
+            int i = out->num_segments++;
+            out->segments[i].start = seg_start;
+            out->segments[i].end   = seg_end;
+            out->segments[i].prot  = prot;
         }
     }
 
