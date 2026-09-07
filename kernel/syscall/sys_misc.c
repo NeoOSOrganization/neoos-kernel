@@ -104,6 +104,51 @@ int64_t sys_clock_gettime(struct syscall_args *a) {
 //
 // DIVERGES: the remaining-time argument is ignored, because nothing
 // here can interrupt a sleep partway and report a remainder yet.
+// clock_nanosleep(clockid, flags, request, remain) -- MSC-2. The
+// absolute-deadline sleep .NET / Go / musl's pthread_cond_timedwait
+// want. TIMER_ABSTIME (flag 1) treats `request` as an absolute time on
+// `clockid`; flags 0 is relative, identical to nanosleep. `remain` is
+// ignored on -EINTR, the same divergence nanosleep documents.
+#define TIMER_ABSTIME 1
+int64_t sys_clock_nanosleep(struct syscall_args *a) {
+    int      clk   = (int)a->a1;
+    int      flags = (int)a->a2;
+    uint64_t req_p = (uint64_t)a->a3;
+    if (!req_p) { return -EFAULT; }
+    if (clk != CLOCK_REALTIME && clk != CLOCK_MONOTONIC &&
+        clk != CLOCK_MONOTONIC_RAW) {
+        return -EINVAL;
+    }
+
+    struct k_timespec req;
+    if (copy_from_user(&req, (const void *)(uintptr_t)req_p, sizeof req) != 0) {
+        return -EFAULT;
+    }
+    if (req.tv_nsec < 0 || req.tv_nsec >= 1000000000L || req.tv_sec < 0) {
+        return -EINVAL;
+    }
+
+    uint64_t deadline_ticks;
+    if (flags & TIMER_ABSTIME) {
+        int64_t sec = req.tv_sec;
+        if (clk == CLOCK_REALTIME) { sec -= rtc_boot_epoch(); }
+        if (sec < 0) { return 0; }   // deadline already in the past
+        uint64_t ns = (uint64_t)sec * 1000000000ULL + (uint64_t)req.tv_nsec;
+        deadline_ticks = (ns + NS_PER_TICK - 1) / NS_PER_TICK;
+        if (deadline_ticks <= timer_ticks()) { return 0; }
+    } else {
+        uint64_t ns = (uint64_t)req.tv_sec * 1000000000ULL + (uint64_t)req.tv_nsec;
+        uint64_t ticks = (ns + NS_PER_TICK - 1) / NS_PER_TICK;
+        if (ticks == 0) { return 0; }
+        deadline_ticks = timer_ticks() + ticks;
+    }
+
+    struct waitq q;
+    waitq_init(&q);
+    int rc = waitq_sleep_timeout(&q, NULL, deadline_ticks);
+    return (rc == -EINTR) ? -EINTR : 0;
+}
+
 int64_t sys_nanosleep(struct syscall_args *a) {
     uint64_t uptr = (uint64_t)a->a1;
     if (!uptr) { return -EFAULT; }

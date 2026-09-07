@@ -19,6 +19,7 @@
 #include "mm/paging.h"
 #include "mm/heap.h"
 #include "mm/uaccess.h"
+#include "ipc/signal.h"
 #include "errno.h"
 
 // Stack budget for a small poll. Not a ceiling: past this the array is
@@ -150,6 +151,109 @@ int64_t sys_poll(struct syscall_args *a) {
     if (r >= 0) {
         missed = copy_to_user((void *)(uintptr_t)uptr, pfd, (uint64_t)n * sizeof(struct pollfd));
         if (missed > 0) { r = -EFAULT; }
+    }
+    if (pfd != small) { kfree(pfd); }
+    return r;
+}
+
+// ppoll(fds, nfds, timespec*, sigmask*, sigsetsize) -- MSC-2. Same core
+// as poll(), but the timeout is a struct timespec (ns) and an optional
+// signal mask is swapped in for the duration of the wait, via the same
+// mechanism as rt_sigsuspend (see docs/stdlib.md -- NeoOS applies it
+// around the call, not with Linux's exact atomicity, which is
+// observable only to a program racing a signal against the poll).
+int64_t sys_ppoll(struct syscall_args *a) {
+    uint64_t uptr    = a->a1;
+    unsigned n       = (unsigned)a->a2;
+    uint64_t ts_ptr  = a->a3;
+    uint64_t msk_ptr = a->a4;
+    uint64_t msksz   = a->frame->r8;
+
+    if (n > FD_TABLE_MAX) { return -EINVAL; }
+    if (msk_ptr && msksz != sizeof(sigset_t_k)) { return -EINVAL; }
+
+    int64_t deadline = (int64_t)UINT64_MAX;   // NULL timespec == block forever
+    if (ts_ptr) {
+        struct k_timespec ts;
+        if (copy_from_user(&ts, (const void *)(uintptr_t)ts_ptr, sizeof ts) != 0) {
+            return -EFAULT;
+        }
+        if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000L) {
+            return -EINVAL;
+        }
+        uint64_t ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+        if (ns == 0) {
+            deadline = 0;
+        } else {
+            uint64_t ticks = (ns + 9999999ULL) / 10000000ULL;   // 10 ms tick, round up
+            if (ticks == 0) { ticks = 1; }
+            deadline = (int64_t)(timer_ticks() + ticks);
+        }
+    }
+
+    if (n == 0) {
+        // Still an honest sleep-with-mask (pause(2) built on ppoll).
+        struct thread *t = current_thread();
+        int have_mask = 0;
+        if (msk_ptr) {
+            sigset_t_k m;
+            if (copy_from_user(&m, (const void *)(uintptr_t)msk_ptr, sizeof m) != 0) {
+                return -EFAULT;
+            }
+            t->saved_blocked = t->blocked;
+            t->in_sigsuspend = 1;
+            t->blocked = m & ~SIGSET_UNBLOCKABLE;
+            have_mask = 1;
+        }
+        struct waitq q; waitq_init(&q);
+        int rc = (deadline == 0) ? 0
+               : waitq_sleep_timeout(&q, 0, (uint64_t)deadline);
+        if (have_mask && rc != -EINTR) {
+            t->blocked = t->saved_blocked;
+            t->in_sigsuspend = 0;
+        }
+        return (rc == -EINTR) ? -EINTR : 0;
+    }
+    if (!uptr) { return -EFAULT; }
+
+    struct pollfd small[POLL_SMALL_FDS];
+    struct pollfd *pfd = small;
+    if (n > POLL_SMALL_FDS) {
+        pfd = kmalloc((uint64_t)n * sizeof(struct pollfd));
+        if (!pfd) { return -ENOMEM; }
+    }
+    if (copy_from_user(pfd, (const void *)(uintptr_t)uptr,
+                       (uint64_t)n * sizeof(struct pollfd)) != 0) {
+        if (pfd != small) { kfree(pfd); }
+        return -EFAULT;
+    }
+    for (unsigned i = 0; i < n; i++) { pfd[i].revents = 0; }
+
+    struct thread *t = current_thread();
+    int have_mask = 0;
+    if (msk_ptr) {
+        sigset_t_k m;
+        if (copy_from_user(&m, (const void *)(uintptr_t)msk_ptr, sizeof m) != 0) {
+            if (pfd != small) { kfree(pfd); }
+            return -EFAULT;
+        }
+        t->saved_blocked = t->blocked;
+        t->in_sigsuspend = 1;
+        t->blocked = m & ~SIGSET_UNBLOCKABLE;
+        have_mask = 1;
+    }
+
+    int64_t r = poll_core(pfd, n, deadline);
+
+    if (have_mask && r != -EINTR) {
+        t->blocked = t->saved_blocked;
+        t->in_sigsuspend = 0;
+    }
+    if (r >= 0) {
+        if (copy_to_user((void *)(uintptr_t)uptr, pfd,
+                         (uint64_t)n * sizeof(struct pollfd)) != 0) {
+            r = -EFAULT;
+        }
     }
     if (pfd != small) { kfree(pfd); }
     return r;

@@ -326,7 +326,13 @@
 #define SYS_EVENTFD2               123
 #define SYS_PRCTL                 124
 
+// MSC-2. ppoll (poll + timespec + atomic-ish sigmask), clock_nanosleep
+// (absolute-deadline sleep), close_range (bulk fd close).
+#define SYS_PPOLL                 125
+#define SYS_CLOCK_NANOSLEEP       126
+#define SYS_CLOSE_RANGE           127
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX              125
+#define SYS_MAX              128
 
 #endif

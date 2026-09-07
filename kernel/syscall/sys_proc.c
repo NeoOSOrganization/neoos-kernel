@@ -713,3 +713,28 @@ int64_t sys_prctl(struct syscall_args *a) {
 int64_t sys_eventfd2(struct syscall_args *a) {
     return eventfd_create((unsigned int)a->a1, (int)a->a2);
 }
+
+// ---- close_range (MSC-2) ----------------------------------------------
+//
+// close_range(first, last, flags) -- bulk fd close, every modern
+// posix_spawn/exec cleanup path uses it. CLOSE_RANGE_UNSHARE (2) is a
+// no-op (NeoOS fd tables are already per-process at exec).
+// CLOSE_RANGE_CLOEXEC (4) is -EINVAL: NeoOS has no close-on-exec.
+#define CLOSE_RANGE_UNSHARE 2
+#define CLOSE_RANGE_CLOEXEC 4
+
+int64_t sys_close_range(struct syscall_args *a) {
+    uint64_t first = a->a1;
+    uint64_t last  = a->a2;
+    uint64_t flags = a->a3;
+    if (flags & ~(uint64_t)CLOSE_RANGE_UNSHARE) { return -EINVAL; }
+    if (first > last) { return -EINVAL; }
+
+    struct process *p = current_proc();
+    if (!p) { return -ESRCH; }
+    if (last >= FD_TABLE_MAX) { last = FD_TABLE_MAX - 1; }
+    for (uint64_t fd = first; fd <= last; fd++) {
+        fd_table_close(p->fd_table, (int)fd);   // silent on an unused slot
+    }
+    return 0;
+}

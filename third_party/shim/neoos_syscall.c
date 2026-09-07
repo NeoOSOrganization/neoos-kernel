@@ -134,6 +134,9 @@
 #define NEO_SCHED_SETAFFINITY   122
 #define NEO_EVENTFD2            123
 #define NEO_PRCTL              124
+#define NEO_PPOLL              125
+#define NEO_CLOCK_NANOSLEEP    126
+#define NEO_CLOSE_RANGE        127
 
 // ---- Linux x86-64 numbers, as musl issues them ----------------------
 #define LX_READ              0
@@ -249,6 +252,9 @@
 #define LX_EVENTFD          284
 #define LX_EVENTFD2        290
 #define LX_PRCTL          157
+#define LX_PPOLL           271
+#define LX_CLOCK_NANOSLEEP 230
+#define LX_CLOSE_RANGE     436
 
 static long neo_strlen(const char *s) {
     long n = 0;
@@ -482,6 +488,12 @@ long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a
     case LX_EVENTFD:          return neo(NEO_EVENTFD2, a1, 0, 0, 0, 0, 0);
     case LX_EVENTFD2:         return neo(NEO_EVENTFD2, a1, a2, 0, 0, 0, 0);
     case LX_PRCTL:            return neo(NEO_PRCTL, a1, a2, a3, a4, a5, 0);
+
+    // MSC-2. ppoll passes the sigmask size in arg5; clock_nanosleep and
+    // close_range are straight forwards.
+    case LX_PPOLL:            return neo(NEO_PPOLL, a1, a2, a3, a4, a5, 0);
+    case LX_CLOCK_NANOSLEEP:  return neo(NEO_CLOCK_NANOSLEEP, a1, a2, a3, a4, 0, 0);
+    case LX_CLOSE_RANGE:      return neo(NEO_CLOSE_RANGE, a1, a2, a3, 0, 0, 0);
 
     default:
         // Not forwarded. This is the signal that a primitive belongs in

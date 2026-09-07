@@ -754,6 +754,41 @@ Only the no-op-safe subset is serviced; **everything else returns
   it; none of the common callers (musl, Go, .NET, systemd-style init)
   do.
 
+## `ppoll`, `clock_nanosleep`, `close_range` (MSC-2)
+
+```c
+#include <poll.h>
+int ppoll(struct pollfd *, nfds_t, const struct timespec *, const sigset_t *);
+#include <time.h>
+int clock_nanosleep(clockid_t, int flags, const struct timespec *, struct timespec *);
+#include <unistd.h>
+int close_range(unsigned int first, unsigned int last, unsigned int flags);
+```
+
+- **`ppoll`** is `poll` with a `struct timespec` timeout (rounded up to
+  the 10 ms tick, like every NeoOS timeout) and an optional signal
+  mask. The mask is swapped in for the duration of the wait via the
+  same mechanism as `rt_sigsuspend` — **not** with Linux's exact
+  atomicity. The difference is observable only to a program that races
+  a signal against entering the poll; the mask is otherwise applied
+  and restored correctly. `nfds == 0` is an honest masked sleep (what
+  `pause()` compiles to).
+- **`clock_nanosleep`** adds the absolute-deadline sleep
+  (`TIMER_ABSTIME`) NeoOS's relative `nanosleep` lacked —
+  `pthread_cond_timedwait`, .NET and Go timers use it. `CLOCK_MONOTONIC`
+  and `CLOCK_REALTIME` (the latter offset by the boot epoch);
+  `CLOCK_PROCESS_CPUTIME_ID` → `-EINVAL`. `remain` is ignored on
+  `-EINTR`, the same divergence `nanosleep` documents.
+- **`close_range(first, last, flags)`** closes every fd in the
+  inclusive range (silent on unused slots). `CLOSE_RANGE_UNSHARE` is a
+  no-op (NeoOS fd tables are already per-process); **`CLOSE_RANGE_CLOEXEC`
+  is `-EINVAL`** — there is no close-on-exec state to set.
+
+**Deferred to a later MSC pass:** `timerfd_*` and `signalfd4` — both
+need an fd-object plus a tick-driven expiry/pending-signal poke that
+NeoOS's thread-only timeout machinery does not have yet. `pselect6`
+and `epoll_pwait2` (the other atomic-sigmask variants) likewise.
+
 ## socketpair
 
 ```c
