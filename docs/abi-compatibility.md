@@ -1048,11 +1048,10 @@ bundled libc.
 correctly — no manual `-nostdlib`/explicit `crt1.o` juggling needed,
 unlike the freestanding toolchain. A genuinely well-formed, statically
 linked, correctly-addressed dotnet NativeAOT C# binary also links
-successfully against it (see `docs/superpowers/plans/
-2026-09-07-hosted-neoos-gcc.md`'s post-implementation notes for the
-full story) — though the resulting binary does not yet run
-(CoreCLR's own runtime startup crashes; a separate, substantial
-porting effort, not a toolchain gap).
+successfully against it and, as of the follow-up work below, **runs
+and prints correctly** — see `docs/superpowers/plans/
+2026-09-07-hosted-neoos-gcc.md`'s post-implementation notes and
+follow-up section for the full story.
 
 **Known, live limitation:** C++ exception handling (`throw`/`catch`)
 does not reliably work with this toolchain's required `-mcmodel=large`
@@ -1063,3 +1062,41 @@ NeoOS port needing real C++ exceptions will need to either avoid this
 toolchain's large-model requirement (not possible while `user.ld`
 places code at `0x200000000000`) or find/build an alternative unwind
 strategy. Plain C code and C++ without exceptions are unaffected.
+
+## Refresh — dotnet NativeAOT hello world runs (2026-09-07)
+
+The gap noted above is closed: a real dotnet NativeAOT C# binary now
+runs to completion on NeoOS, prints, and exits cleanly. Getting there
+needed three real kernel/linker fixes and seven new syscalls, all
+found by CoreCLR's own startup path one wall at a time (full
+root-cause narrative for each in `docs/superpowers/plans/
+2026-09-07-hosted-neoos-gcc.md`'s follow-up section):
+
+- **`userland/user.ld`**: `--gc-sections` (part of NativeAOT's own
+  link line) was discarding `crtn.o`'s `.init`/`.fini` closers and,
+  separately, the *entire* `.init_array`/`.fini_array` sections —
+  meaning every C++ global constructor in the binary silently never
+  ran. Both fixed with `KEEP()` plus explicitly `PROVIDE()`d boundary
+  symbols matching musl's exact expected names, rather than relying
+  on GNU ld's automatic per-section-name synthesis.
+- **`kernel/sched/proc.h`**: `USER_STACK_PAGES` raised from 4 pages
+  (16KB, sized for NeoOS's own small test binaries) to 2048 (8MiB,
+  Linux's typical default), which CoreCLR's startup genuinely needs
+  and NeoOS's stack (no grow-down auto-extension) does not provide
+  incrementally.
+- **Seven new syscalls**, all real primitives (documented in
+  `docs/stdlib.md`), not stubs: `sched_getaffinity`, `membarrier`
+  (backed by a genuine cross-CPU IPI broadcast,
+  `kernel/smp/membarrier.c`), `mlock`, `madvise`, `sysinfo`, `statfs`,
+  `get_mempolicy`.
+
+**Known-benign residue:** two `[shim] ENOSYS` lines (186, 309 — most
+likely `gettid`/`getcpu`-family calls) still appear around shutdown
+but do not affect the outcome. Not yet root-caused to a specific
+call, since the process already exits 0 either way; revisit if a
+future port needs whichever calls those numbers actually are.
+
+**Not yet attempted:** anything beyond a synchronous hello-world —
+sockets, threads, file I/O, or any real workload through NativeAOT.
+Each is likely to surface its own wall of missing syscalls the same
+way this milestone did, one at a time.
