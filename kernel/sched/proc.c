@@ -130,10 +130,19 @@ int thread_stack_alloc(struct process *p, uint64_t *out_top) {
     uint64_t top = thread_stack_top_for(slot);
     uint64_t *pml4 = (uint64_t *)phys_to_virt(p->pml4_phys);
 
-    for (int i = 0; i < USER_STACK_PAGES; i++) {
+    // Only the TOP few pages are mapped here. The rest of the 8MiB
+    // region is demand-paged through the VMA registered below, exactly
+    // like an mmap'd region -- see USER_STACK_PREPOPULATE_PAGES in
+    // proc.h for why eagerly mapping all 2048 was a bug and not just an
+    // inefficiency. A few pages up front rather than none keeps the
+    // entry stack (build_initial_stack pokes argv/envp/auxv in through
+    // the physmap, before this address space is ever loaded into CR3)
+    // and a new thread's first frames from having to fault at all.
+    for (int i = USER_STACK_PAGES - USER_STACK_PREPOPULATE_PAGES;
+         i < USER_STACK_PAGES; i++) {
         uint64_t frame = pmm_alloc(0);
         if (!frame) {
-            for (int j = 0; j < i; j++) {
+            for (int j = USER_STACK_PAGES - USER_STACK_PREPOPULATE_PAGES; j < i; j++) {
                 uint64_t v = top - (uint64_t)(USER_STACK_PAGES - j) * PMM_FRAME_SIZE;
                 paging_unmap_from(pml4, v, 1);
             }
@@ -288,12 +297,38 @@ static int build_user_address_space(const char *path, uint64_t *out_pml4_phys,
 #define AT_ENTRY  9
 #define AT_RANDOM 25
 
-// Writes `val` at user virtual address `uva` in the address space
-// rooted at pml4_phys, via the physmap. Returns 0 if the address is
-// not mapped, which for a stack page the caller just created would be
-// a bug rather than a user error.
-static int poke_user_u64(uint64_t pml4_phys, uint64_t uva, uint64_t val) {
+// Returns the physical address backing `uva`, mapping a fresh zeroed
+// frame first if nothing is there yet. Returns 0 only on out-of-memory.
+//
+// The pokes below build the entry stack through the physmap, because
+// the address space being built is not the one in CR3 and so cannot be
+// written through its own user addresses -- which also means no page
+// fault is ever taken for these writes, and vma_fault never gets a
+// chance to demand-page them. thread_stack_alloc pre-populates only
+// USER_STACK_PREPOPULATE_PAGES at the stack top, so anything the entry
+// vector needs below that has to be mapped here. Doing it on demand
+// rather than sizing the pre-population to "surely enough" is what
+// keeps a long argv/environment from silently failing the spawn.
+static uint64_t ensure_user_page(uint64_t pml4_phys, uint64_t uva) {
     uint64_t phys = paging_translate_in(pml4_phys, uva);
+    if (phys) { return phys; }
+
+    uint64_t frame = pmm_alloc(0);
+    if (!frame) { return 0; }
+    zero_frames(frame, 0);
+    if (paging_map_into((uint64_t *)phys_to_virt(pml4_phys), uva & ~0xFFFULL,
+                        frame, PAGE_WRITABLE | PAGE_NO_EXECUTE | PAGE_USER) != 0) {
+        pmm_free(frame, 0);
+        return 0;
+    }
+    return frame + (uva & 0xFFF);
+}
+
+// Writes `val` at user virtual address `uva` in the address space
+// rooted at pml4_phys, via the physmap. Returns 0 only if the page
+// could not be mapped (out of memory).
+static int poke_user_u64(uint64_t pml4_phys, uint64_t uva, uint64_t val) {
+    uint64_t phys = ensure_user_page(pml4_phys, uva);
     if (!phys) { return 0; }
     *(uint64_t *)phys_to_virt(phys) = val;
     return 1;
@@ -302,7 +337,7 @@ static int poke_user_u64(uint64_t pml4_phys, uint64_t uva, uint64_t val) {
 static int poke_user_bytes(uint64_t pml4_phys, uint64_t uva,
                            const uint8_t *src, uint64_t len) {
     for (uint64_t i = 0; i < len; i++) {
-        uint64_t phys = paging_translate_in(pml4_phys, uva + i);
+        uint64_t phys = ensure_user_page(pml4_phys, uva + i);
         if (!phys) { return 0; }
         *(uint8_t *)phys_to_virt(phys) = src[i];
     }
@@ -480,10 +515,32 @@ struct process *spawn_argv(const char *path, const struct spawn_args *args) {
         p->uid  = spawner->uid;
         p->gid  = spawner->gid;
     }
-    // A process with no spawner is the FIRST one -- init -- and
-    // proc_alloc zeroed it, so it is god by construction rather than by
-    // a special case naming PID 1.
-    p->parent_pid  = current_proc() ? current_proc()->pid : 0;
+    // A process with no spawner is either the FIRST one -- init, which
+    // proc_alloc zeroed so it is god by construction -- or a process the
+    // kernel spawned directly after init already exists (an SMP selftest
+    // looper). The latter must be parented to init: otherwise it is a
+    // child of nobody, init's wait4(-1) reap loop never collects it, and
+    // its whole address space stays pinned in the TLB deferred-free
+    // queue for the life of the system.
+    if (current_proc()) {
+        p->parent_pid = current_proc()->pid;
+    } else {
+        // proc_alloc has ALREADY put `p` in the process table, so when
+        // `p` IS init this lookup finds p itself -- and parenting init
+        // to its own pid made wait_scan match init as its own child, so
+        // init's final wait4(-1) slept forever instead of returning
+        // -ECHILD and powering the machine off. Every headless boot then
+        // ran to the full BOOT_TIMEOUT and the gauntlet lost its
+        // "[init] all entries exited" marker on 15 runs out of 15.
+        struct process *init = proc_find(1);
+        if (init) {
+            if (init != p) { p->parent_pid = 1; }
+            else           { p->parent_pid = 0; }   // this IS init
+            proc_put(init);
+        } else {
+            p->parent_pid = 0;                      // truly first
+        }
+    }
     if (current_proc()) { p->pgid = current_proc()->pgid; p->sid = current_proc()->sid; }
 
     uint64_t user_stack_top;
@@ -1259,6 +1316,17 @@ void process_exit(int code) {
         }
     }
 
+    // A process exiting is the moment orphaned deferred frames pile up
+    // (this process's whole address space is about to be deferred, and
+    // so was every earlier unreaped exit's). We are still a normal
+    // runnable thread here -- no lock held, interrupts enable-able, not
+    // yet ZOMBIE -- which is a safe place to drain the backlog with a
+    // full shootdown. Without this, a burst of exits on an otherwise
+    // idle system (the SMP selftest's loopers) can hold thousands of
+    // frames out of pmm with nothing scheduled to release them, and a
+    // concurrent allocation fails spuriously.
+    tlb_drain_if_backlogged();
+
     thread_exit_self(code);
 }
 
@@ -1350,6 +1418,7 @@ struct wait_ctx {
 static void wait_scan(struct process *p, void *v) {
     struct wait_ctx *c = (struct wait_ctx *)v;
     if (c->zombie || c->stopped_pid) { return; }   // already have a result
+    if (p == c->self) { return; }   // a process is never its own child
     if (p->parent_pid != c->self->pid) { return; }
     if (c->pid > 0  && p->pid  != c->pid)          { return; }
     if (c->pid == 0 && p->pgid != c->self->pgid)   { return; }

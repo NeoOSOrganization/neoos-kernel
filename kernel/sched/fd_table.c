@@ -355,17 +355,28 @@ int fd_table_dup(struct fd_table *dst, struct fd_table *src) {
             dst_slots[slot_idx] = *s;   // position included: the child
                                         // inherits the offset, then the
                                         // two diverge (docs/stdlib.md)
-            // The copy duplicates the OBJECT POINTER, so the child owes
-            // it a reference of its own. Without this the first close on
-            // either side frees something the other still holds -- and
-            // for a pipe it would also miscount the ends, so the child
-            // closing its copy would look like the last writer going
-            // away.
-            file_dup(&dst_slots[slot_idx]);
             dst_b->slot_count++;
         }
 
         spin_unlock_irqrestore(&src_b->lock, flags);
+
+        // The copies duplicate the OBJECT POINTER, so the child owes
+        // each one a reference of its own. Without this the first close
+        // on either side frees something the other still holds -- and
+        // for a pipe it would also miscount the ends, so the child
+        // closing its copy would look like the last writer going away.
+        //
+        // Taken with the bucket lock RELEASED, like every other
+        // file_dup/file_close in this file. file_dup reaches the
+        // object's own lock, and those rank BELOW LOCK_RANK_FDTABLE
+        // (21) -- an epoll set's is LOCK_RANK_POLLHEAD (18) -- so
+        // duplicating under the bucket lock is a descending acquire.
+        // It panicked the kernel outright ("rank inversion
+        // acquiring=epoll holding=fd_bucket") the first time anything
+        // forked a process that held an epoll fd.
+        for (int slot_idx = 0; slot_idx < FD_TABLE_SLOTS; slot_idx++) {
+            if (dst_slots[slot_idx].in_use) { file_dup(&dst_slots[slot_idx]); }
+        }
     }
 
     return 1;

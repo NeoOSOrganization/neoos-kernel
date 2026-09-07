@@ -37,4 +37,9 @@ void tlb_flush_deferred(uint64_t pml4_phys);
 void ipi_tlb_handler(void);
 void tlb_shootdown_selftest(void);
 
+// See tlb.c. Drain the deferred-free queue via a full shootdown when a
+// backlog of frames only a full shootdown can release has built up.
+int  tlb_deferred_backlog(void);
+void tlb_drain_if_backlogged(void);
+
 #endif

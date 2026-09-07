@@ -340,13 +340,24 @@ void thread_wait_off_cpu(struct thread *t);
 // guard page into genuinely unmapped memory ~1.5MiB below the mapped
 // region, confirmed via direct instrumentation of vma_fault's
 // cr2/rc. Raising the size is the fix: NeoOS's stack is a fixed-size
-// PRE-MAPPED region (thread_stack_alloc maps every page eagerly, up
-// front), not a lazily-grown one, so this is paid in real physical
-// frames per process at spawn time, same as Linux pre-faulting -- 8MiB
-// is a deliberate, generous but bounded choice, not "as large as
-// possible": THREAD_STACK_STRIDE below scales with it, and every
-// thread slot in every process pays this stride whether it uses a
-// deep stack or not.
+// region, not a lazily-GROWN one -- there is no "this looks like a
+// stack, extend it downward" case, so the region has to be big enough
+// up front. 8MiB is a deliberate, generous but bounded choice, not "as
+// large as possible": THREAD_STACK_STRIDE below scales with it, and
+// every thread slot in every process pays this stride of ADDRESS SPACE
+// whether it uses a deep stack or not.
+//
+// It is not, however, paid in physical frames. The region is fixed in
+// SIZE but demand-paged in CONTENT: thread_stack_alloc maps only
+// USER_STACK_PREPOPULATE_PAGES at the top and registers a VMA covering
+// the whole thing, so vma_fault populates the rest on first touch like
+// any other anonymous mapping. Mapping all 2048 pages eagerly is what
+// this used to do, and it cost 8MiB of real frames per thread at
+// creation: on a 117MiB machine, nine threads of one process (plus the
+// boot self-test processes) exhausted pmm outright, which surfaced as
+// thread_create returning -EAGAIN and as live threads taking SIGSEGV
+// with "VMA covers it but no PTE" -- vma_fault with no frame left to
+// hand out. See the concurrent-request-crash spec.
 //
 // This only affects a process's MAIN thread (thread_stack_alloc) and
 // NeoOS's own native thread_create() path. A pthread_create()'d thread
@@ -355,6 +366,13 @@ void thread_wait_off_cpu(struct thread *t);
 // does not own it"), which is a normal lazily-faulted MMAP_BASE-region
 // VMA like any other anonymous mapping.
 #define USER_STACK_PAGES 2048
+
+// How much of that region thread_stack_alloc maps up front. Enough that
+// a brand-new thread does not fault on its first few frames, and enough
+// for build_initial_stack's entry vector in the common case -- it maps
+// anything further on demand for itself (poke_user_*/ensure_user_page),
+// so this is a tuning number, not a correctness bound.
+#define USER_STACK_PREPOPULATE_PAGES 4
 #define USER_STACK_TOP 0x0000700000000000ULL
 
 

@@ -218,6 +218,26 @@ void ipi_tlb_handler(void) {
     lapic_send_eoi();
 }
 
+// True when the deferred queue has built up frames that only a full
+// shootdown will release -- the fast array is full, or anything has
+// spilled to the overflow list. Used by callers that are in a safe
+// context to drain it (no lock, interrupts enable-able) but would not
+// otherwise issue a shootdown: a process exiting on a lightly-loaded
+// system, the idle loop.
+int tlb_deferred_backlog(void) {
+    uint64_t lf = spin_lock_irqsave(&deferred_lock);
+    int backlog = (deferred_overflow != 0) || (deferred_n >= DEFER_MAX);
+    spin_unlock_irqrestore(&deferred_lock, lf);
+    return backlog;
+}
+
+// Drain the deferred queue via a full shootdown IF a backlog has built
+// up. Safe to call from any context with no lock held and interrupts
+// enable-able. A no-op when there is nothing stuck.
+void tlb_drain_if_backlogged(void) {
+    if (tlb_deferred_backlog()) { tlb_shootdown(0); }
+}
+
 void tlb_shootdown(uint64_t pml4_phys) {
     if (lock_held_depth() != 0) {
         lock_panic("tlb_shootdown with a lock held", "tlb", 0);

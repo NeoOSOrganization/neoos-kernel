@@ -143,6 +143,35 @@ struct thread *thread_alloc(struct process *p) {
     return t;
 }
 
+// Undoes a thread_alloc() for a thread that never ran and never will,
+// because the rest of its construction failed (out of memory for its
+// kernel stack, typically).
+//
+// thread_alloc does not just allocate: it PUBLISHES the thread on
+// p->threads, in p->thread_table, and in p->live_threads, and only
+// thread_exit_self ever takes it back off again -- which a thread that
+// was never enqueued can never reach. So the two callers that used to
+// bail out after a failed thread_alloc were both wrong, in opposite
+// directions: clone_task's bare thread_put() freed the struct while
+// p->threads still pointed at it (a use-after-free for every later
+// signal-delivery walk of that list), and thread_create's bare `return
+// 0` freed nothing at all, leaving the process with a live_threads
+// count that could never fall to zero -- so it could never finish
+// exiting. Both are on the out-of-memory path, which is exactly the
+// path a machine under the frame pressure this was found under takes.
+static void thread_alloc_undo(struct process *p, struct thread *t) {
+    if (p) {
+        uint64_t f = spin_lock_irqsave(&p->lock);
+        if (p->thread_table) { thread_table_remove(p->thread_table, t); }
+        struct thread **pp = &p->threads;
+        while (*pp && *pp != t) { pp = &(*pp)->proc_next; }
+        if (*pp) { *pp = t->proc_next; }
+        __atomic_sub_fetch(&p->live_threads, 1, __ATOMIC_ACQ_REL);
+        spin_unlock_irqrestore(&p->lock, f);
+    }
+    thread_put(t);
+}
+
 // Builds a kernel thread WITHOUT queueing it anywhere. Split out so a
 // caller that wants the thread on a specific CPU -- or on no CPU at all
 // -- can say so up front. Queueing on one CPU and moving it afterwards
@@ -342,6 +371,7 @@ struct thread *thread_create(uint64_t entry, uint64_t arg) {
 
     uint64_t kstack_phys = pmm_alloc(KERNEL_STACK_ORDER);
     if (!kstack_phys) {
+        thread_alloc_undo(p, t);
         thread_stack_free(p, slot);
         return 0;
     }
@@ -410,7 +440,7 @@ struct thread *clone_task(struct syscall_frame *frame, uint64_t child_stack,
 
     uint64_t kstack_phys = pmm_alloc(KERNEL_STACK_ORDER);
     if (!kstack_phys) {
-        thread_put(t);
+        thread_alloc_undo(p, t);
         return 0;
     }
     zero_frames(kstack_phys, KERNEL_STACK_ORDER);

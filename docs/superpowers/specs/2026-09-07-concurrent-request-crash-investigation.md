@@ -192,30 +192,168 @@ implemented — B alone fixes the observed failure and is the safer
 minimal change. A stays on the table if an orphan source appears that B
 can't keep up with.
 
-### Secondary finding (not yet fixed) — -smp 2 thread-create EAGAIN
+### -smp 2 pmm-exhaustion — RESOLVED (2026-09-07, session bef89f7c)
 
-With the leak fixed, `mmstress` at **-smp 2** still intermittently hits
-`[mmstress] FAIL pthread_create idx=7 rc=-11` (`-EAGAIN`) — the 8th
-worker. `clone_task` returns 0 (→ `-EAGAIN`) from one of: `thread_alloc`
-kmalloc failure, or `pmm_alloc(KERNEL_STACK_ORDER)` (an **order-2 /
-16 KiB contiguous** block) failing. pmm has ~26 000 free frames at the
-time, so the likely cause is **buddy-allocator fragmentation**: 8
-threads hammering order-0 mmap/munmap leave no free order-2 block for a
-kernel stack. Newly *visible* (the test now runs long enough to reach
-that state), not newly caused. -smp 1 and -smp 4 are clean. Worth its
-own investigation — a kernel-stack allocator that can't fall back to
-non-contiguous pages, or a small reserve pool, is the likely fix.
+With the committed fix, `mmstress` (pure mm) is green at **-smp 1 and
+-smp 4** and the gauntlet is 15/15. **-smp 2 still fails**, either as
+`[mmstress] FAIL pthread_create idx=7 rc=-11` (`-EAGAIN` — `clone_task`
+returns 0 because `pmm_alloc` gave it nothing) or as `mmstress` (a low
+pid, e.g. 4) taking `signal=0xb` (SIGSEGV from `vma_fault` getting no
+frame). Instrumentation showed the true state at the failure:
+**`pmm free_frames == 0`** — genuine exhaustion, not fragmentation as
+first guessed.
+
+**What was learned this session (do not re-derive):**
+
+1. The 6 processes `kernel/smp/smp_selftest.c:248` spawns
+   (`spawn("/usr/tests/looper.nex")` ×6) are the frame hogs. Each is
+   ~2064 frames. They are spawned from a kernel thread, so
+   `proc.c`'s `p->parent_pid = current_proc() ? ... : 0` gave them
+   **parent 0 — nobody's child**. They exit, become zombies, and are
+   **never reaped**: `init`'s `wait4(-1)` only matches its own
+   children, and even init's *own* children were not being reaped
+   during a `wait <path>` INITTAB entry because that entry did a plain
+   `wait4(pid)` (userland/init.c). So every looper's whole address
+   space sat pinned in the TLB deferred-free queue.
+
+2. Three fixes were written (uncommitted, in the working tree,
+   debug prints already stripped):
+   - **`userland/init.c`**: the `MODE_WAIT` entry now loops
+     `wait4(-1)` until its target pid returns, reaping every other
+     child (and orphan) that exits while it blocks.
+   - **`kernel/sched/proc.c` (`spawn`)**: a kernel-spawned process,
+     when init already exists, is parented to pid 1 instead of 0 —
+     so init's reap loop collects it.
+   - **`kernel/smp/tlb.c` + `tlb.h`**: `tlb_deferred_backlog()` and
+     `tlb_drain_if_backlogged()` (full `tlb_shootdown(0)` iff the
+     deferred queue has a backlog). `process_exit` calls
+     `tlb_drain_if_backlogged()` right before `thread_exit_self` —
+     a safe context (normal runnable thread, no lock, IF-able).
+
+3. **These fixes reduced but did NOT eliminate the -smp 2 failure.**
+   Verified with prints: `tlb_drain_if_backlogged` *does* fire on
+   looper exits and drains the queue to 0 each time (`n: 0x100 → 0`).
+   Yet `pmm free_frames` still momentarily hits 0 *before* the drain,
+   around when the first 2 loopers exit while `mmstress`'s 8 threads
+   are demand-faulting hardest. Also observed: `init`'s reap loop does
+   not actually get scheduled to run until the very end of the
+   `mmstress` run (all `[init-dbg]` reap lines bunched at the end) —
+   under 8-thread load at -smp 2, init (pid 1, blocked in `wait4`)
+   starves, so the userland reap fix can't help in time either.
+
+**Open question for the next session:** at -smp 2, is this genuine
+peak demand (8 threads × up-to-256-page regions + 6 loopers
+transiently exceeding ~30 000 frames — unlikely by the arithmetic), or
+are `mmstress` worker `munmap`s not actually recycling frames fast
+enough at this CPU count (deferred-queue drain not keeping up because
+only 2 CPUs and the shootdown serialises on `shootdown_busy`)? Next
+steps: (a) instrument `total_free_frames` + `deferred_n` + live-VMA
+page count on a timer to see the real curve; (b) check whether
+`mmstress`'s own `vma_tlb_settle` shootdowns are being starved by
+`shootdown_busy` contention at -smp 2; (c) consider making
+`tlb_drain_if_backlogged` also run from a context that isn't
+starvable — a dedicated kreclaim kthread woken by `tlb_defer_free`
+when the backlog crosses a threshold; (d) decide whether `mmstress`'s
+256-page size is simply too aggressive for a 2-CPU box and the test
+should scale its region sizes to `nproc`.
+
+### Root cause: thread stacks were eagerly committed, 8MiB each
+
+The open question above ("genuine peak demand, or munmaps not
+recycling?") had a third answer that neither branch guessed: **genuine
+peak demand, but from thread STACKS, not from the mmstress workload at
+all.**
+
+`thread_stack_alloc` (`kernel/sched/proc.c`) mapped every one of
+`USER_STACK_PAGES` = 2048 pages up front — **8MiB of real frames per
+thread, at creation**. mmstress's 9 threads (main + 8 workers) therefore
+demanded 18 432 frames of a 29 938-frame (117MiB) machine, while the 6
+`smp_selftest` loopers were still holding ~12 384. It fails at the 9th
+thread, deterministically, which is exactly the observed
+`FAIL pthread_create idx=7`.
+
+Evidence that settled it (the earlier "not fragmentation, genuine
+exhaustion" reading was right; the earlier attribution to the deferred
+queue was not):
+
+- The failing syscall is NeoOS's own `thread_create`, **not `clone`** —
+  mmstress links libneoos, whose `pthread_create` is not musl's, which
+  is why the errno arrived as a raw `-11` rather than musl's `+11`.
+  `clone_task`'s kernel-stack `pmm_alloc(2)` was never reached.
+- A per-order free-list histogram at the failure printed
+  `free=0` with **every** order's list empty — not fragmentation.
+- The other face of the same exhaustion is the `[fault-audit] VMA=
+  covered … no PTE` SIGSEGV: `vma_fault`'s `pmm_alloc(0)` returning 0.
+  Same signature as the .NET crash.
+
+**Fix:** the stack region stays 8MiB (it is fixed-size, not grow-down,
+so it has to be big enough up front) but is now **demand-paged in
+content**: `thread_stack_alloc` maps only `USER_STACK_PREPOPULATE_PAGES`
+(4) at the top and relies on the VMA it already registers, so
+`vma_fault` populates the rest on first touch like any other anonymous
+mapping. Address space per thread is unchanged; physical commitment per
+thread drops from 8MiB to 16KiB. The guard page below the region is
+still outside the VMA, so an overflow still SIGSEGVs, and the full-size
+VMA still answers `pthread_getattr_np`'s `mremap` probe correctly.
+
+`build_initial_stack`'s `poke_user_*` helpers now map a page on demand
+instead of failing on an unmapped one — they write through the physmap
+into an address space that is not in CR3, so they never take a fault and
+`vma_fault` never gets a chance to serve them. That keeps a long
+argv/environment from being silently bounded by the pre-populated head.
+
+### Three further bugs found on the way, all fixed
+
+1. **`fd_table_dup` inverted the lock rank on fork.** It called
+   `file_dup()` while holding the rank-21 `fd_bucket` lock; for an
+   epoll fd that reaches `epoll_dup` → `o->lock`, rank 18. Forking a
+   process that held an epoll fd panicked the kernel outright
+   (`[lock] PANIC: rank inversion acquiring=epoll holding=fd_bucket`).
+   Now the slots are copied under the lock and the references taken
+   after releasing it — the pattern `fd_table_close` and
+   `fd_table_dup2` already used. This is spec suspect #4, confirmed
+   and closed.
+2. **`thread_create` leaked a published thread** when the kernel-stack
+   `pmm_alloc` failed: `thread_alloc` puts the thread on `p->threads`,
+   in `p->thread_table` and in `p->live_threads`, and only
+   `thread_exit_self` ever takes it back off — which a thread that was
+   never enqueued cannot reach. `live_threads` could therefore never
+   fall to zero and the process could never finish exiting.
+3. **`clone_task` had the same bug in the opposite direction**: a bare
+   `thread_put(t)` freed the struct while `p->threads` still pointed at
+   it — a use-after-free for every later signal-delivery walk of that
+   list. Both now use a shared `thread_alloc_undo()`. Both are on the
+   out-of-memory path, i.e. exactly the path this workload takes.
+
+### Verification
+
+- `mmstress` **ALL PASSED at -smp 1, 2 and 4**, with every `MMS_*` knob
+  on (`epoll=1 brk=1 fork=1`) — including the `MMS_EPOLL + MMS_BRK`
+  combination recorded below as failing, and the all-knobs build that
+  exposed the `fd_table_dup` panic.
+- Repeat runs at -smp 2 (the flaky one): 3/3 green.
 
 ### Escalation status (`userland/mmstress.c` `MMS_*` knobs)
 
 - `MMS_EPOLL` (pipe + `epoll_ctl` ADD/DEL + `epoll_wait` + close churn
   on one shared epoll fd), `MMS_BRK` (inert — `sys_brk` is a stub),
   `MMS_FORK` (fork-COW phase). Each knob **alone** passes at -smp 4.
-- `MMS_EPOLL + MMS_BRK` together fails at -smp 4 with the same
-  frame-exhaustion signature — i.e. "epoll churn + one more thread"
-  drives pmm down faster than the workers can recycle. Overlaps the
-  -smp 2 EAGAIN finding; both point at allocator behaviour under this
-  many threads, not at a correctness race. Not yet bisected further.
+- `MMS_EPOLL + MMS_BRK` together USED to fail at -smp 4 with the same
+  frame-exhaustion signature — "epoll churn + one more thread". Same
+  family as the -smp 2 exhaustion, and the same root cause: each extra
+  churn thread cost another eagerly-committed 8MiB stack. Green since
+  the demand-paging fix above.
+- All three knobs on (`MMS_EPOLL + MMS_BRK + MMS_FORK`) then exposed
+  the `fd_table_dup` lock-rank panic, since fixed. Green now at -smp
+  1/2/4.
+
+### Not yet done: verify against the actual .NET webtest
+
+The committed fix is verified only against `mmstress`. The next step
+the user asked for is to re-run the ASP.NET concurrent-request load
+(200 requests at concurrency 8, `-smp 4`) that originally crashed, and
+confirm it now survives — the Phase 4 acceptance bar. That has not
+been done yet.
 
 ## Phase 1 — Root-cause investigation (no fixes yet)
 

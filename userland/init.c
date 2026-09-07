@@ -171,7 +171,18 @@ int main(void) {
     for (int e = 0; e < nents; e++) {
         if (ents[e].mode == MODE_WAIT) {
             int pid = launch(e);
-            if (pid > 0) { int st; wait4(pid, &st, 0, 0); }
+            // Reap EVERY child while blocking, not just this one. Other
+            // processes (kernel-spawned self-tests, orphans reparented
+            // to us) become zombies during a long-running wait entry,
+            // and a plain wait4(pid) leaves them unreaped -- which pins
+            // each one's whole address space in the kernel's TLB
+            // deferred-free queue until this wait returns. wait4(-1)
+            // until our target pid comes back drains them as they exit.
+            while (pid > 0) {
+                int st;
+                int got = wait4(-1, &st, 0, 0);
+                if (got < 0 || got == pid) { break; }
+            }
         } else if (launch(e) > 0) {
             launched++;
         }

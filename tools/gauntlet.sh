@@ -29,7 +29,16 @@ set -u
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)" || exit 2
 
 N=${1:-15}
-CONC=${2:-3}
+# CONC defaults to half the host's cores rather than a fixed 3. Each
+# guest is -smp 4, but its vCPUs are idle (hlt) for most of a run, so
+# the binding constraint is the handful of threads actually executing,
+# not 4x the guest count. Half the cores leaves room for the host and
+# keeps the TCG runs off each other's backs -- oversubscribing is what
+# produces the "host-contention flake" signatures below, so this is
+# deliberately not nproc.
+_HOSTCPUS=$( (nproc 2>/dev/null) || echo 4 )
+CONC=${2:-$(( _HOSTCPUS / 2 > 2 ? _HOSTCPUS / 2 : 2 ))}
+[ "$CONC" -gt "$N" ] && CONC=$N
 DIR=build/gauntlet
 WORK=$DIR/work
 mkdir -p "$DIR"
@@ -101,20 +110,28 @@ echo "pgauntlet: N=$N CONC=$CONC, ${#MARKERS[@]} required markers"
 
 boot_one() {   # $1 = tag
   local t=$1
-  cp build/neoos.iso "$WORK/iso.$t"
+  # The disks are WRITTEN by the write selftest, so each run needs its
+  # own copy. They stay RAW: qcow2 copy-on-write overlays were tried
+  # here and are a trap -- allocating a cluster on first write is slow
+  # enough that the emulated ATA controller blows the driver's BSY
+  # timeout, which surfaced as '[ata] write FAILED: BSY never cleared'
+  # on 13 runs out of 15 and reads exactly like host contention. The
+  # copy they were meant to avoid costs 35ms for both images out of
+  # page cache, against a 25s run. The ISO is never written, so every
+  # run shares the one file read-only.
   cp build/disk.img  "$WORK/d1.$t"
   cp build/disk2.img "$WORK/d2.$t"
   # KVM=1 matches the Makefile's opt-in: 2.3x faster, and true
   # parallelism instead of TCG's round-robin vCPUs. The default stays
   # TCG/Nehalem -- the flake signatures below are tuned for it.
   timeout $TIMEOUT qemu-system-x86_64 $GAUNTLET_MACHINE -smp 4 -boot order=d -vga std \
-    -cdrom "$WORK/iso.$t" \
+    -cdrom build/neoos.iso \
     -drive file="$WORK/d1.$t",format=raw -drive file="$WORK/d2.$t",format=raw \
     -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
     -audiodev none,id=ac97null -device AC97,audiodev=ac97null,addr=0x6 \
     -no-reboot -display none -serial file:"$WORK/serial.$t" \
     > /dev/null 2>"$WORK/qemu.err.$t"
-  rm -f "$WORK/iso.$t" "$WORK/d1.$t" "$WORK/d2.$t"
+  rm -f "$WORK/d1.$t" "$WORK/d2.$t"
 }
 
 # echoes reasons; return 0 clean / 1 flaky (retryable) / 2 hard
@@ -155,6 +172,8 @@ for i in $(seq 1 "$N"); do
 done
 wait
 
+# First pass: classify every run, and collect the retryable ones.
+RETRY=()
 for i in $(seq 1 "$N"); do
   out=$(check_log "$WORK/serial.$i"); rc=$?
   grep '^missing: ' <<<"$out" | sed 's/^missing: //' >> "$MISSES"
@@ -164,14 +183,32 @@ for i in $(seq 1 "$N"); do
     echo "run $i: HARD FAIL"; sed 's/^/    /' <<<"$out"
     cp "$WORK/serial.$i" "$DIR/pgauntlet.serial.run$i"; hardfail=1; continue
   fi
-  echo "run $i: flaky/known fail -> retry solo"; sed 's/^/    /' <<<"$out"
-  retried=$((retried+1))
-  boot_one "r$i"
-  out=$(check_log "$WORK/serial.r$i"); rc=$?
-  if [ $rc -eq 0 ]; then echo "run $i: PASS (on retry)"; pass=$((pass+1)); continue; fi
-  echo "run $i: FAIL after retry ($rc)"; sed 's/^/    /' <<<"$out"
-  cp "$WORK/serial.r$i" "$DIR/pgauntlet.serial.run$i"; hardfail=1
+  echo "run $i: flaky/known fail -> queued for retry"; sed 's/^/    /' <<<"$out"
+  RETRY+=("$i")
 done
+
+# Retries in parallel, at HALF the concurrency. They used to run one at
+# a time, strictly after every other run -- so a gauntlet whose flakes
+# were caused by host contention paid for them twice over, serially. The
+# reduced concurrency is the part of "solo" that actually mattered: a
+# retry needs a quieter machine than the first pass, not an empty one.
+if [ "${#RETRY[@]}" -gt 0 ]; then
+  retried=${#RETRY[@]}
+  rconc=$(( CONC / 2 > 1 ? CONC / 2 : 1 ))
+  running=0
+  for i in "${RETRY[@]}"; do
+    boot_one "r$i" &
+    running=$((running+1))
+    if [ "$running" -ge "$rconc" ]; then wait -n; running=$((running-1)); fi
+  done
+  wait
+  for i in "${RETRY[@]}"; do
+    out=$(check_log "$WORK/serial.r$i"); rc=$?
+    if [ $rc -eq 0 ]; then echo "run $i: PASS (on retry)"; pass=$((pass+1)); continue; fi
+    echo "run $i: FAIL after retry ($rc)"; sed 's/^/    /' <<<"$out"
+    cp "$WORK/serial.r$i" "$DIR/pgauntlet.serial.run$i"; hardfail=1
+  done
+fi
 
 if [ -s "$MISSES" ]; then
   echo "--- per-marker flakiness over $N run(s) ---"
