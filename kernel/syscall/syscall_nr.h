@@ -319,7 +319,14 @@
 #define SYS_SCHED_GETATTR         121
 #define SYS_SCHED_SETAFFINITY      122
 
+// MSC-1. eventfd2(initval, flags) -- a 64-bit counter behind an fd, the
+// wake primitive for libuv/.NET/tokio event loops
+// (kernel/ipc/eventfd.c). prctl(option, ...) -- the no-op-safe subset
+// (PR_SET_NAME/GET_NAME touch comm; the rest are accepted-inert).
+#define SYS_EVENTFD2               123
+#define SYS_PRCTL                 124
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX              123
+#define SYS_MAX              125
 
 #endif

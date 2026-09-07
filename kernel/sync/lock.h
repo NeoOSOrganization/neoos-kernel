@@ -51,6 +51,9 @@
 // once, so the order between them is arbitrary.
 #define LOCK_RANK_FUTEX       9
 #define LOCK_RANK_PIPE       10
+#define LOCK_RANK_EVENTFD    LOCK_RANK_PIPE  // same shape as a pipe: leaf
+                                             // IPC object, taken before
+                                             // pollhead/waitq
 // One rank for the socket layer's per-object guards and one for its
 // global bound-socket table. Two, not one, because demux walks the
 // table and then locks the socket it found.

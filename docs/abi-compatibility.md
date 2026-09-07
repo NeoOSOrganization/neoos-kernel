@@ -88,6 +88,8 @@ builds; it is not part of the stable ABI.)
 | 1/6 | write/read | `write`/`read` | implemented, now via a file-ops table |
 | 2 | yield | `sched_yield` | implemented — real EEVDF yield since SCH-1 (charge a full slice, drop behind everyone) |
 | 110–122 | nice / {get,set}priority / sched_{get,set}scheduler / sched_{get,set}param / sched_get_priority_{max,min} / sched_rr_get_interval / sched_{set,get}attr / sched_setaffinity | same names | implemented (SCH-1 T5). `SCHED_FIFO`/`RR`/`DEADLINE` → `EINVAL` (SCH-3/4); `sched_setaffinity` recorded, enforced at SCH-2; `sched_setattr.sched_runtime` = EEVDF slice. See `docs/stdlib.md`. |
+| 123 | eventfd2 | `eventfd2`/`eventfd` | implemented (MSC-1) — 64-bit counter fd, `EFD_SEMAPHORE`/`EFD_NONBLOCK`; `EFD_CLOEXEC` inert. |
+| 124 | prctl | `prctl` | implemented (MSC-1) — no-op-safe subset (`PR_SET/GET_NAME` → `comm`; the rest accepted-inert); everything else `EINVAL`. |
 | 3 | getpid | `getpid` | implemented |
 | 4 | spawn | *(none — NeoOS extension)* | implemented |
 | 5 | wait | *(NeoOS wait-by-pid)* | implemented |

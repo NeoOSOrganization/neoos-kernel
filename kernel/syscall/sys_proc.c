@@ -15,6 +15,7 @@
 #include "ipc/signal.h"
 #include "ipc/futex.h"
 #include "ipc/pipe.h"
+#include "ipc/eventfd.h"
 #include "drivers/char/timer.h"
 #include "mm/vma.h"
 #include "mm/paging.h"
@@ -628,4 +629,87 @@ int64_t sys_membarrier(struct syscall_args *a) {
     default:
         return -EINVAL;
     }
+}
+
+// ---- prctl (MSC-1) --------------------------------------------------
+//
+// The no-op-safe subset. PR_SET_NAME / PR_GET_NAME touch the process
+// comm; everything else here is accepted and ignored (NeoOS has no
+// THP, no ptrace dumpable state, a root-all capability model, and no
+// parent-death signal yet). Everything not listed -> -EINVAL. See
+// docs/stdlib.md for the divergences.
+
+#define PR_SET_PDEATHSIG        1
+#define PR_GET_PDEATHSIG        2
+#define PR_GET_DUMPABLE         3
+#define PR_SET_DUMPABLE         4
+#define PR_SET_NAME           15
+#define PR_GET_NAME           16
+#define PR_CAPBSET_READ       23
+#define PR_CAPBSET_DROP       24
+#define PR_SET_CHILD_SUBREAPER 36
+#define PR_GET_CHILD_SUBREAPER 37
+#define PR_SET_NO_NEW_PRIVS   38
+#define PR_GET_NO_NEW_PRIVS   39
+#define PR_SET_THP_DISABLE    41
+#define PR_GET_THP_DISABLE    42
+
+int64_t sys_prctl(struct syscall_args *a) {
+    int option = (int)a->a1;
+    struct process *p = current_proc();
+
+    switch (option) {
+    case PR_SET_NAME: {
+        if (!p || !a->a2) { return -EFAULT; }
+        char name[16];
+        for (unsigned i = 0; i < sizeof(name); i++) { name[i] = 0; }
+        // Linux reads up to 16 bytes and NUL-terminates at 15.
+        if (copy_from_user(name, (const void *)(uintptr_t)a->a2, 16) != 0) {
+            // A short buffer near the end of a mapping is not fatal to
+            // Linux either; copy what we can.
+        }
+        name[15] = 0;
+        for (unsigned i = 0; i < sizeof(p->comm); i++) {
+            p->comm[i] = (i < sizeof(name)) ? name[i] : 0;
+        }
+        return 0;
+    }
+    case PR_GET_NAME: {
+        if (!p || !a->a2) { return -EFAULT; }
+        char name[16];
+        for (unsigned i = 0; i < sizeof(name); i++) {
+            name[i] = (i < sizeof(p->comm)) ? p->comm[i] : 0;
+        }
+        name[15] = 0;
+        if (copy_to_user((void *)(uintptr_t)a->a2, name, 16) != 0) { return -EFAULT; }
+        return 0;
+    }
+    case PR_GET_DUMPABLE:          return 1;   // always dumpable
+    case PR_GET_NO_NEW_PRIVS:      return 0;
+    case PR_GET_THP_DISABLE:       return 0;
+    case PR_GET_CHILD_SUBREAPER:   return 0;
+    case PR_GET_PDEATHSIG:
+        if (a->a2 && copy_to_user((void *)(uintptr_t)a->a2, &(int){0}, sizeof(int)) != 0) {
+            return -EFAULT;
+        }
+        return 0;
+    case PR_CAPBSET_READ:          return 1;   // root-all model: every cap present
+
+    case PR_SET_DUMPABLE:
+    case PR_SET_NO_NEW_PRIVS:
+    case PR_SET_THP_DISABLE:
+    case PR_SET_CHILD_SUBREAPER:
+    case PR_SET_PDEATHSIG:
+    case PR_CAPBSET_DROP:
+        return 0;   // accepted, inert
+
+    default:
+        return -EINVAL;
+    }
+}
+
+// ---- eventfd2 (MSC-1) ---------------------------------------------------
+
+int64_t sys_eventfd2(struct syscall_args *a) {
+    return eventfd_create((unsigned int)a->a1, (int)a->a2);
 }

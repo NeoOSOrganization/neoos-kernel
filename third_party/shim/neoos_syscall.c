@@ -132,6 +132,8 @@
 #define NEO_SCHED_SETATTR       120
 #define NEO_SCHED_GETATTR       121
 #define NEO_SCHED_SETAFFINITY   122
+#define NEO_EVENTFD2            123
+#define NEO_PRCTL              124
 
 // ---- Linux x86-64 numbers, as musl issues them ----------------------
 #define LX_READ              0
@@ -244,6 +246,9 @@
 #define LX_SCHED_SETAFFINITY 203
 #define LX_SCHED_SETATTR   314
 #define LX_SCHED_GETATTR   315
+#define LX_EVENTFD          284
+#define LX_EVENTFD2        290
+#define LX_PRCTL          157
 
 static long neo_strlen(const char *s) {
     long n = 0;
@@ -470,6 +475,13 @@ long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a
     case LX_SCHED_SETATTR:   return neo(NEO_SCHED_SETATTR, a1, a2, a3, 0, 0, 0);
     case LX_SCHED_GETATTR:   return neo(NEO_SCHED_GETATTR, a1, a2, a3, a4, 0, 0);
     case LX_SCHED_SETAFFINITY: return neo(NEO_SCHED_SETAFFINITY, a1, a2, a3, 0, 0, 0);
+
+    // MSC-1. eventfd(initval) is eventfd2(initval, 0). prctl forwards
+    // unchanged -- the kernel accepts the no-op-safe options and
+    // -EINVALs the rest.
+    case LX_EVENTFD:          return neo(NEO_EVENTFD2, a1, 0, 0, 0, 0, 0);
+    case LX_EVENTFD2:         return neo(NEO_EVENTFD2, a1, a2, 0, 0, 0, 0);
+    case LX_PRCTL:            return neo(NEO_PRCTL, a1, a2, a3, a4, a5, 0);
 
     default:
         // Not forwarded. This is the signal that a primitive belongs in

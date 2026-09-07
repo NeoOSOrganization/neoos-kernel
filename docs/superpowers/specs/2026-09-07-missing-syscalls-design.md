@@ -281,7 +281,7 @@ Tier 2.
 
 | batch | contents | unblocks | effort |
 |---|---|---|---|
-| **MSC-1** | `sched_setaffinity`, `getcpu` shim, `prctl` no-op ops, `eventfd2` | .NET Server GC; the SocketAsyncEngine wake path (concurrent-request investigation depends on this) | small |
+| ~~**MSC-1**~~ ✅ | `sched_setaffinity` + `getcpu` shim (landed with SCH-1 T5, `b80026a`); `prctl` no-op ops + `eventfd2` (`kernel/ipc/eventfd.c`) landed MSC-1. Gauntlet 15/15. | .NET Server GC; the SocketAsyncEngine wake path | small |
 | **MSC-2** | `timerfd_*`, `signalfd4`, `close_range`, `clock_nanosleep`, `ppoll` | Go/Node/.NET event loops, `posix_spawn` | medium |
 | **MSC-3** | `*at` completeness, `statx`, `utimensat`, `renameat2`, `fallocate`, `fsync`/`fdatasync` real flush, OFD `fcntl` locks | git, cargo, dpkg, SQLite, tar, make | medium |
 | **MSC-4** | `pidfd_*`, `clone3`, `setres[ug]id`/`getgroups`/`setgroups`, `prlimit64`/`getrlimit`/`setrlimit`, `capget`/`capset` (root-all model) | su/sudo/sshd, modern process libs | medium |

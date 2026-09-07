@@ -703,6 +703,57 @@ the read end returns `-EBADF`.
 - **`pipe()` is library code over `pipe2()`**, exactly as musl does it
   on architectures where Linux dropped the legacy call.
 
+## `eventfd` / `eventfd2` (MSC-1)
+
+```c
+#include <sys/eventfd.h>
+int eventfd(unsigned int initval, int flags);   // -> eventfd2(initval, 0)
+```
+
+A 64-bit counter behind a file descriptor — the "wake the poll loop"
+primitive for libuv/Node, .NET's `SocketAsyncEngine`, tokio, and Go's
+netpoller fallback. Linux-shaped (`kernel/ipc/eventfd.c`, modelled on
+the pipe):
+
+- `read` of ≥ 8 bytes returns the counter and zeroes it, or blocks
+  while it is 0 (`EAGAIN` if `EFD_NONBLOCK`). In `EFD_SEMAPHORE` mode
+  it returns `1` and decrements.
+- `write` of ≥ 8 bytes adds to the counter, or blocks while the add
+  would exceed `0xfffffffffffffffe` (`EAGAIN` if non-blocking). A
+  write of `0xffffffffffffffff` is `-EINVAL`.
+- `poll` reports `POLLIN` when the counter is non-zero, `POLLOUT` when
+  it is below the ceiling. Registered on the object's own poll head,
+  so `poll`/`epoll` wake precisely.
+- **`EFD_CLOEXEC` is accepted but inert** — NeoOS has no close-on-exec
+  machinery yet, the same divergence `pipe2`'s `O_CLOEXEC` has.
+- A read/write of fewer than 8 bytes is `-EINVAL` (Linux's behaviour).
+
+## `prctl` (MSC-1)
+
+```c
+#include <sys/prctl.h>
+int prctl(int option, ...);
+```
+
+Only the no-op-safe subset is serviced; **everything else returns
+`-EINVAL`** (notably `PR_SET_SECCOMP` — NeoOS has no seccomp).
+
+- **`PR_SET_NAME` / `PR_GET_NAME`** read/write the process `comm`
+  (16 bytes, NUL-terminated at 15). NeoOS has no per-*thread* name, so
+  a multithreaded process shares one `comm` — a divergence from Linux,
+  where the name is per-task.
+- **`PR_GET_DUMPABLE` → 1**, `PR_GET_NO_NEW_PRIVS` / `PR_GET_THP_DISABLE`
+  / `PR_GET_CHILD_SUBREAPER` / `PR_GET_PDEATHSIG` → 0,
+  `PR_CAPBSET_READ` → 1 (root-all capability model — every capability
+  is present).
+- **`PR_SET_DUMPABLE`, `PR_SET_NO_NEW_PRIVS`, `PR_SET_THP_DISABLE`,
+  `PR_SET_CHILD_SUBREAPER`, `PR_SET_PDEATHSIG`, `PR_CAPBSET_DROP`** are
+  accepted and ignored — NeoOS has no THP, no ptrace-dumpable state,
+  no parent-death signal, and no capability bounding set to drop from.
+  A program that sets one and later depends on its effect will not get
+  it; none of the common callers (musl, Go, .NET, systemd-style init)
+  do.
+
 ## socketpair
 
 ```c
