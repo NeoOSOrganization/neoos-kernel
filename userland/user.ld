@@ -37,7 +37,49 @@ SECTIONS
 
     .text ALIGN(4K) : { *(.text .text.*) }
     .rodata ALIGN(4K) : { *(.rodata .rodata.*) }
-    .data ALIGN(4K) : { *(.data .data.*) }
+
+    /* dotnet NativeAOT's .init/.fini are 1-byte placeholders (it does
+       not use the traditional ELF DT_INIT/DT_FINI mechanism at all),
+       and libbootstrapper.o's InitializeRuntime() writes into that
+       placeholder byte at runtime with no mprotect() call first
+       (confirmed: instrumented sys_mprotect, zero calls before the
+       crash; confirmed further by reading the actual section headers
+       -- .text ends at EXACTLY the faulting address, with .init
+       starting there). Left unlisted, GNU ld's orphan placement
+       grouped them with .text (read+exec only, no write) instead of
+       with .data -- which this SDK's own object files mark WAX
+       (write+alloc+exec) by design, the real signal that its actual
+       reference linker script groups .init/.fini with the writable
+       data region, not with .text. */
+
+
+    /* dotnet NativeAOT's unboxing stubs: genuinely both executable
+       (SHF_EXECINSTR -- confirmed: merging *(__unbox) here makes ld
+       warn "LOAD segment with RWX permissions") AND self-patched at
+       runtime with no mprotect() call first (confirmed: instrumented
+       sys_mprotect, zero calls before the crash reached here) -- a
+       real W+X requirement, not a placement mistake on either side.
+       Merged into .data (already writable) rather than kept as its
+       own output section, so the resulting W+X region stays bounded
+       to .data+__unbox's combined size -- tens of KB for this test
+       binary -- rather than granting W+X to the whole multi-hundred-KB
+       .text region. Requires manually defining __start___unbox/
+       __stop___unbox below: GNU ld only auto-synthesizes those for an
+       output section whose OWN name is the bare section name, which
+       merging into .data forgoes -- but libbootstrapper.o's
+       InitializeRuntime() references them directly, so something must
+       supply them. Requires kernel/elf.c to accept a bounded W+X
+       PT_LOAD segment for this to actually run -- see
+       docs/superpowers/plans/2026-09-07-hosted-neoos-gcc.md's
+       post-implementation notes for that deliberate policy decision. */
+    .data ALIGN(4K) : {
+        *(.init .fini)
+        *(.data .data.*)
+        . = ALIGN(4K);
+        PROVIDE(__start___unbox = .);
+        *(__unbox)
+        PROVIDE(__stop___unbox = .);
+    }
 
     /* .tdata and .tbss MUST be named here, and in this order. Left as
        orphan sections the linker placed both at the SAME address --
