@@ -38,19 +38,19 @@ SECTIONS
     .text ALIGN(4K) : { *(.text .text.*) }
     .rodata ALIGN(4K) : { *(.rodata .rodata.*) }
 
-    /* dotnet NativeAOT's .init/.fini are 1-byte placeholders (it does
-       not use the traditional ELF DT_INIT/DT_FINI mechanism at all),
-       and libbootstrapper.o's InitializeRuntime() writes into that
-       placeholder byte at runtime with no mprotect() call first
-       (confirmed: instrumented sys_mprotect, zero calls before the
-       crash; confirmed further by reading the actual section headers
-       -- .text ends at EXACTLY the faulting address, with .init
-       starting there). Left unlisted, GNU ld's orphan placement
-       grouped them with .text (read+exec only, no write) instead of
+    /* .init/.fini here are the ordinary musl crt convention (crti.o
+       opens each, various objects contribute a middle fragment,
+       crtn.o closes each with pop/ret) -- NOT, as an earlier version
+       of this comment claimed, a NativeAOT placeholder byte that
+       InitializeRuntime() patches at runtime. That was checked
+       directly by disassembling libbootstrapper.o's main() (which
+       inlines InitializeRuntime()): it never references .init/.fini
+       at all. Left unlisted, GNU ld's orphan placement grouped
+       .init/.fini with .text (read+exec only, no write) instead of
        with .data -- which this SDK's own object files mark WAX
-       (write+alloc+exec) by design, the real signal that its actual
-       reference linker script groups .init/.fini with the writable
-       data region, not with .text. */
+       (write+alloc+exec) by design, matching the fact that .init/
+       .fini need to be writable-at-link-time output but are pure
+       code otherwise; .data was the natural place to route them. */
 
 
     /* dotnet NativeAOT's unboxing stubs: genuinely both executable
@@ -73,7 +73,31 @@ SECTIONS
        docs/superpowers/plans/2026-09-07-hosted-neoos-gcc.md's
        post-implementation notes for that deliberate policy decision. */
     .data ALIGN(4K) : {
-        *(.init .fini)
+        /* .init and .fini are each assembled from MULTIPLE object
+           files' contributions into ONE callable function per name
+           (crti.o's opening instruction + every object's middle
+           fragment + crtn.o's closing pop/ret) -- concatenated in
+           link order. A single combined wildcard `*(.init .fini)`
+           does NOT concatenate all .init fragments followed by all
+           .fini fragments: GNU ld walks input files in link order and
+           for each file pulls sections in the NAME order given, so it
+           interleaves crti.o's one-byte .init with crti.o's one-byte
+           .fini, then the next object's .init with its .fini, and so
+           on -- neither resulting byte stream is a valid function.
+           Confirmed directly via -Wl,-Map: crti.o's one-byte opening
+           (which defines the _init/_fini symbols) was placed, but
+           crtn.o's one-byte closing (`pop %rax; ret`, anonymous --
+           nothing else references it) was DROPPED by --gc-sections
+           (NativeAOT's own link line passes it), listed in the map at
+           address 0x0. So _init was really just a bare `push %rax`
+           with no `ret`: crt1 called it, execution fell through into
+           whatever bytes followed in .data, and eventually hit one
+           that happened to decode as `hlt` -- a ring-3 #GP (hlt is
+           privileged). KEEP() is the actual fix: it marks a matched
+           input section as a GC root so --gc-sections cannot drop it
+           even though nothing in the kept graph relocates to it. */
+        KEEP(*(.init))
+        KEEP(*(.fini))
         *(.data .data.*)
         . = ALIGN(4K);
         PROVIDE(__start___unbox = .);

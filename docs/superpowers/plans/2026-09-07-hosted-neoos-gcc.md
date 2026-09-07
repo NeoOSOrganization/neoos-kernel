@@ -608,21 +608,69 @@ runtime with no `mprotect()`) and `__unbox` into the writable `.data`
 output section — GNU ld's orphan-section placement had grouped them
 with `.text` (read+exec only) since `user.ld` had no rule for them.
 
-**Real, measurable progress, not yet a working binary.** With both
-fixes in place, the original page fault at the `.init` boundary is
-gone — confirmed via the QEMU interrupt trace, the fault the binary
-now hits is a **different, later** one: a `#GP` (general protection,
-vector 13) inside `.data`'s own address range (`RIP=0x20000015e00e`,
-14 bytes past `.data`'s start), meaning execution now falls through
-`.init`+`.fini`'s two placeholder bytes into raw `.data` content
-instead of returning cleanly. This points at a further `.init`/`.fini`
-layout or content expectation `libbootstrapper.o` has that this
-linker script doesn't yet match exactly — not investigated further
-this session (severe diminishing returns without a byte-level look at
-what `InitializeRuntime()` actually expects to find/write there,
-likely requiring either disassembling `libbootstrapper.o` directly or
-finding Microsoft's own reference linker script for this SDK to
-compare against). A concrete, well-scoped next step for whoever
-continues this: read `libbootstrapper.o`'s `InitializeRuntime()`
-disassembly around the `.init`/`.fini` references directly, rather
-than continuing to infer intent from crash addresses alone.
+With both fixes above in place, the original page fault at the
+`.init` boundary was gone, but a **different, later** fault appeared:
+a `#GP` (vector 13) inside `.data`'s own address range
+(`RIP=0x20000015e00e`, 14 bytes past `.data`'s start). The original
+theory here — that `libbootstrapper.o`'s `InitializeRuntime()` writes
+into a `.init` placeholder byte at runtime — was **wrong**, and was
+disproven directly: disassembling `main()` (which inlines
+`InitializeRuntime()`) shows it only *reads* the `__start___unbox`/
+`__stop___unbox` boundary symbols (to hand the range to
+`RhRegisterOSModule`), and never references `.init`/`.fini` at all.
+
+The real mechanism, found via `-Wl,-Map`: `.init`/`.fini` are each
+assembled from **multiple objects' contributions concatenated**
+(`crti.o`'s one-byte opening, defining the `_init`/`_fini` symbols,
+followed by `crtn.o`'s one-byte closing `pop %rax; ret`) — the normal
+musl/GCC crt convention. NativeAOT's own link line passes
+`-Wl,--gc-sections`, and `crtn.o`'s closing fragment is anonymous
+(nothing relocates to it, only `crti.o`'s opening byte is reachable
+via the `_init`/`_fini` symbols) — so gc-sections silently **dropped
+it**. `_init` was left as a bare `push %rax` with no `ret`; musl's
+crt1 called it, execution fell through into whatever bytes followed
+in `.data`, and eventually hit one that happened to decode as `hlt`
+— a ring-3 `#GP` (`hlt` is privileged). Fixed in `userland/user.ld` by
+wrapping both in `KEEP()` (`*(.init .fini)` → `KEEP(*(.init))
+KEEP(*(.fini))`), which marks them as GC roots gc-sections cannot
+drop even though nothing in the retained relocation graph points at
+them. Confirmed via the same `-Wl,-Map`: crtn.o's fragments now land
+at their expected addresses, and the assembled bytes are
+`push %rax; pop %rax; ret` for both `_init` and `_fini`.
+
+With that fixed, the `#GP` was gone, but the binary still crashed —
+this time with a plain `SIGSEGV` (`wait4` status `0xb`) and no
+interrupt-trace evidence pointing at corrupted code, only a `#PF`
+(not-present, write, user) at `cr2` about 1.5MiB below the main
+thread's stack top, which `vma_fault()` correctly refused (no VMA
+covers it — NeoOS's stack has no grow-down auto-extension; a miss
+there is just `SIGSEGV` by design). Root cause: `USER_STACK_PAGES`
+(`kernel/sched/proc.h`) was **4 pages — 16KB** — sized for NeoOS's own
+small hand-written test binaries, and CoreCLR's startup (RhInitialize
+/ GC init / the JIT-less interpreter's own C++ call depth) blew
+through it in one large stack allocation that jumped straight past
+the single guard page (no incremental stack probing touched it on the
+way down) into genuinely unmapped memory. Raised to 2048 pages
+(8MiB), matching Linux's typical default main-thread stack size. This
+only affects a process's main thread and NeoOS's native
+`thread_create()` path — a `pthread_create()`'d thread (`sys_clone`)
+uses the caller's own musl-`mmap()`'d stack, a normal lazily-faulted
+VMA, untouched by this constant.
+
+**Real, measurable progress: the binary no longer crashes.** With all
+three fixes in place (the two above plus the VMA/W^X pair from
+earlier in this section), the hello-world binary runs to completion
+with a clean exit and no signal — but exits with code `-1`, matching
+exactly `main()`'s own disassembled failure path (`RhInitialize`
+and/or `RhRegisterOSModule` returning false skips `__managed__Main`
+entirely and returns `-1`). "Hello from NeoOS!" has not yet printed.
+The next concrete step for whoever continues this: determine *why*
+CoreCLR's own runtime initialization (`RhInitialize`/
+`RhRegisterOSModule`, both defined in `libRuntime.WorkstationGC.a`,
+neither disassembled yet) is failing — this is a distinct
+investigation from the linker/stack bugs above, likely needing either
+disassembly of those two functions to find what syscall/primitive
+they depend on that NeoOS doesn't yet provide, or a way to surface
+whatever diagnostic CoreCLR would normally emit on this failure path
+(its error/assert output may be routed through EventPipe, which this
+build links as `libeventpipe-disabled.a`).

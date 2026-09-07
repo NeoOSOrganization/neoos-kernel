@@ -312,7 +312,33 @@ int thread_wake(struct thread *t, enum thread_state from);
 // freeing that stack; thread_wake() does it for the wake path.
 void thread_wait_off_cpu(struct thread *t);
 
-#define USER_STACK_PAGES 4
+// 8MiB (2048 pages), matching Linux's typical default main-thread stack
+// size. Used to be 4 pages (16KB) -- fine for NeoOS's own small,
+// hand-written test binaries, but nowhere near enough for a real
+// C++ runtime: dotnet NativeAOT's CoreCLR startup (RhInitialize / GC
+// init / the JIT-less interpreter's own C++ call depth) overflowed it,
+// and because NeoOS's stack has no grow-down auto-extension (see
+// vma_fault_locked -- a miss is just SIGSEGV, there is no "this looks
+// like a stack, map another page" case), the single large stack
+// allocation that overflowed it jumped straight past the one-page
+// guard page into genuinely unmapped memory ~1.5MiB below the mapped
+// region, confirmed via direct instrumentation of vma_fault's
+// cr2/rc. Raising the size is the fix: NeoOS's stack is a fixed-size
+// PRE-MAPPED region (thread_stack_alloc maps every page eagerly, up
+// front), not a lazily-grown one, so this is paid in real physical
+// frames per process at spawn time, same as Linux pre-faulting -- 8MiB
+// is a deliberate, generous but bounded choice, not "as large as
+// possible": THREAD_STACK_STRIDE below scales with it, and every
+// thread slot in every process pays this stride whether it uses a
+// deep stack or not.
+//
+// This only affects a process's MAIN thread (thread_stack_alloc) and
+// NeoOS's own native thread_create() path. A pthread_create()'d thread
+// (sys_clone) never reaches here -- clone_task() uses the CALLER's own
+// musl-mmap'd stack address directly ("musl mmap'd this stack; NeoOS
+// does not own it"), which is a normal lazily-faulted MMAP_BASE-region
+// VMA like any other anonymous mapping.
+#define USER_STACK_PAGES 2048
 #define USER_STACK_TOP 0x0000700000000000ULL
 
 
