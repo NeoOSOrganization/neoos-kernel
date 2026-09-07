@@ -16,6 +16,7 @@
 #include "mm/uaccess.h"
 #include "mm/vma.h"
 #include "sched/proc.h"
+#include "arch/cpu_local.h"
 #include "ipc/signal.h"
 
 static const char *exception_names[32] = {
@@ -184,6 +185,25 @@ static void isr_handler_inner(struct registers *regs) {
 
         uint64_t cr2 = 0;
         __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+
+        // Concurrent-request-crash investigation (Phase 1c): one line
+        // per ring-3 fatal fault, rate-limited. Non-perturbing -- it
+        // only fires on the dying path.
+        {
+            static volatile int usrflt_n;
+            if (__atomic_fetch_add(&usrflt_n, 1, __ATOMIC_RELAXED) < 24) {
+                struct thread *ft = current_thread();
+                serial_write_string("[usrflt] cpu=");
+                serial_write_hex64((uint64_t)(this_cpu() - &cpus[0]));
+                serial_write_string(" tid=");
+                serial_write_hex64(ft ? (uint64_t)ft->tid : 0);
+                serial_write_string(" vec="); serial_write_hex64(regs->vector_number);
+                serial_write_string(" err="); serial_write_hex64(regs->error_code);
+                serial_write_string(" cr2="); serial_write_hex64(cr2);
+                serial_write_string(" rip="); serial_write_hex64(regs->rip);
+                serial_write_string("\n");
+            }
+        }
 
         int sig = SIGSEGV, code = SI_KERNEL;
         uint64_t addr = 0;

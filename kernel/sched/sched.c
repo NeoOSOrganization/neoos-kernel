@@ -485,8 +485,11 @@ void schedule(void) {
     //
     // Cached per CPU because WRMSR is expensive and the common case is
     // that nothing changed: two kernel threads in a row, or one thread
-    // preempted and resumed. Nothing else writes IA32_FS_BASE, so the
-    // cache cannot go stale behind our back.
+    // preempted and resumed. arch_prctl(ARCH_SET_FS) also writes
+    // IA32_FS_BASE directly -- and MUST update this cache when it does
+    // (kernel/syscall/sys_mem.c), or the fast path below skips a
+    // genuinely needed reload for the next thread whose fs_base equals
+    // the stale cached value.
     if (next->fs_base != c->fs_base_loaded) {
         c->fs_base_loaded = next->fs_base;
         wrmsr(MSR_FS_BASE, next->fs_base);

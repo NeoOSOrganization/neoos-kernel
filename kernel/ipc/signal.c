@@ -3,7 +3,9 @@
 #include "drivers/char/serial.h"
 #include "errno.h"
 #include "mm/paging.h"
+#include "mm/vma.h"
 #include "arch/isr.h"
+#include "arch/cpu_local.h"
 #include "arch/cpu.h"
 
 int signal_default_action(int sig) {
@@ -729,10 +731,50 @@ static void sc_to_registers(struct registers *r, struct sigcontext_64 *sc) {
 // Raises a synchronous fault signal and delivers it immediately: unlike
 // an asynchronous signal there is nowhere to return to, since
 // re-executing the faulting instruction would just fault again.
+// PTE audit at fault time (concurrent-request-crash investigation,
+// Phase 1c). When a user thread is about to take a fatal SIGSEGV on a
+// user address, dump what the page tables and the VMA list actually
+// say about that address -- this distinguishes "VMA says mapped but
+// PTE clear" (a lost/racy map, or a premature unmap on another CPU)
+// from "no VMA at all" (a wild pointer -- the corruption is inside the
+// process's own bookkeeping). Rate-limited so a process that
+// re-faults in a loop cannot bury the log. Runs only on the dying
+// path, so it does not perturb hot-path timing.
+static void fault_pte_audit(struct process *p, struct thread *t, uint64_t addr) {
+    static volatile int emitted;
+    if (__atomic_load_n(&emitted, __ATOMIC_RELAXED) >= 16) { return; }
+    __atomic_fetch_add(&emitted, 1, __ATOMIC_RELAXED);
+
+    int cpu = (int)(this_cpu() - &cpus[0]);
+    uint64_t phys = p->pml4_phys ? paging_translate_in(p->pml4_phys, addr) : 0;
+    int covered = vma_range_mapped(p, addr & ~0xFFFULL, 1);
+
+    serial_write_string("[fault-audit] cpu="); serial_write_hex64((uint64_t)cpu);
+    serial_write_string(" pid="); serial_write_hex64((uint64_t)p->pid);
+    serial_write_string(" tid="); serial_write_hex64((uint64_t)t->tid);
+    serial_write_string(" addr="); serial_write_hex64(addr);
+    serial_write_string(" pml4="); serial_write_hex64(p->pml4_phys);
+    serial_write_string(" pte_phys="); serial_write_hex64(phys);
+    serial_write_string(covered ? " VMA=covered" : " VMA=none");
+    if (covered && phys == 0) {
+        serial_write_string("  <<< VMA covers it but no PTE -- racy unmap / lost map");
+    } else if (!covered && phys != 0) {
+        serial_write_string("  <<< PTE present but no VMA -- stale mapping / wild write target");
+    } else if (!covered && phys == 0) {
+        serial_write_string("  <<< wild pointer -- corruption is in userspace bookkeeping");
+    }
+    serial_write_string("\n");
+}
+
 void signal_raise_fault(struct registers *regs, int sig, int code, uint64_t addr) {
     struct thread *t = current_thread();
     struct process *p = t ? t->proc : 0;
     if (!p) { return; }   // caller falls back to the kernel dump
+
+    if (sig == SIGSEGV && addr && addr < USER_ADDR_LIMIT &&
+        p->actions[sig].handler == SIG_DFL) {
+        fault_pte_audit(p, t, addr);
+    }
 
     struct siginfo info;
     for (unsigned i = 0; i < sizeof(info); i++) { ((uint8_t *)&info)[i] = 0; }

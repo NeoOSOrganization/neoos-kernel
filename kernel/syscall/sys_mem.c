@@ -140,6 +140,16 @@ int64_t sys_arch_prctl(struct syscall_args *a) {
         // running right now and expects the change to take effect
         // before the syscall returns, not at its next context switch.
         wrmsr(MSR_FS_BASE, addr);
+        // AND keep schedule()'s per-CPU FS_BASE cache coherent. Without
+        // this the cache holds a value the MSR no longer has, and the
+        // next thread switched onto this CPU whose fs_base happens to
+        // equal the stale cache is skipped by the "nothing changed"
+        // fast path -- and runs with THIS thread's TLS base. Two
+        // threads then read/write one __thread storage area: the
+        // concurrent-request-crash investigation's suspect #3, made
+        // real by the comment in sched.c that said this could not
+        // happen.
+        this_cpu()->fs_base_loaded = addr;
         return 0;
     }
     if ((int)a->a1 == ARCH_GET_FS) {

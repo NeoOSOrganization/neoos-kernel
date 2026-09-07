@@ -350,9 +350,20 @@ struct thread *thread_create(uint64_t entry, uint64_t arg) {
                         + (PMM_FRAME_SIZE << KERNEL_STACK_ORDER);
 
     // Same layout spawn() builds, including the arg slot.
+    //
+    // The user RSP is user_stack_top - 8, NOT user_stack_top. The
+    // kernel enters `entry` via iretq (kernel_thread_trampoline), i.e.
+    // as if by a jump, but `entry` is an ordinary SysV function
+    // (libneoos's thread_trampoline) whose prologue is compiled
+    // expecting (rsp % 16) == 8 at entry -- the state right after a
+    // `call`. thread_stack_top_for(slot) is page-aligned (rsp % 16 ==
+    // 0), so without this bias the first `movaps`/`movdqa` against a
+    // 16-aligned stack slot #GPs. spawn()'s main thread does NOT need
+    // this: its entry is _start, whose contract is (rsp % 16) == 0,
+    // which build_initial_stack() already establishes.
     uint64_t *sp = (uint64_t *)kstack_top;
     *(--sp) = arg;
-    *(--sp) = user_stack_top;
+    *(--sp) = user_stack_top - 8;
     *(--sp) = entry;
     *(--sp) = (uint64_t)kernel_thread_trampoline;
     *(--sp) = 0; // rbp
