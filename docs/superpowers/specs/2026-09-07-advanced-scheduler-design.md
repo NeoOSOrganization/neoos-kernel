@@ -150,7 +150,44 @@ Every thread carries one; group scheduling (SCH-5) adds one per
 
 ---
 
-## SCH-1 — EEVDF fair-class core
+## SCH-1 — EEVDF fair-class core   ✅ DONE (2026-09-07)
+
+**Landed** in commits `5f45a8f` (T1 scaffolding), `39664f3` (T2+T3
+virtual time + pick), `bcf2167` (T4 one-shot timer), `b80026a` (T5
+ABI), plus `1b1d6ef` (the `lib/rbtree` prerequisite). Gauntlet 15/15 ×3
+at CONC=3.
+
+**Carried simplifications** (first items of SCH-2 / a later "EEVDF
+polish" pass):
+
+- **`place_entity` lag decay is clamp-only** — the saved `vlag` is
+  clamped to `±calc_delta_fair(max(2·slice, 10 ms))` and V-shift
+  compensated, but there is no PELT-style exponential decay toward 0
+  over sleep time. A task that sleeps briefly and one that sleeps for
+  minutes come back with the same (clamped) lag.
+- **`fair_slice_remaining_ns` does not compute time-to-next-eligible.**
+  The one-shot is armed for `min(slice_left, 10 ms)`; a task becoming
+  eligible sooner than that is caught at the next tick, not exactly
+  when it becomes eligible. Bounded by one slice / 10 ms.
+- **Cross-CPU renice is lazy** — a nice/policy change to a thread that
+  is not the caller is recorded on `se` and applied at its next
+  `enqueue_entity`, not pushed into the owning CPU's runqueue
+  synchronously. (Needs SCH-2's `task_rq` + double-lock.)
+- **`sched_setaffinity` is recorded, not enforced** — `cpus_allowed`
+  is stored but placement/stealing ignore it until SCH-2.
+- **No wake-preemption IPI across CPUs** — a task woken onto another
+  CPU with an earlier deadline does not preempt that CPU's current
+  task until its next tick (same-CPU wake-preempt via
+  `fair_entity_tick` only). SCH-2 territory.
+- **`SCHED_BATCH` hint (`se->batch_hint`) is stored but not yet read**
+  by a wake-preemption path (there is no cross-CPU one; the same-CPU
+  tick path does not special-case it). Wire it when SCH-2 adds
+  `check_preempt_wakeup`.
+- **The latency selftest (p99 < 200 µs) is not implemented** — it
+  needs a userland `sched_test.nex` wired into the gauntlet
+  (Makefile/embedfs plumbing); deferred. The arithmetic selftest
+  (`[sched] eevdf selftest passed`) + the gauntlet's musltest / `[smp]`
+  selftests are the current gate.
 
 **Scope**: replace the FIFO fair path with EEVDF on a per-CPU
 augmented red-black tree. Single-CPU correct first; SMP balancing is
