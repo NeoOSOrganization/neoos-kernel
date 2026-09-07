@@ -33,6 +33,7 @@ static void fail(const char *why) {
 static void se_init(struct sched_entity *se, int nice) {
     for (unsigned i = 0; i < sizeof(*se); i++) { ((uint8_t *)se)[i] = 0; }
     se->policy = SCHED_NORMAL;
+    se->nice   = nice;   // enqueue_entity re-applies weight from se->nice
     set_load_weight(se, nice);
     se->slice = 0;   // -> base
 }

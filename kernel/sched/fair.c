@@ -330,6 +330,11 @@ done:
 // A thread becomes runnable (wake, or brand-new).
 static void enqueue_entity(struct cfs_rq *cfs, struct sched_entity *se) {
     update_curr(cfs);
+    // Apply any pending renice/policy change now, while se is out of the
+    // tree (changing load.weight of an in-tree entity would desync the
+    // avg_vruntime/avg_load sums). A running task picks this up within
+    // one slice; a blocked one on its next wake.
+    set_load_weight(se, se->nice);
     place_entity(cfs, se, se->sum_exec_runtime == 0);
     __enqueue_entity(cfs, se);
     se->on_rq = 1;
@@ -467,6 +472,36 @@ int fair_entity_tick(struct rq *rq) {
         return 1;                                     // someone more urgent
     }
     return 0;
+}
+
+// Re-weight / re-slice the RUNNING entity in place (it is not in the
+// tree, so no sum desync). Used by the sched ABI when a task renices
+// or sched_setattr's itself. rq->lock held.
+void fair_reweight_current(struct rq *rq, int nice, int policy,
+                           uint64_t slice_ns) {
+    struct cfs_rq *cfs = &rq->cfs;
+    struct sched_entity *se = cfs->curr;
+    if (!se) { return; }
+    update_curr(cfs);
+    se->nice   = nice;
+    se->policy = policy;
+    if (slice_ns != (uint64_t)-1) { se->slice = slice_ns; }
+    set_load_weight(se, nice);
+    se->deadline = se->vruntime + calc_delta_fair(slice_of(se), se);
+}
+
+// sched_yield: charge the running entity a full slice of virtual time
+// so it becomes ineligible and drops behind every other runnable task,
+// then let schedule() pick. rq->lock held.
+void fair_yield_current(struct rq *rq) {
+    struct cfs_rq *cfs = &rq->cfs;
+    struct sched_entity *se = cfs->curr;
+    if (!se) { return; }
+    update_curr(cfs);
+    uint64_t vslice = calc_delta_fair(slice_of(se), se);
+    se->vruntime += vslice;
+    se->deadline  = se->vruntime + vslice;
+    update_min_vruntime(cfs);
 }
 
 uint64_t fair_slice_remaining_ns(struct rq *rq) {

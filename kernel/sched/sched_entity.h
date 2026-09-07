@@ -57,6 +57,10 @@ struct sched_entity {
 
     uint8_t  on_rq;                  // linked into a cfs_rq right now
     int      policy;                 // SCHED_NORMAL / BATCH / IDLE
+    int      nice;                   // [-20,19]; the source of truth for
+                                     // load.weight, re-applied at every
+                                     // enqueue_entity (set_load_weight)
+    uint8_t  batch_hint;             // SCHED_BATCH: skip wake-preemption
 
     uint64_t exec_start;             // rq->clock_task at last update_curr
     uint64_t sum_exec_runtime;       // total ns this entity has run

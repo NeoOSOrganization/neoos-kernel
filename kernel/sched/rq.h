@@ -80,6 +80,20 @@ int sched_tick(struct rq *rq);                // sched.c, takes rq->lock
 uint64_t fair_slice_remaining_ns(struct rq *rq);   // fair.c, rq->lock held
 uint64_t sched_slice_remaining_ns(struct rq *rq);  // sched.c, takes rq->lock
 
+// Scheduler ABI helpers (SCH-1 Task 5). fair_* need rq->lock held.
+void fair_reweight_current(struct rq *rq, int nice, int policy, uint64_t slice_ns);
+void fair_yield_current(struct rq *rq);
+
+struct thread;
+// Apply a nice/policy/slice change to `t`. If `t` is the running task on
+// this CPU it takes effect immediately; otherwise it is recorded on the
+// entity and applied at its next enqueue. slice_ns == (uint64_t)-1 means
+// "leave slice unchanged". Takes the rq lock.
+void sched_apply_attr(struct thread *t, int nice, int policy, uint64_t slice_ns);
+// Real sched_yield for the calling thread. Takes the rq lock, then
+// schedule()s.
+void sched_do_yield(void);
+
 // Boot selftest: the EEVDF virtual-time arithmetic.
 void eevdf_selftest(void);
 

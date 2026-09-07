@@ -202,4 +202,19 @@ int64_t sys_inotify_rm_watch(struct syscall_args *a);
 int64_t sys_getrusage(struct syscall_args *a);
 int64_t sys_mremap(struct syscall_args *a);
 
+// scheduler ABI -- kernel/syscall/sys_sched.c (SCH-1 Task 5)
+int64_t sys_nice(struct syscall_args *a);
+int64_t sys_setpriority(struct syscall_args *a);
+int64_t sys_getpriority(struct syscall_args *a);
+int64_t sys_sched_getscheduler(struct syscall_args *a);
+int64_t sys_sched_setscheduler(struct syscall_args *a);
+int64_t sys_sched_getparam(struct syscall_args *a);
+int64_t sys_sched_setparam(struct syscall_args *a);
+int64_t sys_sched_get_priority_max(struct syscall_args *a);
+int64_t sys_sched_get_priority_min(struct syscall_args *a);
+int64_t sys_sched_rr_get_interval(struct syscall_args *a);
+int64_t sys_sched_setattr(struct syscall_args *a);
+int64_t sys_sched_getattr(struct syscall_args *a);
+int64_t sys_sched_setaffinity(struct syscall_args *a);
+
 #endif

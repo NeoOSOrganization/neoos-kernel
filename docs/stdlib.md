@@ -39,8 +39,10 @@ alongside the library code that exposes it.
   The raw syscall underneath returns Linux's length-including-NUL, or
   `-ERANGE`; the `NULL` translation is library code, as in musl.
 - `int getpid(void)` — returns the calling process's PID.
-- `void yield(void)` — voluntarily gives up the remaining CPU time
-  slice to the scheduler.
+- `void yield(void)` — voluntarily gives up the CPU. Since SCH-1 this
+  is a real EEVDF yield (the caller is charged a full slice of virtual
+  time and drops behind every other runnable task), not just a
+  reschedule. `sched_yield()` from `<sched.h>` maps to the same thing.
 - `int spawn(const char *path)` — builds a fresh process directly from
   the ELF executable at `path` (NUL-terminated) and returns its PID,
   or `-1` on failure. NeoOS-specific: not `fork`+`exec`. The child
@@ -387,8 +389,70 @@ sees the same constants.
 - **`sched_getcpu` is a snapshot, not a lease.** The value can be stale
   the instant it is read, exactly as on Linux. It is fit for statistics
   and affinity hints, not for indexing per-CPU data without a lock.
-- **No `sched_setaffinity`.** There is no way to pin a thread to a CPU
-  yet, so a program cannot make `sched_getcpu` stable.
+- **`getcpu(2)` (Linux 309) is wired** (SCH-1): `sched_getcpu()` issues
+  it directly. Only the CPU-index word is filled; the node word, if the
+  caller passes one, is left as-is (assume node 0).
+
+## Scheduling policy: `nice`, `sched_setscheduler`, `sched_setattr`, `sched_setaffinity`
+
+The fair scheduler is EEVDF (`kernel/sched/fair.c`, spec
+`docs/superpowers/specs/2026-09-07-advanced-scheduler-design.md`). The
+full nice/policy/slice/affinity ABI is exposed, on NeoOS syscall
+numbers the shim maps musl's Linux numbers onto:
+
+```c
+#include <sched.h>
+int  sched_yield(void);
+int  nice(int inc);
+int  getpriority(int which, id_t who);
+int  setpriority(int which, id_t who, int prio);
+int  sched_getscheduler(pid_t pid);
+int  sched_setscheduler(pid_t pid, int policy, const struct sched_param *);
+int  sched_getparam(pid_t pid, struct sched_param *);
+int  sched_setparam(pid_t pid, const struct sched_param *);
+int  sched_get_priority_max(int policy);
+int  sched_get_priority_min(int policy);
+int  sched_rr_get_interval(pid_t pid, struct timespec *);
+int  sched_setattr(pid_t pid, struct sched_attr *, unsigned int flags);
+int  sched_getattr(pid_t pid, struct sched_attr *, unsigned int size, unsigned int flags);
+int  sched_setaffinity(pid_t pid, size_t cpusetsize, const cpu_set_t *mask);
+```
+
+- **`sched_yield()` is a real EEVDF yield**, not a bare reschedule: the
+  caller is charged a full slice of virtual time, so it drops behind
+  every other runnable task before the scheduler re-picks.
+- **`nice` / `setpriority` / `getpriority`** cover `PRIO_PROCESS` only.
+  `PRIO_PGRP` / `PRIO_USER` return `-EPERM` (no process-group or
+  per-user renice yet). `getpriority` returns `20 - nice` on the
+  syscall (musl's wrapper subtracts it back), matching Linux.
+- **`SCHED_NORMAL`, `SCHED_BATCH`, `SCHED_IDLE`** are accepted.
+  `SCHED_BATCH` sets a "skip wake-preemption" hint; `SCHED_IDLE` drops
+  the entity's weight below nice 19. **`SCHED_FIFO` / `SCHED_RR` /
+  `SCHED_DEADLINE` return `-EINVAL`** — the real-time and deadline
+  classes are SCH-3 / SCH-4, not yet built. This is "not yet", not
+  "never": a port that hard-requires `SCHED_FIFO` will fail today.
+- **`sched_get_priority_min/max`** return `0` for the fair policies
+  (`1`/`99` for `SCHED_FIFO`/`RR`, so a probe sees a sane range even
+  though setting those policies fails).
+- **`sched_setattr` `sched_runtime`** maps to the EEVDF per-task
+  **slice** (the single latency knob — NeoOS has no
+  `sched_latency_ns` / `sched_min_granularity_ns`). Clamped to
+  `[base/16, base*100]` around the 0.7 ms base. `sched_deadline` /
+  `sched_period` are ignored (no `SCHED_DEADLINE`).
+- **`sched_rr_get_interval`** reports the 0.7 ms base slice.
+- **`sched_setaffinity` is recorded, not yet enforced.** The mask is
+  stored on the thread (`cpus_allowed`); wake placement and the work
+  stealer honour it only once the SMP balancer (SCH-2) lands. An empty
+  intersection with the online set is `-EINVAL`. Affinity is capped at
+  64 CPUs (one word) — a documented divergence from Linux's arbitrary
+  `cpu_set_t`.
+- **A renice/policy change to another thread** (not the caller) is
+  recorded on its entity and applied at its next enqueue — within one
+  slice for a running task, on wake for a blocked one — rather than
+  reaching into another CPU's runqueue synchronously. Self-directed
+  changes take effect immediately.
+- **These are real syscalls**, as with `sched_getcpu`: invisible to a
+  caller using the libc functions, relevant only to raw-syscall code.
 
 ## Synchronisation: `<futex.h>`, `<semaphore.h>`, `<pthread.h>`
 

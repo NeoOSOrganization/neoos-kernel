@@ -300,7 +300,26 @@
 // the main thread's own stack size. See docs/stdlib.md.
 #define SYS_MREMAP              109
 
+// Scheduler ABI (SCH-1 Task 5). The fair-class EEVDF core made real
+// nice/policy/slice control meaningful; these expose it. RT policies
+// (SCHED_FIFO/RR/DEADLINE) return -EINVAL until SCH-3/SCH-4. See
+// docs/stdlib.md for the divergences. sched_yield already had a number
+// (SYS_YIELD 2); it is now a real EEVDF yield.
+#define SYS_NICE                     110
+#define SYS_SETPRIORITY             111
+#define SYS_GETPRIORITY            112
+#define SYS_SCHED_SETSCHEDULER      113
+#define SYS_SCHED_GETSCHEDULER      114
+#define SYS_SCHED_SETPARAM         115
+#define SYS_SCHED_GETPARAM        116
+#define SYS_SCHED_GET_PRIORITY_MAX  117
+#define SYS_SCHED_GET_PRIORITY_MIN  118
+#define SYS_SCHED_RR_GET_INTERVAL   119
+#define SYS_SCHED_SETATTR          120
+#define SYS_SCHED_GETATTR         121
+#define SYS_SCHED_SETAFFINITY      122
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX              110
+#define SYS_MAX              123
 
 #endif

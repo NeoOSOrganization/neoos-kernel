@@ -86,7 +86,8 @@ builds; it is not part of the stable ABI.)
 |-------|------|----------------|--------|
 | 0 | exit | `exit` | implemented |
 | 1/6 | write/read | `write`/`read` | implemented, now via a file-ops table |
-| 2 | yield | `sched_yield` | implemented |
+| 2 | yield | `sched_yield` | implemented — real EEVDF yield since SCH-1 (charge a full slice, drop behind everyone) |
+| 110–122 | nice / {get,set}priority / sched_{get,set}scheduler / sched_{get,set}param / sched_get_priority_{max,min} / sched_rr_get_interval / sched_{set,get}attr / sched_setaffinity | same names | implemented (SCH-1 T5). `SCHED_FIFO`/`RR`/`DEADLINE` → `EINVAL` (SCH-3/4); `sched_setaffinity` recorded, enforced at SCH-2; `sched_setattr.sched_runtime` = EEVDF slice. See `docs/stdlib.md`. |
 | 3 | getpid | `getpid` | implemented |
 | 4 | spawn | *(none — NeoOS extension)* | implemented |
 | 5 | wait | *(NeoOS wait-by-pid)* | implemented |
@@ -1188,9 +1189,11 @@ Kernel changes it needed, all landed and gauntlet-checked:
 - **`socket.c` -- `ioctl(FIONREAD)` / `ioctl(FIONBIO)`.** `sock_ioctl`
   answered `ENOTTY` to everything; `FIONREAD` now returns `rcv_len`.
 
-Still ENOSYS and needed for the full picture: `sched_setaffinity` (203)
--- .NET **Server GC hangs before `Main`** without it, so a web app must
-publish with `-p:ServerGarbageCollection=false` for now.
+`sched_setaffinity` (Linux 203) is now implemented (SCH-1 T5, NeoOS
+122): the mask is **recorded** on the thread but not yet **enforced**
+by placement/stealing — that is SCH-2. .NET Server GC no longer hangs
+on an outright ENOSYS, but until SCH-2 honours the mask a web app is
+still best published with `-p:ServerGarbageCollection=false`.
 
 ## Kernel data structures (internal, not ABI)
 

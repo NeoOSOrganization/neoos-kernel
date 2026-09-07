@@ -118,6 +118,20 @@
 // number rather than adding a new one for a second name on it.
 #define NEO_THREAD_SELF          20
 #define NEO_MREMAP              109
+#define NEO_GETCPU               41
+#define NEO_NICE                110
+#define NEO_SETPRIORITY         111
+#define NEO_GETPRIORITY         112
+#define NEO_SCHED_SETSCHEDULER  113
+#define NEO_SCHED_GETSCHEDULER  114
+#define NEO_SCHED_SETPARAM      115
+#define NEO_SCHED_GETPARAM      116
+#define NEO_SCHED_GET_PRIORITY_MAX 117
+#define NEO_SCHED_GET_PRIORITY_MIN 118
+#define NEO_SCHED_RR_GET_INTERVAL  119
+#define NEO_SCHED_SETATTR       120
+#define NEO_SCHED_GETATTR       121
+#define NEO_SCHED_SETAFFINITY   122
 
 // ---- Linux x86-64 numbers, as musl issues them ----------------------
 #define LX_READ              0
@@ -217,6 +231,19 @@
 #define LX_GETRUSAGE          98
 #define LX_GETTID            186
 #define LX_MREMAP             25
+#define LX_GETCPU           309
+#define LX_SETPRIORITY     141
+#define LX_GETPRIORITY     140
+#define LX_SCHED_SETPARAM  142
+#define LX_SCHED_GETPARAM  143
+#define LX_SCHED_SETSCHEDULER 144
+#define LX_SCHED_GETSCHEDULER 145
+#define LX_SCHED_GET_PRIORITY_MAX 146
+#define LX_SCHED_GET_PRIORITY_MIN 147
+#define LX_SCHED_RR_GET_INTERVAL  148
+#define LX_SCHED_SETAFFINITY 203
+#define LX_SCHED_SETATTR   314
+#define LX_SCHED_GETATTR   315
 
 static long neo_strlen(const char *s) {
     long n = 0;
@@ -420,6 +447,29 @@ long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a
     // SIGABRT abort() actually meant to raise. See docs/stdlib.md.
     case LX_GETTID:            return neo(NEO_THREAD_SELF, 0, 0, 0, 0, 0, 0);
     case LX_MREMAP:            return neo(NEO_MREMAP, a1, a2, a3, a4, 0, 0);
+
+    // getcpu(cpu, node, tcache) -- Linux 309. musl's sched_getcpu()
+    // issues it directly; NeoOS's SYS_GETCPU only fills the first word,
+    // which is all sched_getcpu() reads. Kills the last routine
+    // [shim] ENOSYS from a NativeAOT / pthread workload.
+    case LX_GETCPU:            return neo(NEO_GETCPU, a1, a2, a3, 0, 0, 0);
+
+    // Scheduler ABI (SCH-1 Task 5). Straight renumbering -- the
+    // argument shapes (sched_param, sched_attr, cpu_set_t, the nice
+    // range) are Linux's on both sides. RT policies come back -EINVAL
+    // from the kernel until SCH-3/SCH-4. See docs/stdlib.md.
+    case LX_SETPRIORITY:      return neo(NEO_SETPRIORITY, a1, a2, a3, 0, 0, 0);
+    case LX_GETPRIORITY:      return neo(NEO_GETPRIORITY, a1, a2, 0, 0, 0, 0);
+    case LX_SCHED_SETSCHEDULER: return neo(NEO_SCHED_SETSCHEDULER, a1, a2, a3, 0, 0, 0);
+    case LX_SCHED_GETSCHEDULER: return neo(NEO_SCHED_GETSCHEDULER, a1, 0, 0, 0, 0, 0);
+    case LX_SCHED_SETPARAM:   return neo(NEO_SCHED_SETPARAM, a1, a2, 0, 0, 0, 0);
+    case LX_SCHED_GETPARAM:   return neo(NEO_SCHED_GETPARAM, a1, a2, 0, 0, 0, 0);
+    case LX_SCHED_GET_PRIORITY_MAX: return neo(NEO_SCHED_GET_PRIORITY_MAX, a1, 0, 0, 0, 0, 0);
+    case LX_SCHED_GET_PRIORITY_MIN: return neo(NEO_SCHED_GET_PRIORITY_MIN, a1, 0, 0, 0, 0, 0);
+    case LX_SCHED_RR_GET_INTERVAL:  return neo(NEO_SCHED_RR_GET_INTERVAL, a1, a2, 0, 0, 0, 0);
+    case LX_SCHED_SETATTR:   return neo(NEO_SCHED_SETATTR, a1, a2, a3, 0, 0, 0);
+    case LX_SCHED_GETATTR:   return neo(NEO_SCHED_GETATTR, a1, a2, a3, a4, 0, 0);
+    case LX_SCHED_SETAFFINITY: return neo(NEO_SCHED_SETAFFINITY, a1, a2, a3, 0, 0, 0);
 
     default:
         // Not forwarded. This is the signal that a primitive belongs in

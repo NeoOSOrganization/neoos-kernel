@@ -183,11 +183,9 @@ int64_t sys_setgid(struct syscall_args *a) {
     return 0;
 }
 
-int64_t sys_yield(struct syscall_args *a) {
-    (void)a;
-    schedule();
-    return 0;
-}
+// sys_yield moved to kernel/syscall/sys_sched.c (SCH-1 T5): it is now a
+// real EEVDF yield -- surrender eligibility and drop behind every other
+// runnable task -- not a bare schedule().
 
 int64_t sys_spawn(struct syscall_args *a) {
     char path_buf[VFS_MAX_PATH];

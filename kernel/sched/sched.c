@@ -61,6 +61,38 @@ uint64_t sched_slice_remaining_ns(struct rq *rq) {
     return ns;
 }
 
+// ---- scheduler ABI (SCH-1 Task 5) ----------------------------------
+
+void sched_apply_attr(struct thread *t, int nice, int policy, uint64_t slice_ns) {
+    if (nice < -20) { nice = -20; }
+    if (nice >  19) { nice =  19; }
+    struct rq *rq = this_rq();
+    uint64_t f = spin_lock_irqsave(&rq->lock);
+    rq_clock_update(rq);
+    if (t == this_cpu()->current) {
+        fair_reweight_current(rq, nice, policy, slice_ns);
+    } else {
+        // Not running here: record on the entity. set_load_weight() at
+        // its next enqueue picks it up -- we must NOT change load.weight
+        // now (it may be in another CPU's tree, whose avg_* sums were
+        // built with the old weight). Documented in docs/stdlib.md.
+        t->se.nice   = nice;
+        t->se.policy = policy;
+        if (slice_ns != (uint64_t)-1) { t->se.slice = slice_ns; }
+    }
+    t->se.batch_hint = (policy == SCHED_BATCH) ? 1 : 0;
+    spin_unlock_irqrestore(&rq->lock, f);
+}
+
+void sched_do_yield(void) {
+    struct rq *rq = this_rq();
+    uint64_t f = spin_lock_irqsave(&rq->lock);
+    rq_clock_update(rq);
+    fair_yield_current(rq);
+    spin_unlock_irqrestore(&rq->lock, f);
+    schedule();
+}
+
 // Blocks until no CPU is executing on `t`'s kernel stack any more.
 //
 // THE INVARIANT: a thread must not be placed on a run queue while a CPU
