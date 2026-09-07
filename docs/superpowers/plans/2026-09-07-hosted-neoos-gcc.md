@@ -713,17 +713,61 @@ shows a textbook spin-wait: `lock cmpxchg` against `[rbx+0x38]`
 followed by a `pause`-loop spinning **while that word is
 non-negative**, waiting for something else to make it negative.
 Nothing ever does: no `clone()` syscall appears anywhere in the
-process's history, meaning CoreCLR never created the second thread
-(a GC/finalizer thread, most likely) that a lock like this would
-normally expect to release it. This is a CoreCLR-internals question
-(why does WorkstationGC's startup reach a lock/monitor wait without
-having spawned whatever is supposed to release it — a decision made
-inside `libRuntime.WorkstationGC.a`, not in anything NeoOS's kernel or
-shim controls), not a kernel gap — the natural stopping point for this
-investigation. A concrete next step for whoever continues it:
-disassemble backward from `0x20000000bda2` to identify the calling
-function (likely something in `RestrictedCallouts::Initialize`,
-`RuntimeInstance::Initialize`, or `RedhawkGCInterface::
-InitializeSubsystems`, per `RhInitialize`'s own call order established
-earlier in this section) and compare against CoreCLR's own source for
-what condition normally clears that wait.
+process's history — but the actual cause turned out not to be a
+missing second thread at all.
+
+**Resolved.** Disassembling backward from `0x20000000bda2` (fetching
+`dotnet/runtime`'s `release/8.0` GC source via `gh` for reference)
+identified the containing function as `WKS::region_allocator::allocate`
+in `src/coreclr/gc/region_allocator.cpp`, and offset `0x38` as its
+`region_allocator_lock` member (`GCSpinLock`/`GCDebugSpinLock`,
+declared in `gcpriv.h`: `VOLATILE(int32_t) lock` — comment right on
+the field, "**-1 if free, 0 if held**"). `enter_spin_lock()`
+(`region_allocator.cpp`) does exactly the disassembled sequence:
+`CompareExchange(&lock, 0, -1)`, and if that doesn't see `-1`, spins
+`while (lock >= 0)` forever. A lock stuck at exactly `0` on the FIRST
+allocation, on a single thread, with `enter_spin_lock`/
+`leave_spin_lock` correctly paired on every real code path, points at
+one thing: the object's constructor — `GCDebugSpinLock() : lock(-1)`
+— never ran, leaving the raw zero-initialized `.bss` value (`0`,
+which this lock's own convention treats as *held*) instead.
+
+Checked directly: `readelf -S` on the linked binary showed **no
+`.init_array` section at all** — the same `--gc-sections` mechanism
+that had eaten `crtn.o`'s `.init`/`.fini` closer earlier in this
+section had eaten the *entire* `.init_array`/`.fini_array` input
+sections this time, because `user.ld` never mentioned them and
+nothing in the kept relocation graph pointed at them. musl's
+`__libc_start_main` (`src/env/__libc_start_main.c`) declares
+`__init_array_start`/`__init_array_end` as `weak hidden` — an
+undefined weak symbol resolves to address `0` rather than a link
+error, so the constructor-calling loop's own bound check
+(`a < (uintptr_t)&__init_array_end`) became `0 < 0`: zero iterations,
+no diagnostic, no error, just silence. Confirmed present in the
+object files themselves first (`gcwks.cpp.o` and
+`StackFrameIterator.cpp.o` each carry a real, non-empty `.init_array`,
+0x18/0x8 bytes) to be sure this wasn't a dead end.
+
+Fixed the same way as `.init`/`.fini`: explicit
+`KEEP(*(.preinit_array))`/`KEEP(*(.init_array))`/
+`KEEP(*(.fini_array))` in `user.ld`'s `.data` output section, with
+manually `PROVIDE()`d `__init_array_start`/`__init_array_end` (and
+the `preinit_array`/`fini_array` pair) — matching musl's exact
+expected symbol names rather than relying on GNU ld's automatic
+per-section-name synthesis, the same reasoning as `__unbox`'s
+boundary symbols just below it in the same file. Verified via a
+manual relink with `-Wl,-Map`: three `.init_array` entries appear
+(`crtbeginT.o`, `StackFrameIterator.cpp.o`, `gcwks.cpp.o`), and `nm`
+confirms `__init_array_start`/`__init_array_end` now bound exactly
+that 24-byte range with real, non-null function-pointer values.
+
+**The hello-world binary now runs to completion: "Hello from NeoOS!"
+prints, and the process exits with code 0.** Two harmless
+`[shim] ENOSYS` lines appear around it (186 and 309 — plausibly
+`gettid`/`getcpu`-family calls made during CoreCLR shutdown/cleanup)
+but do not affect the outcome; the shim's own ENOSYS-reporting design
+is exactly why they're visible at all rather than silently wrong.
+Gauntlet 15/15 (one host-contention retry, within this project's
+established baseline) after the fix. This closes out the "run a
+dotnet NativeAOT hello world on NeoOS" investigation this whole
+section has been chasing.

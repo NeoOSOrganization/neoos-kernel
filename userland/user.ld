@@ -99,6 +99,39 @@ SECTIONS
         KEEP(*(.init))
         KEEP(*(.fini))
         *(.data .data.*)
+
+        /* C++ global constructors/destructors, found the same way as
+           .init/.fini above and by the same mechanism: left unlisted,
+           --gc-sections dropped the ENTIRE .init_array/.fini_array
+           input sections (nothing in the kept graph relocates to
+           them), so no __init_array_start/__init_array_end ever got
+           defined. musl's __libc_start_main declares both `weak
+           hidden` (src/env/__libc_start_main.c) -- an undefined weak
+           symbol resolves to address 0 rather than a link error, so
+           this failed SILENTLY: start=end=0, the constructor loop's
+           `a < end` is `0 < 0`, zero iterations, no diagnostic of any
+           kind. Confirmed directly: readelf -S on a linked binary
+           showed no .init_array section at all, and dotnet
+           NativeAOT's WorkstationGC deadlocked on its very first
+           lock acquisition, because the C++ constructor that would
+           have set global_region_allocator's GCDebugSpinLock to its
+           unlocked value (-1) never ran -- the lock sat at its raw
+           zero-BSS value instead, and 0 means "held" in that lock's
+           own convention. KEEP() plus explicit PROVIDE()s (not GNU
+           ld's automatic per-section-name synthesis, to match this
+           file's existing style for __unbox below and because the
+           exact symbol names musl's C code declares must be matched
+           exactly regardless of what ld would infer). */
+        PROVIDE(__preinit_array_start = .);
+        KEEP(*(.preinit_array))
+        PROVIDE(__preinit_array_end = .);
+        PROVIDE(__init_array_start = .);
+        KEEP(*(.init_array))
+        PROVIDE(__init_array_end = .);
+        PROVIDE(__fini_array_start = .);
+        KEEP(*(.fini_array))
+        PROVIDE(__fini_array_end = .);
+
         . = ALIGN(4K);
         PROVIDE(__start___unbox = .);
         *(__unbox)
