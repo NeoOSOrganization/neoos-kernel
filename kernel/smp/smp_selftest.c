@@ -43,20 +43,23 @@ void smp_timer_selftest_check(void) {
 
 void runqueue_lock_selftest(void) {
     struct cpu *c = this_cpu();
-    if (c->ready_lock.rank != LOCK_RANK_RUNQUEUE) {
+    if (c->rq.lock.rank != LOCK_RANK_RUNQUEUE) {
         serial_write_string("[runq] selftest FAILED: lock rank wrong\n");
         return;
     }
-    // ready_count must track the queue, since work stealing picks its
-    // victim by comparing counts without walking the lists.
-    uint64_t f = spin_lock_irqsave(&c->ready_lock);
+    // cfs.nr_running must track the tree, since work stealing picks its
+    // victim by comparing counts without walking the trees.
+    uint64_t f = spin_lock_irqsave(&c->rq.lock);
     uint32_t counted = 0;
-    for (struct thread *t = c->ready_head; t; t = t->next) { counted++; }
-    uint32_t claimed = c->ready_count;
-    spin_unlock_irqrestore(&c->ready_lock, f);
+    for (struct rb_node *n = rb_first_cached(&c->rq.cfs.tasks_timeline);
+         n; n = rb_next(n)) {
+        counted++;
+    }
+    uint32_t claimed = c->rq.cfs.nr_running;
+    spin_unlock_irqrestore(&c->rq.lock, f);
 
     if (counted != claimed) {
-        serial_write_string("[runq] selftest FAILED: ready_count disagrees with the list\n");
+        serial_write_string("[runq] selftest FAILED: nr_running disagrees with the tree\n");
         return;
     }
     serial_write_string("[runq] selftest passed\n");

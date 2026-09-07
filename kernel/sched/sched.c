@@ -14,42 +14,23 @@
 #include "arch/cpu_local.h"
 #include "arch/msr.h"
 #include "sync/waitq.h"
+#include "sync/lock.h"
 #include "errno.h"
 #include "smp/smp.h"
+#include "sched/rq.h"
 
 extern void context_switch(uint64_t *old_rsp, uint64_t *new_rsp);
 extern void kernel_thread_entry_trampoline(void);
 extern void kernel_thread_trampoline(void);
 extern void fork_trampoline(void);
 
-// Phase 7: Per-CPU ready queues (removed global ready_head/ready_tail)
-// Each CPU now manages its own ready queue via this_cpu()->ready_head/tail
+// The per-CPU ready queue is the fair class's cfs_rq (an rbtree),
+// reached as this_cpu()->rq.cfs. SCH-1 Task 1 keeps it FIFO-ordered
+// (fair.c keys the tree by insertion order) so behaviour is unchanged;
+// Tasks 2-4 turn it into real EEVDF.
 
-// Unlocked. Caller must hold c->ready_lock.
-static void ready_push(struct cpu *c, struct thread *t) {
-    t->next = 0;
-    if (c->ready_tail) {
-        c->ready_tail->next = t;
-    } else {
-        c->ready_head = t;
-    }
-    c->ready_tail = t;
-    c->ready_count++;
-}
-
-// Unlocked. Caller must hold c->ready_lock. Returns 0 if empty.
-static struct thread *ready_pop(struct cpu *c) {
-    struct thread *t = c->ready_head;
-    if (t) {
-        c->ready_head = t->next;
-        if (!c->ready_head) {
-            c->ready_tail = 0;
-        }
-        t->next = 0;
-        c->ready_count--;
-    }
-    return t;
-}
+struct rq *cpu_rq(int cpu_index) { return &cpus[cpu_index].rq; }
+struct rq *this_rq(void)         { return &this_cpu()->rq; }
 
 // Blocks until no CPU is executing on `t`'s kernel stack any more.
 //
@@ -82,17 +63,17 @@ static void wait_off_cpu(struct thread *t) {
 
 void enqueue_ready(struct thread *t) {
     wait_off_cpu(t);
-    struct cpu *c = this_cpu();
-    uint64_t f = spin_lock_irqsave(&c->ready_lock);
-    ready_push(c, t);
-    spin_unlock_irqrestore(&c->ready_lock, f);
+    struct rq *rq = this_rq();
+    uint64_t f = spin_lock_irqsave(&rq->lock);
+    fair_enqueue(rq, t);
+    spin_unlock_irqrestore(&rq->lock, f);
 }
 
 struct thread *dequeue_ready(void) {
-    struct cpu *c = this_cpu();
-    uint64_t f = spin_lock_irqsave(&c->ready_lock);
-    struct thread *t = ready_pop(c);
-    spin_unlock_irqrestore(&c->ready_lock, f);
+    struct rq *rq = this_rq();
+    uint64_t f = spin_lock_irqsave(&rq->lock);
+    struct thread *t = fair_pick(rq);
+    spin_unlock_irqrestore(&rq->lock, f);
     return t;
 }
 
@@ -139,10 +120,10 @@ void thread_wait_off_cpu(struct thread *t) { wait_off_cpu(t); }
 // thread creation to spread new work, and by the selftests.
 void enqueue_ready_on(int cpu_index, struct thread *t) {
     wait_off_cpu(t);
-    struct cpu *c = &cpus[cpu_index];
-    uint64_t f = spin_lock_irqsave(&c->ready_lock);
-    ready_push(c, t);
-    spin_unlock_irqrestore(&c->ready_lock, f);
+    struct rq *rq = cpu_rq(cpu_index);
+    uint64_t f = spin_lock_irqsave(&rq->lock);
+    fair_enqueue(rq, t);
+    spin_unlock_irqrestore(&rq->lock, f);
     // Sent AFTER the unlock: the target may be spinning on this very lock
     // with interrupts disabled and could not take the IPI. Without this
     // poke a target parked in idle's `sti; hlt` waits for its next local
@@ -189,20 +170,20 @@ static struct thread *steal_work(struct cpu *self) {
     for (int i = 0; i < online; i++) {
         struct cpu *c = &cpus[i];
         if (c == self) { continue; }
-        uint32_t n = __atomic_load_n(&c->ready_count, __ATOMIC_RELAXED);
+        uint32_t n = __atomic_load_n(&c->rq.cfs.nr_running, __ATOMIC_RELAXED);
         if (n > best) { best = n; victim = c; }
     }
     if (!victim) { return 0; }
 
-    uint64_t f = spin_lock_ordered_pair(&self->ready_lock, &victim->ready_lock);
+    uint64_t f = spin_lock_ordered_pair(&self->rq.lock, &victim->rq.lock);
     // Re-checked under the lock: the victim may have been drained
     // between the scan and the acquire.
-    struct thread *t = victim->ready_count > 0 ? ready_pop(victim) : 0;
+    struct thread *t = victim->rq.cfs.nr_running > 0 ? fair_steal(&victim->rq) : 0;
     if (t) {
         self->steals++;                     // under the lock; only this CPU writes it
         if (t->proc) { self->steals_user++; }
     }
-    spin_unlock_ordered_pair(&self->ready_lock, &victim->ready_lock, f);
+    spin_unlock_ordered_pair(&self->rq.lock, &victim->rq.lock, f);
     return t;
 }
 
@@ -299,9 +280,9 @@ void idle_init(void) { idle_init_for(0); }
 // because nothing else may touch a thread's state while on_cpu is set.
 void sched_post_switch(void) {
     struct cpu *c = this_cpu();
-    struct thread *p = c->prev_pending;
+    struct thread *p = c->rq.prev_pending;
     if (!p) { return; }
-    c->prev_pending = 0;
+    c->rq.prev_pending = 0;
 
     enum thread_state s = p->state;
     __atomic_store_n(&p->on_cpu, 0, __ATOMIC_RELEASE);
@@ -446,7 +427,7 @@ void schedule(void) {
     // this mechanism exists to prevent.
     if (prev) {
         if (prev->state == THREAD_RUNNING) { prev->state = THREAD_READY; }
-        c->prev_pending = prev;
+        c->rq.prev_pending = prev;
     }
 
     static uint64_t discarded_rsp; // used the first time schedule() is ever called, from kmain

@@ -592,11 +592,17 @@ Two grades, selected by a flag:
   runtime.
 - **`NEO_RT_TAKEOVER`** — the caller gets the **whole machine**. All
   other CPUs are parked in a quiescent loop (IPI'd to a
-  `cli; hlt`-with-wakeword state), all other tasks are frozen, only
-  the housekeeping needed to honour the deadman timer and to break
-  out remains live. Maximum determinism, maximum blast radius. This
-  is the grade the user asked for: "all other processes stop getting
-  any CPU time and the CPU is totally allocated for one process."
+  `cli; hlt`-with-wakeword state), all other tasks are frozen. The
+  **NIC IRQ handler is kept live** (project decision, 2026-09-07): a
+  minimal RX path stays running on a housekeeping CPU so the box
+  remains pingable and a remote console / IPMI path can force-break
+  the takeover. Everything else — timers, the RX *thread*, block IO,
+  other processes — is frozen. Near-maximum determinism, but the
+  operator never loses the machine.
+
+**Deadman ceiling**: `max_hold_ns` is kernel-clamped to a build-time
+absolute maximum of **60 seconds** (project decision, 2026-09-07). No
+"hold forever" grade exists.
 
 ### The syscalls (NeoOS-native numbers; `lib/` wrappers)
 
@@ -610,7 +616,7 @@ int  neo_rt_status(struct neo_rt_status *out);
 struct neo_rt_attr {
     uint64_t max_hold_ns;    // deadman: HARD cap, kernel-enforced,
                              // clamped to a build-time ceiling
-                             // (default 1 s, absolute max e.g. 60 s)
+                             // (default 1 s, absolute max 60 s -- clamped)
     int      cpu;            // DEDICATE_CPU: which CPU (-1 = kernel picks
                              // an isolated one); ignored for TAKEOVER
     uint32_t flags;          // NEO_RT_KEEP_TIMERFD  -- leave the caller's

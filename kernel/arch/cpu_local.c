@@ -20,10 +20,11 @@ static void cpu_local_install(int index) {
 #ifdef NEOOS_DEBUG_LOCKSTAT
     c->lockstat_index   = index;
 #endif
-    c->ready_head       = 0;
-    c->ready_tail       = 0;
-    c->ready_count      = 0;
-    spin_init(&c->ready_lock, LOCK_RANK_RUNQUEUE, "runqueue");
+    c->rq.prev_pending  = 0;
+    c->rq.clock         = 0;
+    c->rq.clock_task    = 0;
+    cfs_rq_init(&c->rq.cfs);
+    spin_init(&c->rq.lock, LOCK_RANK_RUNQUEUE, "runqueue");
 
     // Must run AFTER gdt_flush: loading a GS SELECTOR (`mov gs, ax`)
     // zeroes IA32_GS_BASE as a side effect, so any base installed

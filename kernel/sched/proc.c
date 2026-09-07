@@ -98,10 +98,8 @@ void process_init(void) {
     spin_init(&kzombies_lock, LOCK_RANK_PROCTABLE, "kzombies");
 
     signal_queue_init();
-    // Phase 7: Per-CPU ready queues (removed global ready_head/ready_tail init)
-    // Now initialized per-CPU
-    this_cpu()->ready_head = 0;
-    this_cpu()->ready_tail = 0;
+    // The per-CPU runqueue (this_cpu()->rq) is initialised by
+    // cpu_local_install(); nothing to do here but the current pointer.
     this_cpu()->current = 0;
     idle_init();
     serial_write_string("[process] initialized\n");

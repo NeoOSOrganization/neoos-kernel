@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include "sync/lock.h"
 #include "arch/tss.h"
+#include "sched/rq.h"
 
 // 128 fits inside xAPIC's 8-bit APIC ID field, so no x2APIC needed.
 #define MAX_CPUS 128
@@ -35,21 +36,15 @@ struct cpu {
     int               held_depth;
     uint8_t           held_ranks[LOCK_MAX_HELD];
 
-    // Per-CPU ready queue. Phase 7 added the layout; Phase 10 added the
-    // lock that makes it safe to touch from a stealing CPU. Declared
-    // AFTER kernel_stack so the CPU_* byte offsets asserted below are
-    // undisturbed.
-    struct spinlock   ready_lock;
-    struct thread    *ready_head;
-    struct thread    *ready_tail;
-    uint32_t          ready_count;      // list length, for steal victim choice
-    // The thread this CPU has switched AWAY from but not yet released.
-    // Consumed by sched_post_switch(), which runs as the INCOMING
-    // thread; see sched.c for why the release cannot happen any
-    // earlier.
-    struct thread    *prev_pending;
-    // Ticks left in the running thread's time slice. Per-CPU because it
-    // is a property of what THIS CPU is running; see timer_handler.
+    // Per-CPU runqueue. SCH-1 replaced the loose ready_head/tail/count
+    // + ready_lock + prev_pending with struct rq (kernel/sched/rq.h),
+    // which carries its own lock (still LOCK_RANK_RUNQUEUE), the EEVDF
+    // cfs_rq, and prev_pending. Declared AFTER kernel_stack so the
+    // CPU_* byte offsets asserted below (which only cover the first
+    // six fields) are undisturbed.
+    struct rq         rq;
+    // Ticks left in the running thread's time slice. Removed by SCH-1
+    // Task 4 (one-shot timer replaces the fixed countdown).
     uint32_t          timeslice_remaining;
     // The loopback depth for code with no thread -- kmain during boot,
     // where c->current is still 0. Preemption cannot move that, so a

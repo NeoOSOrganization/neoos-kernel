@@ -106,6 +106,13 @@ struct thread *thread_alloc(struct process *p) {
     t->proc       = p;
     t->state      = THREAD_READY;
     t->stack_slot = -1;
+
+    // Fair-class defaults: nice 0, base slice, vruntime 0 (placed on
+    // first enqueue), runnable on any CPU.
+    t->se.policy      = SCHED_NORMAL;
+    set_load_weight(&t->se, 0);
+    t->se.slice       = 0;   // resolves to SCHED_BASE_SLICE_NS
+    t->cpus_allowed   = ~0ULL;
     t->xstate = kmalloc(cpu_state_size());
     if (!t->xstate) { kfree(t); return 0; }
     cpu_state_init(t->xstate);

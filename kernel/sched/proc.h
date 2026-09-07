@@ -10,6 +10,7 @@
 #include "mm/pmm.h"
 #include "mm/vma.h"
 #include "elf.h"
+#include "sched/sched_entity.h"
 
 #define KERNEL_STACK_ORDER 2 // 4 frames = 16KiB
 
@@ -283,7 +284,22 @@ struct thread {
 
     struct thread *tid_next_hash;   // thread_table bucket chain (secondary index)
     struct thread *proc_next;       // p->threads / p->zombies list link
-    struct thread *next;            // ready-queue link
+    struct thread *next;            // waitq / kzombies list link. NOT the
+                                    // ready queue any more -- that is the
+                                    // rbtree threaded through se.run_node.
+
+    // The fair-class scheduling entity: EEVDF bookkeeping + the rbtree
+    // node linking this thread into its CPU's cfs_rq. See
+    // kernel/sched/sched_entity.h.
+    struct sched_entity se;
+
+    // sched_setaffinity's CPU mask. Bit i set => this thread may run on
+    // CPU i. Default ~0 (any CPU). NeoOS caps practical affinity at 64
+    // CPUs (one word) -- documented divergence; QEMU tops out at 4.
+    // Recorded here from Task 1; honoured at placement/steal time once
+    // MSC-1 lands sched_setaffinity, exactly once the SMP balancer
+    // (SCH-2) exists.
+    uint64_t cpus_allowed;
 };
 
 void process_init(void);
