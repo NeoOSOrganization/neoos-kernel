@@ -47,6 +47,45 @@ Faulting instruction, consistent across runs:
   the crash **go away** (timing-sensitive → a race, not a logic
   bug).
 
+## Phase 1 progress (2026-09-07, session e4910de7)
+
+**Done:**
+- `userland/mmstress.c` + `make mmstress` (`SMP_CPUS=` overridable) — the
+  .NET-free oracle: 8 threads of one process doing mmap/munmap/mprotect
+  + fault + pattern-verify, own boot.
+- Non-perturbing fault diagnostics landed: `isr.c` `[usrflt]` line
+  (cpu/tid/vec/err/cr2/rip, rate-limited) and `signal.c` `[fault-audit]`
+  (PTE-vs-VMA classification at fatal user SIGSEGV).
+- **Two real bugs found and fixed** (commit `e678d45`):
+  1. `thread_create()` entered a SysV C function (libneoos
+     `thread_trampoline`) with a page-aligned user RSP; the ABI wants
+     `rsp%16==8` at a function entry, so the first stack `movaps` #GP'd.
+     Fixed: plant `user_stack_top - 8`. Explains why **NeoOS-native**
+     multithreaded programs crashed but musl/.NET (`clone_task`,
+     caller-aligned `child_stack`) did not.
+  2. `arch_prctl(ARCH_SET_FS)` did not update `schedule()`'s per-CPU
+     `fs_base_loaded` cache — the next thread whose `fs_base` matched
+     the stale cache would run with the previous thread's TLS base
+     (investigation suspect #3). Fixed + corrected the false comment
+     in `sched.c`.
+
+**Negative result (informative):** with both bugs fixed, `mmstress` is
+**clean at `-smp 1/2/4`** for the pure mmap/munmap/mprotect/fault path.
+The core per-process mm ops (all under `p->mm_lock`, TLB settled after
+release, frames deferred until shootdown ACK) **are SMP-safe under many
+threads of one process.** The audit of suspect #2 (TLB shootdown)
+found the ordering correct — every `context_switch` writes CR3
+unconditionally, so a CPU only holds a live user-TLB entry for P while
+actively running a thread of P, which is exactly what the shootdown
+scan targets. The one residual risk there is the 50M-spin timeout
+force-zeroing `shootdown_pending` and then freeing frames.
+
+**Still open:** the .NET concurrent-request `AccessViolation` is NOT
+reproduced by the current oracle. Next per Phase 1a's "escalate"
+branch: add concurrent `epoll_ctl`/`close` churn, `brk`, and a brief
+`fork`-COW to `mmstress`, and bisect which addition breaks it. Do NOT
+do an mm-locking redesign without the user.
+
 ## Phase 1 — Root-cause investigation (no fixes yet)
 
 ### 1a. Reproduce deterministically, minimally, without .NET
