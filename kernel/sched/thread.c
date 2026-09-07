@@ -425,6 +425,24 @@ struct thread *clone_task(struct syscall_frame *frame, uint64_t child_stack,
     t->kernel_stack_top  = kstack_top;
     t->kernel_stack_phys = kstack_phys;
 
+    // Also recorded here, on the struct -- not just planted on the
+    // stack above for fork_trampoline's one-time direct WRMSR on this
+    // thread's very first entry. kernel/sched/sched.c's regular
+    // context-switch path reloads MSR_FS_BASE only when
+    // `next->fs_base != c->fs_base_loaded` (a per-CPU cache of what's
+    // actually in the hardware register), and fork_trampoline's WRMSR
+    // bypasses that cache entirely. Every clone()'d thread's fs_base
+    // field defaults to 0 (thread_alloc's zeroing) and nothing else
+    // ever set it -- so two such threads compared EQUAL (0 == 0) and
+    // the scheduler skipped the reload on every switch between them,
+    // leaving whichever one's fork_trampoline had run MOST RECENTLY
+    // still active in hardware for the thread that resumed next. A
+    // real, confirmed bug: a thread resumed this way read another
+    // thread's TLS block as its own -- pthread_self()->tid included
+    // -- and its own raise(SIGABRT) killed the wrong thread as a
+    // result, chasing a real ASP.NET Core app's thread-pool startup.
+    t->fs_base = tls;
+
     // NOT enqueued here. sys_clone still has to write this thread's
     // tid into the caller's *ptid (CLONE_PARENT_SETTID) -- and musl's
     // pthread_create relies on that landing before the child can

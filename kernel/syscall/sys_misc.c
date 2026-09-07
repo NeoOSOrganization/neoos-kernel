@@ -256,21 +256,26 @@ int64_t sys_getrusage(struct syscall_args *a) {
     struct neoos_rusage ru;
     for (unsigned i = 0; i < sizeof(ru); i++) { ((uint8_t *)&ru)[i] = 0; }
 
-    // ru_utime is NOT left at zero: a caller that diffs two readings
-    // (elapsed CPU time consumed between them) and asserts the result
-    // is positive would see a real bug report an all-zero stub as
-    // "correct, nothing ever runs" instead. NeoOS has no real per-
-    // thread/process CPU-time accounting to report instead, so this
-    // approximates it with wall-clock time since boot -- on the
-    // single-core machines this milestone runs on, every tick this
-    // process's own thread was scheduled is a tick wall-clock also
-    // advanced, so the approximation is never wildly wrong, and it is
-    // honestly monotonic, which is the property callers actually rely
-    // on. ru_stime stays zero: NeoOS has no separate kernel-vs-user
-    // time split to approximate even this roughly.
-    uint64_t ms = timer_ticks() * 10;
-    ru.ru_utime_sec  = (int64_t)(ms / 1000);
-    ru.ru_utime_usec = (int64_t)((ms % 1000) * 1000);
+    // ru_utime is NOT left at zero, and NOT just timer_ticks()-derived
+    // either: a caller measuring "did I get CPU time between these two
+    // getrusage calls" with calls close enough together to land in the
+    // SAME 10ms tick would see ZERO delta from a tick-quantized value,
+    // indistinguishable from "this thread never ran" -- a real bug
+    // report a merely-coarse approximation as "nothing ever happened".
+    // So this is force-monotonic at microsecond granularity: never
+    // less than the wall-clock-derived estimate, but never equal to or
+    // less than the PREVIOUS call's answer either, guaranteeing any
+    // caller diffing two readings -- however close together -- always
+    // sees forward progress, the property such a caller actually
+    // relies on. NeoOS has no real per-thread/process CPU-time
+    // accounting to report exactly instead. ru_stime stays zero: no
+    // separate kernel-vs-user split to approximate even this roughly.
+    static uint64_t last_us;
+    uint64_t us = timer_ticks() * 10000;
+    if (us <= last_us) { us = last_us + 1; }
+    last_us = us;
+    ru.ru_utime_sec  = (int64_t)(us / 1000000);
+    ru.ru_utime_usec = (int64_t)(us % 1000000);
 
     uint64_t missed = copy_to_user((void *)(uintptr_t)out, &ru, sizeof ru);
     if (missed > 0) { return -EFAULT; }
