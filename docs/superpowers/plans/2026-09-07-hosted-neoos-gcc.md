@@ -657,20 +657,73 @@ only affects a process's main thread and NeoOS's native
 uses the caller's own musl-`mmap()`'d stack, a normal lazily-faulted
 VMA, untouched by this constant.
 
-**Real, measurable progress: the binary no longer crashes.** With all
-three fixes in place (the two above plus the VMA/W^X pair from
-earlier in this section), the hello-world binary runs to completion
-with a clean exit and no signal — but exits with code `-1`, matching
-exactly `main()`'s own disassembled failure path (`RhInitialize`
-and/or `RhRegisterOSModule` returning false skips `__managed__Main`
-entirely and returns `-1`). "Hello from NeoOS!" has not yet printed.
-The next concrete step for whoever continues this: determine *why*
-CoreCLR's own runtime initialization (`RhInitialize`/
-`RhRegisterOSModule`, both defined in `libRuntime.WorkstationGC.a`,
-neither disassembled yet) is failing — this is a distinct
-investigation from the linker/stack bugs above, likely needing either
-disassembly of those two functions to find what syscall/primitive
-they depend on that NeoOS doesn't yet provide, or a way to surface
-whatever diagnostic CoreCLR would normally emit on this failure path
-(its error/assert output may be routed through EventPipe, which this
-build links as `libeventpipe-disabled.a`).
+With all three fixes in place (the two above plus the VMA/W^X pair
+from earlier in this section), the hello-world binary ran to
+completion with a clean exit and no signal — but exit code `-1`,
+matching exactly `main()`'s own disassembled failure path
+(`RhInitialize`/`RhRegisterOSModule` returning false, skipping
+`__managed__Main` entirely). Direct instrumentation of the syscall
+dispatcher (temporary, reverted before committing) traced this to
+three genuinely unimplemented Linux syscalls CoreCLR's startup calls
+unconditionally: `sched_getaffinity` (204), `membarrier` (324), and
+`mlock` (149), all falling through the musl shim's `default:` case
+(`third_party/shim/neoos_syscall.c`'s own comment: "this is the
+signal that a primitive belongs in the kernel"). `mlock`'s failure
+specifically is what the GC treats as fatal.
+
+Implemented all three as real kernel primitives, not a shortcut:
+`sched_getaffinity` reports every online CPU
+(`kernel/smp/smp.h`'s `smp_online_count()`); `membarrier` is backed by
+a genuine cross-CPU IPI broadcast (new `kernel/smp/membarrier.c`/`.h`,
+mirroring `kernel/smp/tlb.c`'s shootdown pattern — IPI delivery is
+itself a serializing event on x86-64, satisfying every command
+including the `SYNC_CORE` variants); `mlock` is a real no-op success
+(NeoOS has no swap, so every resident page already satisfies its
+promise), bounded by a new `vma_range_mapped()` helper
+(`kernel/mm/vma.c`/`.h`) that checks the range is genuinely mapped
+without side effects.
+
+That cleared the first wall, but retesting hit two more, one level
+deeper each time — the same "CoreCLR calls a syscall unconditionally,
+NeoOS doesn't have it" pattern repeating: `sysinfo` (99)/`statfs`
+(137)/`get_mempolicy` (239) (the GC's own heap-sizing heuristics
+needing real total-RAM figures), then `madvise` (28) alone (found by
+its distinct signature — a total *hang* with no exit and no crash,
+not another `-1`, because CoreCLR's GC retries indefinitely on
+`-ENOSYS` there rather than treating it as fatal like the syscalls
+before it). All were implemented the same way: real numbers where
+NeoOS has them (`sysinfo`/`statfs` read `kernel/mm/pmm.h`'s frame
+counters), a real single-node answer for `get_mempolicy`, and another
+genuine advisory no-op for `madvise` (same `vma_range_mapped()`
+bounds-check as `mlock`). All seven are documented in
+`docs/stdlib.md` under one section, together, since they were all
+found the same way in the same sitting.
+
+**The syscall wall is cleared. What's left is not a missing syscall.**
+With all seven in place, the binary makes it measurably further: it
+mmaps a ~256KB GC segment, commits all of it via ~68 page faults
+(traced and confirmed FAST — under 20ms total, the earlier impression
+of "slow progress" across separate short test runs was an artifact of
+comparing incomplete traces, not an actual bug), then hangs
+completely — zero further syscalls, zero further page faults, for as
+long as it was left running. A `-d int` trace of the hang shows the
+CPU parked at a **fixed RIP** (`0x20000000bda2` in the published
+binary) on every single timer sample. Disassembling that address
+shows a textbook spin-wait: `lock cmpxchg` against `[rbx+0x38]`
+followed by a `pause`-loop spinning **while that word is
+non-negative**, waiting for something else to make it negative.
+Nothing ever does: no `clone()` syscall appears anywhere in the
+process's history, meaning CoreCLR never created the second thread
+(a GC/finalizer thread, most likely) that a lock like this would
+normally expect to release it. This is a CoreCLR-internals question
+(why does WorkstationGC's startup reach a lock/monitor wait without
+having spawned whatever is supposed to release it — a decision made
+inside `libRuntime.WorkstationGC.a`, not in anything NeoOS's kernel or
+shim controls), not a kernel gap — the natural stopping point for this
+investigation. A concrete next step for whoever continues it:
+disassemble backward from `0x20000000bda2` to identify the calling
+function (likely something in `RestrictedCallouts::Initialize`,
+`RuntimeInstance::Initialize`, or `RedhawkGCInterface::
+InitializeSubsystems`, per `RhInitialize`'s own call order established
+earlier in this section) and compare against CoreCLR's own source for
+what condition normally clears that wait.

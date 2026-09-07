@@ -50,6 +50,14 @@ int vma_register_image_segment(struct process *p, uint64_t start, uint64_t end,
 int     vma_munmap(struct process *p, uint64_t addr, uint64_t len);
 int     vma_mprotect(struct process *p, uint64_t addr, uint64_t len, uint32_t prot);
 
+// True if [addr, addr+len) is entirely covered by `p`'s VMAs (one or
+// several, contiguous, gapless) -- no permission check, no side
+// effect. For sys_mlock: NeoOS has no swap and never pages out
+// anonymous memory, so mlock(2) itself has nothing to DO once a range
+// is confirmed real; this is the one check real Linux would also make
+// (EFAULT / ENOMEM against an address that names no mapping).
+int     vma_range_mapped(struct process *p, uint64_t addr, uint64_t len);
+
 // Maps [phys, phys+len) into `p` at a kernel-chosen address, eagerly
 // (every page mapped now), backed by device-owned physical frames.
 // prot must not include PROT_EXEC (W^X). Returns the user address, or a

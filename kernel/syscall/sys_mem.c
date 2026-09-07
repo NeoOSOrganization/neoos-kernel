@@ -59,6 +59,52 @@ int64_t sys_mprotect(struct syscall_args *a) {
     return vma_mprotect(current_proc(), a->a1, a->a2, (uint32_t)a->a3);
 }
 
+// mlock(addr, len) -- a genuine no-op success, not a lie dressed up as
+// one: NeoOS has no swap and never pages out anonymous memory, so
+// every resident page already satisfies mlock(2)'s promise ("this
+// memory will not be paged out") before this function does anything.
+// The one check kept is the one real Linux would also make -- that
+// the range names actual mapped memory (EFAULT/ENOMEM on Linux for a
+// range that does not) -- rounded to whole pages first, matching
+// mlock(2)'s own documented page-alignment behaviour.
+//
+// Found missing via dotnet NativeAOT's CoreCLR startup (GC card
+// table / write-barrier metadata pinning during RhInitialize). See
+// docs/stdlib.md. No munlock companion yet -- add one the same way,
+// if and when something is found calling it.
+// madvise(addr, len, advice) -- see the constant's own comment in
+// syscall_nr.h for why this is a genuine no-op success rather than
+// -ENOSYS or a lie: every advice value is purely a hint NeoOS has
+// nothing to act on, and the one real failure mode Linux has (a range
+// that names no mapping at all) is the one check kept.
+int64_t sys_madvise(struct syscall_args *a) {
+    uint64_t addr = a->a1, len = a->a2;
+    if (len == 0) { return 0; }
+
+    uint64_t start = addr & ~(uint64_t)0xFFF;
+    uint64_t end   = (addr + len + 0xFFF) & ~(uint64_t)0xFFF;
+    if (end <= start) { return -EINVAL; }   // overflow
+
+    struct process *p = current_proc();
+    if (!p) { return -ESRCH; }
+    if (!vma_range_mapped(p, start, end - start)) { return -ENOMEM; }
+    return 0;
+}
+
+int64_t sys_mlock(struct syscall_args *a) {
+    uint64_t addr = a->a1, len = a->a2;
+    if (len == 0) { return 0; }
+
+    uint64_t start = addr & ~(uint64_t)0xFFF;
+    uint64_t end   = (addr + len + 0xFFF) & ~(uint64_t)0xFFF;
+    if (end <= start) { return -EINVAL; }   // overflow
+
+    struct process *p = current_proc();
+    if (!p) { return -ESRCH; }
+    if (!vma_range_mapped(p, start, end - start)) { return -ENOMEM; }
+    return 0;
+}
+
 int64_t sys_arch_prctl(struct syscall_args *a) {
     struct thread *t = current_thread();
     if (!t || !t->proc) { return -ESRCH; }

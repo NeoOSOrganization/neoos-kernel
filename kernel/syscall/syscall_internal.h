@@ -133,6 +133,8 @@ int64_t sys_mkdir(struct syscall_args *a);
 int64_t sys_mmap(struct syscall_args *a);
 int64_t sys_mount(struct syscall_args *a);
 int64_t sys_mprotect(struct syscall_args *a);
+int64_t sys_mlock(struct syscall_args *a);
+int64_t sys_madvise(struct syscall_args *a);
 int64_t sys_munmap(struct syscall_args *a);
 int64_t sys_open(struct syscall_args *a);
 int64_t sys_pipe2(struct syscall_args *a);
@@ -184,5 +186,10 @@ int64_t sys_reboot(struct syscall_args *a);
 int64_t sys_dup(struct syscall_args *a);
 int64_t sys_dup2(struct syscall_args *a);
 int64_t sys_dup3(struct syscall_args *a);
+int64_t sys_sched_getaffinity(struct syscall_args *a);
+int64_t sys_membarrier(struct syscall_args *a);
+int64_t sys_sysinfo(struct syscall_args *a);
+int64_t sys_get_mempolicy(struct syscall_args *a);
+int64_t sys_statfs(struct syscall_args *a);
 
 #endif

@@ -22,6 +22,7 @@
 #include "mm/uaccess.h"
 #include "arch/cpu_local.h"
 #include "smp/smp.h"
+#include "smp/membarrier.h"
 #include "net/socket.h"
 #include "kernel.h"
 
@@ -540,4 +541,87 @@ int64_t sys_reboot(struct syscall_args *a) {
         return -EINVAL;
     }
     return 0;   // unreachable for the three real commands
+}
+
+// sched_getaffinity(pid, cpusetsize, mask) -- Linux shape. `pid` is
+// ignored (NeoOS has nothing resembling per-thread CPU pinning to
+// report differently per pid): every thread is affine to every online
+// CPU, so the answer is the same regardless of which one asked.
+// Found missing via dotnet NativeAOT's CoreCLR startup querying it
+// during RhInitialize. See docs/stdlib.md.
+int64_t sys_sched_getaffinity(struct syscall_args *a) {
+    uint64_t cpusetsize = a->a2;
+    uint64_t mask_ptr   = a->a3;
+    if (!mask_ptr) { return -EFAULT; }
+
+    int online = smp_online_count();
+    uint64_t need = (uint64_t)((online + 7) / 8);
+    if (need == 0) { need = 1; }
+    // Real Linux returns -EINVAL when the caller's buffer is too small
+    // to hold the whole mask -- it never truncates.
+    if (cpusetsize < need) { return -EINVAL; }
+
+    uint8_t mask[(MAX_CPUS + 7) / 8];
+    for (uint64_t i = 0; i < need; i++) { mask[i] = 0; }
+    for (int i = 0; i < online; i++) { mask[i >> 3] |= (uint8_t)(1u << (i & 7)); }
+
+    uint64_t missed = copy_to_user((void *)(uintptr_t)mask_ptr, mask, need);
+    if (missed > 0) { return -EFAULT; }
+    // The return value is the number of bytes actually written into
+    // the mask, per Linux's sched_getaffinity(2) -- musl's wrapper
+    // reads it, not just the success/failure of the call.
+    return (int64_t)need;
+}
+
+// membarrier(cmd, flags) -- Linux's command bitmask (kernel/smp/
+// membarrier.h). Real cross-CPU synchronisation, not a lie: NeoOS is
+// SMP-capable, and membarrier_global() (kernel/smp/membarrier.c) IPIs
+// every online CPU but this one and waits for each to acknowledge --
+// on a single-core box that is simply nothing to wait for.
+//
+// Every command below is serviced by the SAME global barrier: Linux's
+// PRIVATE_EXPEDITED variants only promise to reach the CALLING
+// process's own registered threads, which a global barrier already
+// does (and more) -- correctness never suffers from a barrier that
+// reaches more CPUs than strictly required, only efficiency does, and
+// NeoOS has no per-process CPU registration to make the distinction
+// meaningful yet. SYNC_CORE is included because IPI delivery is
+// already a serializing event on x86-64 (Intel SDM: an interrupt
+// forces the processor to complete every prior instruction before the
+// handler runs) -- the exact guarantee SYNC_CORE documents needing
+// beyond ordinary memory ordering.
+//
+// Found missing via dotnet NativeAOT's CoreCLR startup. See
+// docs/stdlib.md.
+int64_t sys_membarrier(struct syscall_args *a) {
+    int cmd   = (int)a->a1;
+    uint64_t flags = (uint64_t)a->a2;
+
+    if (cmd == MEMBARRIER_CMD_QUERY) {
+        return MEMBARRIER_CMD_GLOBAL
+             | MEMBARRIER_CMD_GLOBAL_EXPEDITED
+             | MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED
+             | MEMBARRIER_CMD_PRIVATE_EXPEDITED
+             | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED
+             | MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE
+             | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE;
+    }
+    if (flags != 0) { return -EINVAL; }
+
+    switch (cmd) {
+    case MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED:
+    case MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED:
+    case MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE:
+        // No per-process bookkeeping needed: the barrier below already
+        // reaches every CPU unconditionally, registered or not.
+        return 0;
+    case MEMBARRIER_CMD_GLOBAL:
+    case MEMBARRIER_CMD_GLOBAL_EXPEDITED:
+    case MEMBARRIER_CMD_PRIVATE_EXPEDITED:
+    case MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE:
+        membarrier_global();
+        return 0;
+    default:
+        return -EINVAL;
+    }
 }

@@ -197,7 +197,65 @@
 // 2026-09-07-clone-pthread.md and docs/stdlib.md.
 #define SYS_CLONE           92
 
+// sched_getaffinity(pid, cpusetsize, mask) -- Linux shape. Found
+// missing via dotnet NativeAOT's CoreCLR startup (PalGetCurrentThread
+// affinity query during RhInitialize). NeoOS reports every online CPU
+// as affine to every thread: there is no CPU-affinity/cpuset concept
+// to restrict it against. See docs/stdlib.md.
+#define SYS_SCHED_GETAFFINITY 93
+
+// membarrier(cmd, flags) -- Linux's command bitmask (see
+// kernel/smp/membarrier.h), backed by a real cross-CPU IPI broadcast
+// (kernel/smp/membarrier.c), not a lie: NeoOS is SMP-capable, and a
+// single-core box just has nothing to IPI. Also found missing via
+// CoreCLR's startup. See docs/stdlib.md.
+#define SYS_MEMBARRIER        94
+
+// mlock(addr, len) -- accepted and a genuine no-op success rather than
+// -ENOSYS: NeoOS has no swap and never pages out anonymous memory, so
+// every resident page is already exactly what mlock(2) asks for. Real
+// Linux's mlock() can still fail (ENOMEM against RLIMIT_MEMLOCK,
+// EFAULT on a bad range) -- NeoOS has no memlock rlimit to enforce, so
+// the only check kept is that the range is a real, mapped part of the
+// caller's address space. Also found missing via CoreCLR's startup
+// (GC card table / write-barrier metadata pinning). See docs/stdlib.md.
+#define SYS_MLOCK             95
+
+// sysinfo(struct sysinfo *) -- Linux shape, real numbers: totalram/
+// freeram come from kernel/mm/pmm.h's frame counters, not fabricated
+// ones. Found missing one syscall deeper into CoreCLR's startup, once
+// sched_getaffinity/membarrier/mlock stopped blocking it -- the GC's
+// own heap-sizing logic needs real total/free memory to size against.
+// See docs/stdlib.md.
+#define SYS_SYSINFO           96
+
+// statfs(path, struct statfs *) -- Linux shape. NeoOS reports a
+// generic, unnamed filesystem (f_type 0: no magic number this
+// implementation claims to match) with real block counts from
+// kernel/mm/pmm.h -- NeoOS's filesystems (FAT, ramfs, devfs, procfs)
+// have no unified free-space concept of their own to report instead.
+// Found alongside sysinfo/get_mempolicy. See docs/stdlib.md.
+#define SYS_STATFS            97
+
+// get_mempolicy(mode, nodemask, maxnode, addr, flags) -- Linux shape.
+// NeoOS has exactly one NUMA node, always: MPOL_DEFAULT, node 0. Found
+// alongside sysinfo/statfs. See docs/stdlib.md.
+#define SYS_GET_MEMPOLICY     98
+
+// madvise(addr, len, advice) -- Linux shape, and a genuine no-op
+// success for every advice value: it is purely advisory on Linux too
+// (a conforming kernel may ignore any of it), and NeoOS has nothing to
+// act on -- no swap to make MADV_DONTNEED/MADV_FREE meaningful, no
+// speculative readahead to steer with MADV_WILLNEED/MADV_SEQUENTIAL/
+// MADV_RANDOM. The one check kept is the one real Linux would also
+// make: the range must actually be mapped (ENOMEM otherwise). Found
+// hanging dotnet NativeAOT's CoreCLR GC (which retries indefinitely on
+// -ENOSYS rather than treating it as fatal, unlike the syscalls found
+// immediately before it -- the hang, not a crash or clean exit, was
+// the tell). See docs/stdlib.md.
+#define SYS_MADVISE           99
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX             93
+#define SYS_MAX              100
 
 #endif

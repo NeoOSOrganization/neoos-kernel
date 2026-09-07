@@ -185,3 +185,69 @@ int64_t sys_test_hook(struct syscall_args *a) {
     return -ENOSYS;
 #endif
 }
+
+// sysinfo(info) -- Linux shape, matching musl's struct sysinfo
+// (include/sys/sysinfo.h) field-for-field: uptime, loads[3], totalram,
+// freeram, sharedram, bufferram, totalswap, freeswap, procs+pad,
+// totalhigh, freehigh, mem_unit, then a 256-byte reserved tail. Real
+// numbers where NeoOS has them (totalram/freeram, from pmm's frame
+// counters), zero everywhere else -- no load average, no swap, no
+// high memory, no uptime clock wired to this yet. mem_unit is 1 so
+// the ram fields are read as exact bytes, not scaled.
+struct neoos_sysinfo {
+    uint64_t uptime;
+    uint64_t loads[3];
+    uint64_t totalram;
+    uint64_t freeram;
+    uint64_t sharedram;
+    uint64_t bufferram;
+    uint64_t totalswap;
+    uint64_t freeswap;
+    uint16_t procs, pad;
+    uint64_t totalhigh;
+    uint64_t freehigh;
+    uint32_t mem_unit;
+    uint8_t  reserved[256];
+};
+
+int64_t sys_sysinfo(struct syscall_args *a) {
+    uint64_t out = a->a1;
+    if (!out) { return -EFAULT; }
+
+    struct neoos_sysinfo si;
+    for (unsigned i = 0; i < sizeof(si); i++) { ((uint8_t *)&si)[i] = 0; }
+    si.totalram = pmm_total_frame_count() * PMM_FRAME_SIZE;
+    si.freeram  = pmm_free_frame_count()  * PMM_FRAME_SIZE;
+    si.mem_unit = 1;
+
+    uint64_t missed = copy_to_user((void *)(uintptr_t)out, &si, sizeof si);
+    if (missed > 0) { return -EFAULT; }
+    return 0;
+}
+
+// get_mempolicy(mode, nodemask, maxnode, addr, flags) -- Linux shape.
+// NeoOS has exactly one NUMA node: `mode` (if given) is always written
+// MPOL_DEFAULT (0), and `nodemask` (if given, and maxnode >= 1) is
+// written with exactly bit 0 set -- node 0 is the only node there is.
+// `addr`/MPOL_F_ADDR is not interpreted: with one node, "which node is
+// this address on" has only one possible answer regardless of which
+// address is asked about.
+#define MPOL_DEFAULT 0
+
+int64_t sys_get_mempolicy(struct syscall_args *a) {
+    uint64_t mode_ptr     = a->a1;
+    uint64_t nodemask_ptr = a->a2;
+    uint64_t maxnode      = a->a3;
+
+    if (mode_ptr) {
+        int mode = MPOL_DEFAULT;
+        uint64_t missed = copy_to_user((void *)(uintptr_t)mode_ptr, &mode, sizeof mode);
+        if (missed > 0) { return -EFAULT; }
+    }
+    if (nodemask_ptr && maxnode >= 1) {
+        uint64_t word = 1;   // node 0 only
+        uint64_t missed = copy_to_user((void *)(uintptr_t)nodemask_ptr, &word, sizeof word);
+        if (missed > 0) { return -EFAULT; }
+    }
+    return 0;
+}

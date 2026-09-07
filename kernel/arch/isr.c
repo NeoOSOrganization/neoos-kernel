@@ -7,6 +7,7 @@
 #include "drivers/char/timer.h"
 #include "smp/smp.h"
 #include "smp/tlb.h"
+#include "smp/membarrier.h"
 #include "drivers/irq/lapic.h"
 #include "drivers/input/keyboard.h"
 #include "drivers/net/virtio_net.h"
@@ -218,6 +219,11 @@ static void isr_handler_inner(struct registers *regs) {
 
     if (regs->vector_number == VECTOR_IPI_TLB) {
         ipi_tlb_handler();
+        return;
+    }
+
+    if (regs->vector_number == VECTOR_IPI_MEMBARRIER) {
+        ipi_membarrier_handler();
         return;
     }
 

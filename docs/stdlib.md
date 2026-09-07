@@ -676,6 +676,84 @@ a pair of fds it can write a byte into and `poll()` on.
   preserves message boundaries. Nothing on NeoOS relies on that
   preservation yet.
 
+## `sched_getaffinity`, `membarrier`, `mlock`, `madvise`, `sysinfo`, `statfs`, `get_mempolicy`
+
+```c
+#include <sched.h>
+int sched_getaffinity(pid_t pid, size_t cpusetsize, cpu_set_t *mask);
+#include <linux/membarrier.h>
+int membarrier(int cmd, unsigned int flags);
+#include <sys/mman.h>
+int mlock(const void *addr, size_t len);
+int madvise(void *addr, size_t len, int advice);
+#include <sys/sysinfo.h>
+int sysinfo(struct sysinfo *info);
+#include <sys/statfs.h>
+int statfs(const char *path, struct statfs *buf);
+#include <numaif.h>
+long get_mempolicy(int *mode, unsigned long *nodemask, unsigned long maxnode,
+                    void *addr, unsigned long flags);
+```
+
+Seven syscalls found missing one at a time while getting a dotnet
+NativeAOT (CoreCLR) binary running on NeoOS — its runtime
+initialization (`RhInitialize`, then the GC's own startup) calls each
+of these, and unlike most of musl's own feature probes, at least one
+of them (`mlock`) treats an outright `-ENOSYS` as fatal rather than
+falling back gracefully. All seven are genuine Linux shapes, not
+NeoOS-native additions, so none of them get a `lib/` wrapper — musl's
+existing headers already declare them.
+
+- **`sched_getaffinity`** — `pid` is ignored (NeoOS has no per-thread
+  CPU pinning to report differently per pid); the returned mask has
+  one bit set for every online CPU (`smp_online_count()`), the same
+  answer regardless of which thread asked. `-EINVAL` if `cpusetsize`
+  is too small to hold the whole mask (Linux never truncates).
+- **`membarrier`** — a REAL cross-CPU barrier
+  (`kernel/smp/membarrier.c`'s `membarrier_global()`), not a lie: it
+  IPIs every online CPU but the caller's and waits for each to
+  acknowledge before returning. On x86-64 taking an interrupt is
+  itself a serializing event, so IPI delivery alone satisfies every
+  command this implements — including the `SYNC_CORE` variants, which
+  document needing exactly that guarantee. Every non-`QUERY` command
+  (`GLOBAL`, `GLOBAL_EXPEDITED`, `PRIVATE_EXPEDITED`, and their
+  `REGISTER_*` counterparts) is serviced by the same global barrier:
+  Linux's `PRIVATE_EXPEDITED` variants only promise to reach the
+  calling process's own registered threads, which a global barrier
+  already does and more, and NeoOS has no per-process CPU registration
+  to make the narrower answer worth tracking. `QUERY` reports every
+  command above as supported.
+- **`mlock`** — a genuine no-op success, not a lie dressed up as one:
+  NeoOS has no swap and never pages out anonymous memory, so every
+  resident page already satisfies mlock(2)'s promise before this
+  function does anything. The one check kept is the one real Linux
+  would also make: the range must actually be mapped (`-ENOMEM`
+  otherwise). No `munlock` yet — add one the same way, if and when
+  something calls it.
+- **`madvise`** — also a genuine no-op success for every advice value:
+  advice is purely a hint a conforming kernel may ignore, and NeoOS
+  has nothing to act on for any of `MADV_DONTNEED`/`MADV_FREE`/
+  `MADV_WILLNEED`/etc (no swap, no speculative readahead to steer).
+  Same one check as `mlock`: the range must be mapped.
+- **`sysinfo`** — real `totalram`/`freeram`, taken directly from
+  `kernel/mm/pmm.h`'s frame counters (`mem_unit` is 1, so they read as
+  exact bytes). Everything else in `struct sysinfo` — load averages,
+  swap, shared/buffer/high memory, uptime — is zero; none of those
+  concepts exist on NeoOS yet.
+- **`statfs`** — the path must resolve (a bad path is `-ENOENT` like
+  `stat`), but the filesystem-specific fields are a generic,
+  best-effort answer: NeoOS mounts several unrelated filesystems (FAT,
+  ramfs, devfs, procfs, embedfs) with no single shared free-space or
+  magic-number concept, so `f_type` is 0 (no magic this implementation
+  claims to match) and the block counts are `kernel/mm/pmm.h`'s frame
+  counters — an honest number, just not literally "free space on this
+  path's own filesystem".
+- **`get_mempolicy`** — NeoOS has exactly one NUMA node, always:
+  `mode` (if given) is `MPOL_DEFAULT`, `nodemask` (if given, with
+  `maxnode >= 1`) has exactly bit 0 set. `addr`/`MPOL_F_ADDR` is not
+  interpreted — with one node, "which node is this address on" has
+  only one possible answer regardless of which address is asked about.
+
 ## File descriptors are objects, not vnodes
 
 An fd now carries an operations table rather than pointing straight at

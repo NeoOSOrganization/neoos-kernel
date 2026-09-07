@@ -377,6 +377,23 @@ int vma_mprotect(struct process *p, uint64_t addr, uint64_t len, uint32_t prot) 
     return rc;
 }
 
+int vma_range_mapped(struct process *p, uint64_t addr, uint64_t len) {
+    if (len == 0) { return 1; }
+    uint64_t end = addr + len;
+    if (end < addr) { return 0; }   // overflow
+
+    uint64_t f = spin_lock_irqsave(&p->mm_lock);
+    uint64_t cursor = addr;
+    int ok = 1;
+    while (cursor < end) {
+        struct vma *v = vma_find(p, cursor);
+        if (!v) { ok = 0; break; }
+        cursor = v->end;
+    }
+    spin_unlock_irqrestore(&p->mm_lock, f);
+    return ok;
+}
+
 int vma_fault(struct process *p, uint64_t addr, int write) {
     uint64_t f = spin_lock_irqsave(&p->mm_lock);
     int rc = vma_fault_locked(p, addr, write);

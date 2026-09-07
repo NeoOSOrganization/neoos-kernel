@@ -23,6 +23,7 @@
 #include "mm/paging.h"
 #include "mm/heap.h"
 #include "mm/uaccess.h"
+#include "mm/pmm.h"
 #include "arch/cpu_local.h"
 #include "smp/smp.h"
 #include "net/socket.h"
@@ -494,6 +495,54 @@ int64_t sys_newfstatat(struct syscall_args *a) {
     // AT_SYMLINK_NOFOLLOW is accepted and ignored: with no symlinks to
     // follow, following and not following give the same answer.
     return stat_by_path(a->a2, a->a3, a->a4);
+}
+
+// statfs(path, buf) -- Linux shape, matching musl's struct statfs
+// (include/bits/statfs.h) field-for-field. The path must resolve (a
+// bad path is -ENOENT/etc, same as stat) but the filesystem-specific
+// fields are a generic, best-effort answer: NeoOS mounts several
+// unrelated filesystems (FAT, ramfs, devfs, procfs, embedfs) with no
+// single shared free-space or magic-number concept to report, so
+// f_type is 0 (no magic this implementation claims to match) and the
+// block counts come from kernel/mm/pmm.h's frame counters -- an
+// honest number, just not literally "free space on this path's own
+// filesystem". Found alongside sysinfo/get_mempolicy, chasing dotnet
+// NativeAOT's CoreCLR startup one syscall at a time. See docs/stdlib.md.
+struct neoos_statfs {
+    uint64_t f_type, f_bsize;
+    uint64_t f_blocks, f_bfree, f_bavail;
+    uint64_t f_files, f_ffree;
+    uint32_t f_fsid[2];
+    uint64_t f_namelen, f_frsize, f_flags, f_spare[4];
+};
+
+int64_t sys_statfs(struct syscall_args *a) {
+    int64_t uptr = a->a1, ulen = a->a2, out_ptr = a->a3;
+    if (!out_ptr) { return -EFAULT; }
+
+    char path[VFS_MAX_PATH];
+    int rc = copy_user_path_at(uptr, ulen, path);
+    if (rc != 0) { return rc; }
+
+    fs_lock_acquire();
+    int err = 0;
+    struct vnode *vn = vfs_resolve(path, &err);
+    if (!vn) { fs_lock_release(); return err; }
+    vnode_put(vn);
+    fs_lock_release();
+
+    struct neoos_statfs sf;
+    for (unsigned i = 0; i < sizeof(sf); i++) { ((uint8_t *)&sf)[i] = 0; }
+    sf.f_bsize   = PMM_FRAME_SIZE;
+    sf.f_frsize  = PMM_FRAME_SIZE;
+    sf.f_blocks  = pmm_total_frame_count();
+    sf.f_bfree   = pmm_free_frame_count();
+    sf.f_bavail  = sf.f_bfree;
+    sf.f_namelen = 255;
+
+    uint64_t missed = copy_to_user((void *)(uintptr_t)out_ptr, &sf, sizeof sf);
+    if (missed > 0) { return -EFAULT; }
+    return 0;
 }
 
 // ---- scatter/gather I/O ---------------------------------------------
