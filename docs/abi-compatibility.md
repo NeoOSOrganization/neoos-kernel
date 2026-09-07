@@ -1031,3 +1031,35 @@ futex substrate when needed. Only musl's own exact
 `pthread_create` flag combination is accepted; a program using
 `clone(2)` directly for anything else (containers, `CLONE_VFORK`,
 manual process creation) gets `-EINVAL`.
+
+## Refresh — a hosted x86_64-neoos-linux-musl toolchain (2026-09-07)
+
+New host-level infrastructure, not a kernel change: a genuinely
+*hosted* GCC/G++ cross-toolchain (real `neoos-musl` libc, real CRT
+startup, real C++ exception-handling runtime) alongside the existing
+freestanding `x86_64-elf-gcc`. Recipe in `neoos-hosted-gcc`
+(`NeoOSOrganization/neoos-hosted-gcc`); compiled toolchain installed
+at `~/opt/cross-x86_64-neoos`. Built via `musl-cross-make`, substituting
+real `neoos-musl` (shimmed, syscall-translated) for stock musl as the
+bundled libc.
+
+**Verified working:** plain hosted C (`-static -mno-red-zone
+-mcmodel=large -fno-pic -T userland/user.ld`) builds and boots
+correctly — no manual `-nostdlib`/explicit `crt1.o` juggling needed,
+unlike the freestanding toolchain. A genuinely well-formed, statically
+linked, correctly-addressed dotnet NativeAOT C# binary also links
+successfully against it (see `docs/superpowers/plans/
+2026-09-07-hosted-neoos-gcc.md`'s post-implementation notes for the
+full story) — though the resulting binary does not yet run
+(CoreCLR's own runtime startup crashes; a separate, substantial
+porting effort, not a toolchain gap).
+
+**Known, live limitation:** C++ exception handling (`throw`/`catch`)
+does not reliably work with this toolchain's required `-mcmodel=large`
+— a documented GCC/binutils limitation (`.eh_frame`'s PC-relative
+range encoding can't represent addresses as far apart as the large
+code model permits), not something specific to NeoOS. Any future
+NeoOS port needing real C++ exceptions will need to either avoid this
+toolchain's large-model requirement (not possible while `user.ld`
+places code at `0x200000000000`) or find/build an alternative unwind
+strategy. Plain C code and C++ without exceptions are unaffected.

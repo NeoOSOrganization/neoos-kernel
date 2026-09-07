@@ -483,3 +483,95 @@ natural next step, now unblocked.
   and `/home/neo/opt/cross-x86_64-neoos` (the install path) are used
   identically in `config.mak`, `build.sh`, and every later task's
   `PATH` export.
+
+## Post-implementation notes (real-world deviations from the plan)
+
+Recorded here rather than rewritten into the tasks above, since the
+plan's own steps were followed faithfully -- these are things learned
+DURING execution that the plan (reasonably) couldn't have anticipated:
+
+- **`TARGET = x86_64-neoos-musl` is invalid.** GNU `config.sub`
+  requires a recognized kernel component before a libc suffix like
+  `musl` -- fixed to `x86_64-neoos-linux-musl` (vendor slot = `neoos`,
+  kernel = `linux`, accurate: NeoOS's ABI genuinely is Linux-shaped).
+- **`build.sh` needed `set -o pipefail`.** Without it, `make | tee`
+  always exits 0 regardless of `make`'s real exit code, so a failed
+  build silently proceeded to `make install`.
+- **The shim's `.s` files needed `#` comments, not `//`.** A freshly
+  built binutils rejected `//` as junk after a register operand in
+  every shimmed `.s` file (not run through cpp the way `.S` files are,
+  so the raw assembler must understand the comment syntax itself).
+  `x86_64-elf-gcc`'s bundled assembler tolerating `//` turned out to be
+  that one assembler's own leniency, not a portable guarantee. Fixed
+  in `NeoOS/third_party/shim/*.s` (the canonical source), verified no
+  regression against the existing `x86_64-elf-gcc` build + full
+  gauntlet.
+- **`-mno-red-zone` is required, and matters even for already-compiled
+  library code.** `musl-cross-make`'s own musl build uses upstream's
+  default CFLAGS (no red-zone protection); NeoOS's interrupt/syscall
+  entry does not preserve the red zone. Added via `MUSL_CONFIG +=
+  CFLAGS="-mno-red-zone ..."` and `GCC_CONFIG += CFLAGS_FOR_TARGET="
+  -mno-red-zone ..."` (the latter for libgcc/libgcc_eh) -- a flag
+  added only to future user-code compiles would leave musl's own
+  already-compiled `.o` files inside `libc.a` unprotected.
+- **`-mcmodel=large -fno-pic` are required for the same reason**:
+  `user.ld` places NeoOS user code at `0x200000000000` (PML4 slot 64,
+  deliberately not slot 0 -- see the file's own comment), far beyond
+  what 32-bit-relative relocations (small/medium code model) can
+  reach. Diagnosed via a real, hard debugging session: a binary linked
+  WITHOUT `-T user.ld` landed at the small-model default `0x400000`
+  and segfaulted on its very first instruction (`v=0e` page fault,
+  error code showing instruction-fetch + protection-violation) because
+  the intermediate PML4/PDPT/PD page-table entries covering that
+  address range lack the User bit (x86-64 paging requires it set at
+  EVERY level of the walk, not just the final PTE) -- `0x400000` was
+  simply never meant to host NeoOS user code at all. Once linked
+  correctly with `-T user.ld`, that binary needed `-mcmodel=large`
+  too, for the reason above.
+- **GCC's C++ exception handling and `-mcmodel=large` do not reliably
+  coexist on x86-64** -- a documented, longstanding GCC/binutils
+  limitation (`.eh_frame`'s PC-relative range encoding can't represent
+  addresses as far apart as the large code model permits). A real
+  `throw`/`catch` test using `std::runtime_error` also hit a separate,
+  unrelated linker issue first (GCC's transactional-memory "clone"
+  symbols, always emitted by `libstdc++`'s precompiled exception
+  classes regardless of whether `libitm` is built) -- worked around by
+  testing with a minimal custom exception type instead, which still
+  isolated the REAL remaining issue: the `throw` itself reaches
+  `abort()` instead of unwinding to the `catch`. **This is a live,
+  unresolved limitation of this toolchain as configured** -- C++
+  exceptions cannot be relied on for any future NeoOS port built with
+  it. C code (no exceptions) is unaffected and fully proven working.
+- **NativeAOT retry (the original trigger for this whole milestone):
+  tried, with real, significant progress and one real, unresolved
+  gap.** Using `-p:CppCompilerAndLinker=x86_64-neoos-linux-musl-gcc`
+  (this toolchain) plus `-p:StaticExecutable=true
+  -p:PositionIndependentExecutable=false` and a `-T user.ld`/
+  `--no-relax` injection via a `<ExtraLinkerArg>` `ItemGroup` in the
+  `.csproj`, `dotnet publish -p:PublishAot=true` for `linux-musl-x64`
+  produced a genuinely well-formed static NeoOS binary from real C#
+  source: correct ELF type (`EXEC`, not `DYN`), correct entry point
+  address (`0x200000001000`, inside `user.ld`'s required range),
+  correctly linked against NeoOS's own `neoos-musl` and this
+  toolchain's own `crtbeginT.o`/`libgcc_eh.a` (needed one additional
+  small static dependency built fresh against this toolchain: `libz.a`
+  for `libSystem.IO.Compression.Native.a`, since neither `neoos-musl`
+  nor a generic musl-cross-make build ships one). **This is a genuine
+  result** -- the link-level story for statically linking a NativeAOT
+  C# binary against a from-scratch OS now works.
+  **What does NOT yet work: the binary crashes on startup** (SIGSEGV,
+  `CR2=0x500000000008` -- a tagged/poisoned-pointer address pattern
+  typical of CoreCLR's own GC/type-system bootstrap sequence hitting
+  something not yet initialized the way it expects on a real Linux
+  host). This is CoreCLR's native PAL (`libSystem.Native.a` and the GC
+  runtime's own startup path) expecting OS behaviors/syscalls beyond
+  what `neoos-musl`'s translation currently provides or what NeoOS's
+  process-startup contract currently guarantees -- porting that
+  startup sequence to a genuinely novel OS is its own substantial,
+  open-ended effort (comparable in scope to a real CoreCLR PAL port),
+  not a quick follow-up fix. Left for a dedicated future milestone
+  with its own brainstorm/spec if pursued -- the interpreter-based
+  `neoos-dotnet-clr` design (`docs/superpowers/specs/
+  2026-09-07-neoos-dotnet-clr-design.md`) remains the lower-risk path
+  to a working "C# on NeoOS" in the meantime, since it depends on none
+  of CoreCLR's runtime internals.
