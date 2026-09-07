@@ -33,14 +33,32 @@ extern void fork_trampoline(void);
 struct rq *cpu_rq(int cpu_index) { return &cpus[cpu_index].rq; }
 struct rq *this_rq(void)         { return &this_cpu()->rq; }
 
-// The rq clock. SCH-1 uses the 100 Hz tick counter -- 10 ms
-// granularity, coarse but monotonic and correct. A finer source
-// (rdtsc scaled) is a later refinement.
-#define NS_PER_TICK 10000000ULL
+// The rq clock. SCH-1 Task 4 moved this from the 100 Hz tick counter
+// (10 ms granularity -- far too coarse for a 0.7 ms base slice) to
+// sched_clock_ns(), a calibrated rdtsc-based nanosecond clock. Steal-
+// time / irq-time accounting (clock_task < clock) is still SCH-7.
 void rq_clock_update(struct rq *rq) {
-    uint64_t now = timer_ticks() * NS_PER_TICK;
+    uint64_t now = sched_clock_ns();
     rq->clock = now;
-    rq->clock_task = now;   // == clock until irq/steal-time accounting (SCH-7)
+    rq->clock_task = now;
+}
+
+// Timer-tick entry points. timer_handler holds no rq lock; these take
+// it, so fair.c stays "lock already held" throughout.
+int sched_tick(struct rq *rq) {
+    uint64_t f = spin_lock_irqsave(&rq->lock);
+    rq_clock_update(rq);
+    int resched = fair_entity_tick(rq);
+    spin_unlock_irqrestore(&rq->lock, f);
+    return resched;
+}
+
+uint64_t sched_slice_remaining_ns(struct rq *rq) {
+    uint64_t f = spin_lock_irqsave(&rq->lock);
+    rq_clock_update(rq);
+    uint64_t ns = fair_slice_remaining_ns(rq);
+    spin_unlock_irqrestore(&rq->lock, f);
+    return ns;
 }
 
 // Blocks until no CPU is executing on `t`'s kernel stack any more.

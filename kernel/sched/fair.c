@@ -437,6 +437,49 @@ void fair_accept_stolen(struct rq *rq, struct thread *t) {
     enqueue_entity(&rq->cfs, &t->se);
 }
 
+// ---- tick / preemption (SCH-1 Task 4) -------------------------------
+//
+// EEVDF preemption is event-driven: fair_pick tells the timer code how
+// long the picked task may run (fair_slice_remaining_ns), which arms a
+// one-shot LAPIC timer. When it fires, timer_handler calls sched_tick
+// -> fair_entity_tick, which decides whether to actually switch.
+
+// A task that just got the CPU is not preempted for a marginally
+// earlier-deadline waiter until it has run this long -- stops two
+// near-equal tasks from trading the CPU every interrupt.
+#define SCHED_MIN_PREEMPT_NS 100000ULL   // 0.1 ms
+
+#define SCHED_HOUSEKEEPING_NS 10000000ULL  // 10 ms fallback tick
+
+int fair_entity_tick(struct rq *rq) {
+    struct cfs_rq *cfs = &rq->cfs;
+    update_curr(cfs);
+
+    struct sched_entity *curr = cfs->curr;
+    if (!curr || cfs->nr_running <= 1) { return 0; }
+
+    uint64_t ran = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;
+    if (ran >= slice_of(curr)) { return 1; }          // slice spent
+    if (ran < SCHED_MIN_PREEMPT_NS) { return 0; }     // anti-thrash floor
+
+    struct sched_entity *first = pick_eevdf(cfs);
+    if (first && first != curr && vtime_before(first->deadline, curr->deadline)) {
+        return 1;                                     // someone more urgent
+    }
+    return 0;
+}
+
+uint64_t fair_slice_remaining_ns(struct rq *rq) {
+    struct cfs_rq *cfs = &rq->cfs;
+    struct sched_entity *curr = cfs->curr;
+    if (!curr || cfs->nr_running <= 1) { return SCHED_HOUSEKEEPING_NS; }
+
+    uint64_t ran = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;
+    uint64_t sl  = slice_of(curr);
+    if (ran >= sl) { return SCHED_MIN_PREEMPT_NS; }
+    return sl - ran;
+}
+
 // ---- selftest hooks (used by kernel/sched/eevdf_selftest.c) ----------
 
 uint64_t eevdf_test_V(struct cfs_rq *cfs) { return avg_vruntime(cfs); }

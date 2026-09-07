@@ -103,3 +103,14 @@ void lapic_timer_start_periodic(uint32_t initial_count, uint8_t vector) {
     lapic_write(LAPIC_REG_LVT_TIMER, (uint32_t)vector | LVT_TIMER_PERIODIC);
     lapic_write(LAPIC_REG_TIMER_INIT, initial_count);
 }
+
+// One-shot: fires `vector` once after `initial_count` timer ticks, then
+// the counter sits at 0 until INIT is written again. The scheduler
+// re-arms this on every timer interrupt (kernel/drivers/char/timer.c)
+// for the running task's remaining slice, capped at the housekeeping
+// interval -- event-driven preemption instead of a fixed periodic tick.
+void lapic_timer_start_oneshot(uint32_t initial_count, uint8_t vector) {
+    lapic_write(LAPIC_REG_TIMER_DIV, 0x3); // divide by 16
+    lapic_write(LAPIC_REG_LVT_TIMER, (uint32_t)vector); // no PERIODIC bit
+    lapic_write(LAPIC_REG_TIMER_INIT, initial_count);
+}

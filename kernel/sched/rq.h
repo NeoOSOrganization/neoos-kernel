@@ -68,6 +68,18 @@ void           fair_accept_stolen(struct rq *rq, struct thread *t); // migrated-
 // Set rq->clock / rq->clock_task from the monotonic ns source.
 void rq_clock_update(struct rq *rq);
 
+// Called from timer_handler on every tick. Takes rq->lock, charges the
+// running task, and returns 1 if it should be preempted now (slice
+// spent, or a more-eligible task is waiting past the anti-thrash
+// floor). The caller then invokes schedule().
+int fair_entity_tick(struct rq *rq);          // fair.c, rq->lock held
+int sched_tick(struct rq *rq);                // sched.c, takes rq->lock
+
+// Nanoseconds of slice the running task has left before it must be
+// preempted, for arming the one-shot timer. HOUSEKEEPING_NS if idle.
+uint64_t fair_slice_remaining_ns(struct rq *rq);   // fair.c, rq->lock held
+uint64_t sched_slice_remaining_ns(struct rq *rq);  // sched.c, takes rq->lock
+
 // Boot selftest: the EEVDF virtual-time arithmetic.
 void eevdf_selftest(void);
 

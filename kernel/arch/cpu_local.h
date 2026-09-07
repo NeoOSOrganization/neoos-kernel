@@ -43,9 +43,11 @@ struct cpu {
     // CPU_* byte offsets asserted below (which only cover the first
     // six fields) are undisturbed.
     struct rq         rq;
-    // Ticks left in the running thread's time slice. Removed by SCH-1
-    // Task 4 (one-shot timer replaces the fixed countdown).
-    uint32_t          timeslice_remaining;
+    // SCH-1 Task 4: nanoseconds this CPU's one-shot LAPIC timer was last
+    // armed for. timer_handler reads it back as the elapsed interval
+    // (the one-shot always runs to completion) to advance the wall
+    // clock, then re-arms for the running task's remaining slice.
+    uint64_t          timer_armed_ns;
     // The loopback depth for code with no thread -- kmain during boot,
     // where c->current is still 0. Preemption cannot move that, so a
     // per-CPU counter is right there and wrong everywhere else; see

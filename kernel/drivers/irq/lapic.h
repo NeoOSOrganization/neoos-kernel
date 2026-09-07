@@ -14,5 +14,6 @@ uint32_t lapic_get_id(void);
 void lapic_timer_start_oneshot_max(void);
 uint32_t lapic_timer_stop_and_read(void);
 void lapic_timer_start_periodic(uint32_t initial_count, uint8_t vector);
+void lapic_timer_start_oneshot(uint32_t initial_count, uint8_t vector);
 
 #endif
