@@ -86,6 +86,137 @@ branch: add concurrent `epoll_ctl`/`close` churn, `brk`, and a brief
 `fork`-COW to `mmstress`, and bisect which addition breaks it. Do NOT
 do an mm-locking redesign without the user.
 
+## Phase 1a "escalate" progress (2026-09-08, session b89806d7)
+
+**ROOT CAUSE FOUND — and it is not SMP and not mm-locking.**
+
+`mmstress` was escalated (`userland/mmstress.c`: raw-syscall epoll/pipe/
+close churn, `brk` churn, `fork`-COW phase, all behind `MMS_*` compile
+knobs). But the pure-mm path — every `MMS_*` off, i.e. the exact code
+Phase 1 declared "clean at -smp 1/2/4" — **fails deterministically at
+-smp 1** as well as 2 and 4. The Phase 1 "clean" claim was wrong (or
+the libneoos rebuild since changed the pthread/alloc profile enough to
+expose it). Signature: `[mmstress] FAIL mmap` (a 1-page `mmap` returns
+`MAP_FAILED`) and/or the `[usrflt] … cr2=…fff` + `[fault-audit] VMA=
+covered … no PTE` fault — **the identical signature as the .NET crash**
+— followed by a flood of `[tlb] out of memory deferring a frame;
+leaking it` and pmm draining from 0x74f2 free frames to ~0x60.
+
+Instrumentation added to `kernel/smp/tlb.c` (`tlb_dbg_*` counters, dumped
+by `tlb_dbg_dump()` from `kernel_shutdown`) and a per-exit line in
+`proc_put_live`. A representative -smp 1 run:
+
+```
+[tlb-dbg] exit pid=2 pml4=0x00fd7000 deferred+=0x810   (2064 frames)
+[tlb-dbg] exit pid=3 pml4=0x0600c000 deferred+=0x810
+[tlb-dbg] exit pid=4 pml4=0x06826000 deferred+=0x810
+[tlb-dbg] exit pid=5 pml4=0x01058000 deferred+=0x810
+[tlb-dbg] exit pid=6 pml4=0x01861000 deferred+=0x810
+[tlb-dbg] exit pid=7 pml4=0x0407f000 deferred+=0x810
+[tlb-dbg] deferred=… freed=… leaked=0x44d flush=…
+          skipowner=0xe1201 queued_now=0x100 overflow_now=0x2f60
+```
+
+`queued_now (256) + overflow_now (12128) = 12384 = 6 × 2064` — the
+entire address space of every one of pids 2–7.
+
+**The mechanism:**
+1. The TLB deferred-free queue (`kernel/smp/tlb.c`) is drained by
+   exactly one thing: a `tlb_shootdown(owner_pml4)` whose argument
+   matches the `owner` tag the frames were deferred with. `vma_*`'s
+   `vma_tlb_settle` does this for live munmap/mprotect; `proc_reap`
+   does it (`tlb_shootdown(p->reap_pml4_phys)`) for a process's whole
+   address space, which `proc_put_live` / `process_exit` only *defer*
+   (they run with IF off on a ZOMBIE thread and cannot shoot down).
+2. **`proc_reap` only runs when a zombie is `wait()`ed.** Pids 2–7 are
+   the boot-time network self-tests (arp/icmp/tcp/dhcp/…). They exit,
+   are reparented to init — and the `mmstress` INITTAB is just
+   `wait /mmstress.nex`, so init never reaps them. Their 12 384
+   deferred frames sit in the queue **forever**.
+3. Those orphans saturate the 256-entry `deferred_frames[]` fast array
+   (all with an `owner` no future shootdown targets — hence
+   `skipowner` in the hundreds of thousands: every `mmstress` flush
+   re-walks and re-skips all 256). Every subsequent defer — including
+   all of `mmstress`'s own munmap frames — detours onto the unbounded
+   `deferred_overflow` kmalloc list.
+4. `mmstress`'s own overflow frames *do* drain on its own flushes, but
+   the constant kmalloc/kfree churn plus the permanently-pinned 12 384
+   frames drives pmm to exhaustion; then `kmalloc` for an overflow
+   node fails and `tlb_defer_free` **leaks** the frame outright
+   (`leaked=0x44d`). Past that point `vma_fault` can't get a frame →
+   PTE never installed → "VMA covered, no PTE" → SIGSEGV.
+
+**Why .NET shows it as a rare concurrent-only crash:** same exhaustion,
+reached more slowly. A long-lived .NET process doing GC `mmap`/`munmap`
++ thread-stack churn on a system that already has thousands of orphaned
+boot-selftest frames pinned just needs enough munmap volume to cross
+the threshold; more concurrency = more munmap/s = crosses it during a
+request instead of never. "Adding serial prints makes it disappear" =
+slower = fewer munmaps before the workload finishes.
+
+**Fix options (for the user to choose):**
+- **A. Opportunistic drain of dead-owner frames.** When `free_address_
+  space` defers a whole address space and every thread of the process
+  is already off every CPU (true at `process_exit`: the exiting CPU
+  has already reloaded CR3 to `p4_table`, and `schedule()` writes CR3
+  on every switch so no other CPU can still hold that dead pml4), the
+  frames are immediately safe to `pmm_free` with **no IPI at all**.
+  Drain them right there instead of waiting for a `proc_reap` that may
+  never come.
+- **B. Saturation safety-valve.** When `deferred_n` hits `DEFER_MAX`,
+  do one full `tlb_shootdown(0)` (always safe, drains every owner)
+  before falling back to the overflow list. Cheap; bounds the damage
+  from any orphan source, not just unreaped zombies.
+- **C. Reap orphans.** Kernel-side reaper for processes reparented to
+  init, or make init `wait()`-loop. Addresses the zombie leak only;
+  A or B are more robust.
+
+### Fix landed
+
+**B implemented** in `kernel/smp/tlb.c:tlb_shootdown`: when the deferred
+queue has a backlog (overflow list non-empty, or the 256-entry fast
+array full), the shootdown is promoted to a full one (`pml4_phys = 0`)
+before it runs — a full shootdown reaches every CPU and releases every
+owner's frames, so it clears the orphans. Self-limiting: the first
+promoted shootdown drains the backlog, the next caller is not promoted.
+Not an mm-locking change; no new lock order.
+
+Verified with `userland/mmstress.c` (pure mm, all `MMS_*` off):
+- **before:** deterministic fail at -smp 1/2/4; pmm drains 0x74f2 → ~0x60.
+- **after:** `[mmstress] ALL PASSED` reliably at -smp 1 and -smp 4;
+  pmm healthy at shutdown (~0x6780 free); `[tlb] out of memory` flood
+  gone; `deferred == freed`, `leaked == 0`.
+
+A (drain dead-owner frames at exit without waiting for `proc_reap`) not
+implemented — B alone fixes the observed failure and is the safer
+minimal change. A stays on the table if an orphan source appears that B
+can't keep up with.
+
+### Secondary finding (not yet fixed) — -smp 2 thread-create EAGAIN
+
+With the leak fixed, `mmstress` at **-smp 2** still intermittently hits
+`[mmstress] FAIL pthread_create idx=7 rc=-11` (`-EAGAIN`) — the 8th
+worker. `clone_task` returns 0 (→ `-EAGAIN`) from one of: `thread_alloc`
+kmalloc failure, or `pmm_alloc(KERNEL_STACK_ORDER)` (an **order-2 /
+16 KiB contiguous** block) failing. pmm has ~26 000 free frames at the
+time, so the likely cause is **buddy-allocator fragmentation**: 8
+threads hammering order-0 mmap/munmap leave no free order-2 block for a
+kernel stack. Newly *visible* (the test now runs long enough to reach
+that state), not newly caused. -smp 1 and -smp 4 are clean. Worth its
+own investigation — a kernel-stack allocator that can't fall back to
+non-contiguous pages, or a small reserve pool, is the likely fix.
+
+### Escalation status (`userland/mmstress.c` `MMS_*` knobs)
+
+- `MMS_EPOLL` (pipe + `epoll_ctl` ADD/DEL + `epoll_wait` + close churn
+  on one shared epoll fd), `MMS_BRK` (inert — `sys_brk` is a stub),
+  `MMS_FORK` (fork-COW phase). Each knob **alone** passes at -smp 4.
+- `MMS_EPOLL + MMS_BRK` together fails at -smp 4 with the same
+  frame-exhaustion signature — i.e. "epoll churn + one more thread"
+  drives pmm down faster than the workers can recycle. Overlaps the
+  -smp 2 EAGAIN finding; both point at allocator behaviour under this
+  many threads, not at a correctness race. Not yet bisected further.
+
 ## Phase 1 — Root-cause investigation (no fixes yet)
 
 ### 1a. Reproduce deterministically, minimally, without .NET

@@ -720,7 +720,7 @@ test-wire: iso disk-image
 # bisect: `make mmstress SMP_CPUS=1`, `SMP_CPUS=2`, `SMP_CPUS=4`.
 $(USERLAND_BUILD)/MMSTRESS.ELF: $(USERLAND_DIR)/mmstress.c $(USERLAND_DIR)/user.ld $(LIBNEOOS_DIR)/lib/crt0.o $(LIBNEOOS_DIR)/lib/libneoos.a
 	@mkdir -p $(USERLAND_BUILD)
-	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIBNEOOS_DIR)/lib/crt0.o $(USERLAND_DIR)/mmstress.c -L$(LIBNEOOS_DIR)/lib -lneoos
+	$(CC) $(USER_CFLAGS) $(EXTRA_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIBNEOOS_DIR)/lib/crt0.o $(USERLAND_DIR)/mmstress.c -L$(LIBNEOOS_DIR)/lib -lneoos
 
 .PHONY: mmstress
 mmstress: iso disk-image $(USERLAND_BUILD)/MMSTRESS.ELF

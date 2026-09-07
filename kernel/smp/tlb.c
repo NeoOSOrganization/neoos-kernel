@@ -235,6 +235,30 @@ void tlb_shootdown(uint64_t pml4_phys) {
 
     shootdown_acquire();
 
+    // Orphan backlog. The deferred queue is normally drained per-owner:
+    // each address space's frames are released by a tlb_shootdown aimed
+    // at its own pml4 -- a live munmap/mprotect's vma_tlb_settle, or
+    // proc_reap for the whole address space of an exited process. But
+    // proc_reap only runs when a zombie is wait()ed. A process that
+    // exits and is reparented to an init that never reaps it -- the
+    // boot-time network self-tests are exactly this -- leaves its ENTIRE
+    // address space, thousands of frames, queued with an owner no future
+    // shootdown will ever name. Those saturate the fast array and spill
+    // onto the unbounded overflow list, and a sustained munmap workload
+    // then bleeds pmm dry; past that point vma_fault cannot get a frame
+    // and the next user write faults on a VMA-covered-but-unmapped page.
+    //
+    // A full shootdown (pml4_phys == 0) reaches every CPU and releases
+    // EVERY owner's frames, so promoting to one whenever a backlog has
+    // built up clears the orphans. Self-limiting: the first promoted
+    // shootdown empties the backlog, so the next caller is not promoted.
+    if (pml4_phys != 0) {
+        uint64_t lf = spin_lock_irqsave(&deferred_lock);
+        int backlog = (deferred_overflow != 0) || (deferred_n >= DEFER_MAX);
+        spin_unlock_irqrestore(&deferred_lock, lf);
+        if (backlog) { pml4_phys = 0; }
+    }
+
     int self   = (int)(this_cpu() - &cpus[0]);
     int online = smp_online_count();
 
