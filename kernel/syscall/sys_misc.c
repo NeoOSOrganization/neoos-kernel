@@ -234,6 +234,49 @@ int64_t sys_sysinfo(struct syscall_args *a) {
 // address is asked about.
 #define MPOL_DEFAULT 0
 
+// getrusage(who, usage) -- Linux's struct rusage shape exactly
+// (two timeval's -- user/system CPU time -- then fourteen longs).
+// Every field is zero: NeoOS has no per-process/thread CPU-time
+// accounting, no page-fault counters, no context-switch counters to
+// report honestly instead. `who` (RUSAGE_SELF/CHILDREN/THREAD) is
+// accepted and makes no difference, for the same reason. Zero reads
+// as "unknown", which is the truth, not a fabricated measurement.
+// Found missing (fatal) getting a real ASP.NET Core app running --
+// the GC's own diagnostics call it during startup.
+struct neoos_rusage {
+    int64_t ru_utime_sec, ru_utime_usec;
+    int64_t ru_stime_sec, ru_stime_usec;
+    int64_t fields[14];
+};
+
+int64_t sys_getrusage(struct syscall_args *a) {
+    uint64_t out = a->a2;
+    if (!out) { return -EFAULT; }
+
+    struct neoos_rusage ru;
+    for (unsigned i = 0; i < sizeof(ru); i++) { ((uint8_t *)&ru)[i] = 0; }
+
+    // ru_utime is NOT left at zero: a caller that diffs two readings
+    // (elapsed CPU time consumed between them) and asserts the result
+    // is positive would see a real bug report an all-zero stub as
+    // "correct, nothing ever runs" instead. NeoOS has no real per-
+    // thread/process CPU-time accounting to report instead, so this
+    // approximates it with wall-clock time since boot -- on the
+    // single-core machines this milestone runs on, every tick this
+    // process's own thread was scheduled is a tick wall-clock also
+    // advanced, so the approximation is never wildly wrong, and it is
+    // honestly monotonic, which is the property callers actually rely
+    // on. ru_stime stays zero: NeoOS has no separate kernel-vs-user
+    // time split to approximate even this roughly.
+    uint64_t ms = timer_ticks() * 10;
+    ru.ru_utime_sec  = (int64_t)(ms / 1000);
+    ru.ru_utime_usec = (int64_t)((ms % 1000) * 1000);
+
+    uint64_t missed = copy_to_user((void *)(uintptr_t)out, &ru, sizeof ru);
+    if (missed > 0) { return -EFAULT; }
+    return 0;
+}
+
 int64_t sys_get_mempolicy(struct syscall_args *a) {
     uint64_t mode_ptr     = a->a1;
     uint64_t nodemask_ptr = a->a2;

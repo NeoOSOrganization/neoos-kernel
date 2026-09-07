@@ -14,6 +14,7 @@
 #include "sync/waitq.h"
 #include "sync/poll_head.h"
 #include "sync/epoll.h"
+#include "sync/inotify.h"
 #include "drivers/char/timer.h"
 #include "mm/paging.h"
 #include "mm/heap.h"
@@ -362,4 +363,30 @@ int64_t sys_epoll_wait(struct syscall_args *a) {
 // as a divergence rather than silently ignored.
 int64_t sys_epoll_pwait(struct syscall_args *a) {
     return epoll_wait_core(a);
+}
+
+// ---- inotify -------------------------------------------------------
+//
+// See kernel/sync/inotify.h/.c for the object and its scope (a real
+// fd, correctly never-readable, no actual filesystem watching).
+
+int64_t sys_inotify_init1(struct syscall_args *a) {
+    return inotify_create((int)a->a1);
+}
+
+// a2/a3 are the watched path's (pointer, length) -- unused: the watch
+// is real (a distinct wd comes back) but names nothing, since nothing
+// will ever fire on it either way. a4 is the requested mask.
+int64_t sys_inotify_add_watch(struct syscall_args *a) {
+    struct process *p = current_proc();
+    struct file_descriptor *f = fd_get(p, (int)a->a1);
+    if (!f) { return -EBADF; }
+    return inotify_add_watch_do(f, (uint32_t)a->a4);
+}
+
+int64_t sys_inotify_rm_watch(struct syscall_args *a) {
+    struct process *p = current_proc();
+    struct file_descriptor *f = fd_get(p, (int)a->a1);
+    if (!f) { return -EBADF; }
+    return inotify_rm_watch_do(f, (int)a->a2);
 }

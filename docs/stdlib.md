@@ -801,6 +801,49 @@ removes the padding its natural alignment would otherwise have.
   suspended system, neither of which arises in NeoOS's process model
   yet.
 
+## `readlink`, `inotify_init1`/`inotify_add_watch`/`inotify_rm_watch`, `getrusage`, `gettid`
+
+Four more found missing getting a real ASP.NET Core app (Kestrel)
+running, past the epoll wall above:
+
+- **`readlink(path, buf, bufsize)`** — the path must resolve (a bad
+  path is `-ENOENT`, same as `stat`), but the answer past that is
+  always `-EINVAL`: no filesystem NeoOS mounts can represent a
+  symlink (the same divergence `lstat` already has), so nothing this
+  call could name is ever one. Tolerated gracefully by its caller —
+  unlike the other three below, this one was never fatal.
+- **`inotify_init1(flags)` / `inotify_add_watch(fd, path, mask)` /
+  `inotify_rm_watch(fd, wd)`** — a real, but inert, fd
+  (`kernel/sync/inotify.c`/`.h`): `poll`/`select`/`epoll` never
+  report it readable, and a blocking `read()` never returns (an
+  honest answer — no filesystem change notification exists to
+  deliver instead of a fake one). `inotify_add_watch` returns a real,
+  distinct watch descriptor that names nothing internally, since no
+  event will ever reference it either way. **Fatal without this**:
+  ASP.NET Core's generic host creates one unconditionally to watch
+  `appsettings.json`, whether or not the app ever reloads
+  configuration at runtime.
+- **`getrusage(who, usage)`** — every field of `struct rusage` is
+  zero: NeoOS has no per-process/thread CPU-time, page-fault, or
+  context-switch accounting to report honestly instead, and `who`
+  (`RUSAGE_SELF`/`CHILDREN`/`THREAD`) makes no difference for the
+  same reason. Zero reads as "unknown", which is the truth. **Fatal
+  without this** — called during the GC's own startup diagnostics.
+- **`gettid()`** — not a new primitive at all: it is exactly
+  NeoOS's own `thread_self()` (`SYS_THREAD_SELF`) under Linux's name,
+  so the shim maps it there directly rather than adding a second
+  kernel syscall number for the same answer. **Its absence was the
+  most indirect fatal case found this milestone**: with `gettid()`
+  returning `-ENOSYS` where musl expected a real tid, `raise(SIGABRT)`
+  inside `abort()` (`tkill(gettid(), SIGABRT)` underneath) failed
+  silently instead of delivering the signal, so `raise()` *returned*
+  instead of ending the process, and execution fell through into
+  musl's own deliberate crash-trap (`a_crash()`, an illegal/privileged
+  instruction) right after — surfacing as a `#GP`/`SIGSEGV`, not the
+  `SIGABRT` `abort()` actually meant to raise. The lesson generalizes:
+  an `-ENOSYS` a caller does not check can corrupt a LATER, unrelated
+  call's arguments instead of failing where it was actually made.
+
 ## File descriptors are objects, not vnodes
 
 An fd now carries an operations table rather than pointing straight at

@@ -468,6 +468,28 @@ int64_t sys_fstat(struct syscall_args *a) {
     return 0;
 }
 
+// readlink(path, buf, bufsize) -- the path must resolve (a bad path is
+// -ENOENT, same as stat), but the answer past that is always -EINVAL:
+// no filesystem NeoOS mounts can represent a symlink (the same
+// divergence lstat already records above), so nothing this call could
+// name is ever one. Found missing getting a real ASP.NET Core app
+// running -- the generic host's startup path calls it, tolerates the
+// failure, and falls back (unlike inotify_init1's fatal absence, just
+// below).
+int64_t sys_readlink(struct syscall_args *a) {
+    char path[VFS_MAX_PATH];
+    int rc = copy_user_path_at(a->a1, a->a2, path);
+    if (rc != 0) { return rc; }
+
+    fs_lock_acquire();
+    int err = 0;
+    struct vnode *vn = vfs_resolve(path, &err);
+    if (!vn) { fs_lock_release(); return err; }
+    vnode_put(vn);
+    fs_lock_release();
+    return -EINVAL;
+}
+
 // newfstatat(dirfd, path_ptr, path_len, statbuf, flags).
 //
 // FIVE arguments, so `flags` arrives in frame->r8 -- the same route

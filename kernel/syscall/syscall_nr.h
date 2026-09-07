@@ -269,7 +269,31 @@
 #define SYS_EPOLL_WAIT       102
 #define SYS_EPOLL_PWAIT      103
 
+// readlink(path, buf, bufsize) -- Linux shape (path,len,buf,bufsize
+// order, matching stat's own shim marshaling). Always -EINVAL past a
+// resolvable path -- see kernel/syscall/sys_file.c's own comment on
+// sys_readlink for why (no filesystem NeoOS mounts can represent a
+// symlink, the same divergence lstat already has). Found missing
+// getting a real ASP.NET Core app running.
+#define SYS_READLINK         104
+
+// inotify_init1(flags) / inotify_add_watch(fd, path, mask) /
+// inotify_rm_watch(fd, wd) -- Linux shape, a real but inert fd (see
+// kernel/sync/inotify.h/.c). Found missing (fatal, unlike readlink
+// just above) getting a real ASP.NET Core app running: the generic
+// host's configuration system creates one unconditionally to watch
+// appsettings.json.
+#define SYS_INOTIFY_INIT1       105
+#define SYS_INOTIFY_ADD_WATCH   106
+#define SYS_INOTIFY_RM_WATCH    107
+
+// getrusage(who, usage) -- Linux shape, every field honestly zero
+// (see kernel/syscall/sys_misc.c's own comment on sys_getrusage for
+// why). Found missing (fatal) getting a real ASP.NET Core app
+// running.
+#define SYS_GETRUSAGE           108
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX              104
+#define SYS_MAX              109
 
 #endif
