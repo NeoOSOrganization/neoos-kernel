@@ -425,7 +425,18 @@ struct thread *clone_task(struct syscall_frame *frame, uint64_t child_stack,
     t->kernel_stack_top  = kstack_top;
     t->kernel_stack_phys = kstack_phys;
 
-    enqueue_ready(t);
+    // NOT enqueued here. sys_clone still has to write this thread's
+    // tid into the caller's *ptid (CLONE_PARENT_SETTID) -- and musl's
+    // pthread_create relies on that landing before the child can
+    // possibly run, reading its own cached tid back out of the same
+    // memory. Enqueueing here raced that: on a single CPU, a timer
+    // tick between this call returning and sys_clone's copy_to_user
+    // could schedule the brand-new thread first, and it would read
+    // *ptid before the write ever happened -- confirmed live, chasing
+    // a real ASP.NET Core app: a thread's own cached "self" tid came
+    // back as a LATER sibling's tid, and its raise(SIGABRT) (which
+    // reads that cached value, not a fresh gettid()) killed the wrong
+    // thread. sys_clone enqueues after the write instead.
     return t;
 }
 

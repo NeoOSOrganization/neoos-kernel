@@ -448,13 +448,19 @@ int64_t sys_clone(struct syscall_args *a) {
 
     t->clear_child_tid = ctid;   // acted on by thread_exit_self
 
+    // *ptid must land, and thread_alloc()'s zeroing must be done,
+    // before this thread can possibly run -- clone_task() deliberately
+    // leaves it off the ready queue for exactly this reason. See its
+    // own comment.
     if (ptid) {
         int tid = t->tid;
         uint64_t missed = copy_to_user((void *)(uintptr_t)ptid, &tid, sizeof tid);
         if (missed > 0) { return -EFAULT; }
     }
 
-    return t->tid;
+    int tid = t->tid;
+    thread_enqueue_ready(t);
+    return tid;
 }
 
 int64_t sys_thread_exit(struct syscall_args *a) {
