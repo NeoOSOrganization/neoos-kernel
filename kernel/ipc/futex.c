@@ -179,8 +179,44 @@ static int64_t futex_wake(uint32_t *uaddr, uint32_t val) {
     return woken;
 }
 
+// FUTEX_REQUEUE / FUTEX_CMP_REQUEUE.
+//
+// Linux MOVES up to `val2` waiters from uaddr's wait queue to uaddr2's,
+// after waking `val` of them, so a condition-variable broadcast does not
+// wake N threads that will all immediately block again on one mutex.
+//
+// DIVERGENCE (docs/stdlib.md): NeoOS WAKES those waiters instead of
+// moving them. Moving one would mean holding two futex buckets at once,
+// and both buckets are LOCK_RANK_FUTEX -- the rank checker panics on a
+// same-rank second acquisition, by design. Waking is legal rather than
+// approximate: a requeued waiter must be prepared to be woken on the
+// target anyway, and every futex user re-tests its condition in a loop
+// because FUTEX_WAIT may return spuriously. The cost is the thundering
+// herd requeue exists to avoid, which is a performance property, not a
+// semantic one.
+//
+// What is NOT legal is what this used to do -- return -ENOSYS. musl's
+// pthread_cond_timedwait unlocks its internal lock with
+//   futex(l, FUTEX_REQUEUE|PRIVATE, 0, 1, r)
+// i.e. "wake nobody, move ONE waiter to the mutex", and it only checks
+// the result to fall back from the PRIVATE form to the plain one. When
+// both answered -ENOSYS the expression simply evaluated to false and
+// nothing woke that waiter at all: a thread blocked in the condvar's
+// own lock stayed blocked forever. That is the hang ASP.NET Core hits
+// the moment two requests are in flight.
+static int64_t futex_requeue(uint32_t *uaddr, uint32_t val, uint32_t val2) {
+    int64_t woken = futex_wake(uaddr, val);
+    if (woken < 0) { return woken; }
+    if (val2 > 0) {
+        int64_t moved = futex_wake(uaddr, val2);
+        if (moved > 0) { woken += moved; }
+    }
+    return woken;
+}
+
 int64_t futex_op(uint32_t *uaddr, int op, uint32_t val,
-                 const struct k_timespec *timeout) {
+                 const struct k_timespec *timeout,
+                 uint32_t val2, uint32_t val3) {
     // Alignment is not pedantry: the word is read with an atomic load,
     // and a 4-byte load spanning two pages is neither atomic nor
     // necessarily mapped. Linux returns EINVAL for the same reason.
@@ -192,6 +228,15 @@ int64_t futex_op(uint32_t *uaddr, int op, uint32_t val,
     int cmd = op & FUTEX_CMD_MASK;
     if (cmd == FUTEX_WAIT) { return futex_wait(uaddr, val, timeout); }
     if (cmd == FUTEX_WAKE) { return futex_wake(uaddr, val); }
+    if (cmd == FUTEX_REQUEUE) { return futex_requeue(uaddr, val, val2); }
+    if (cmd == FUTEX_CMP_REQUEUE) {
+        // The compare is the whole difference from plain REQUEUE: it
+        // closes the race where the caller's decision to requeue was
+        // made on a value another thread has since changed.
+        uint32_t cur = __atomic_load_n(uaddr, __ATOMIC_ACQUIRE);
+        if (cur != val3) { return -EAGAIN; }
+        return futex_requeue(uaddr, val, val2);
+    }
     return -ENOSYS;
 }
 
@@ -236,13 +281,13 @@ static void futex_selftest_thread(void) {
     // A kernel pointer must be refused. This is the check that stops a
     // user program from using FUTEX_WAIT to probe, or park on, kernel
     // memory.
-    if (futex_op(&selftest_word, FUTEX_WAIT, 0, 0) != -EFAULT) {
+    if (futex_op(&selftest_word, FUTEX_WAIT, 0, 0, 0, 0) != -EFAULT) {
         serial_write_string("[futex] selftest FAILED: a kernel address was not refused\n");
         thread_exit_self(1);
     }
     // And a misaligned one, since the value is read with an atomic load.
     if (futex_op((uint32_t *)((uintptr_t)&selftest_word + 1),
-                 FUTEX_WAIT, 0, 0) != -EINVAL) {
+                 FUTEX_WAIT, 0, 0, 0, 0) != -EINVAL) {
         serial_write_string("[futex] selftest FAILED: a misaligned address was not refused\n");
         thread_exit_self(1);
     }

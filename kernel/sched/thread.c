@@ -263,7 +263,7 @@ void thread_exit_self(int code) {
         if (t->clear_child_tid) {
             uint32_t zero = 0;
             copy_to_user((void *)(uintptr_t)t->clear_child_tid, &zero, sizeof zero);
-            futex_op((uint32_t *)(uintptr_t)t->clear_child_tid, FUTEX_WAKE, 1, 0);
+            futex_op((uint32_t *)(uintptr_t)t->clear_child_tid, FUTEX_WAKE, 1, 0, 0, 0);
         }
 
         // Unlink from the live list. We cannot free our own kernel

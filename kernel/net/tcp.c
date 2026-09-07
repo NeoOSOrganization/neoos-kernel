@@ -116,11 +116,22 @@ void tcp_init(void) {
     }
 }
 
+
+// Defined below, next to tcp_release, because it shares that
+// function's atomic claim on a slot. Requires table_lock.
+static struct tcb *reap_dead_locked(void);
+
 struct tcb *tcp_alloc(void) {
     uint64_t f = spin_lock_irqsave(&table_lock);
+    struct tcb *slot = 0;
     for (int i = 0; i < TCP_MAX_CONNS; i++) {
-        if (conns[i].in_use) { continue; }
-        struct tcb *t = &conns[i];
+        if (!conns[i].in_use) { slot = &conns[i]; break; }
+    }
+    // Nothing free: collect a slot whose connection has already
+    // finished rather than refuse the connection. See reap_dead_locked.
+    if (!slot) { slot = reap_dead_locked(); }
+    if (slot) {
+        struct tcb *t = slot;
         // Everything but the lock, the wait queue and the poll head,
         // which outlive a connection because a sleeper may still be
         // holding a reference to them.
@@ -165,10 +176,15 @@ struct tcb *tcp_alloc(void) {
 // table_lock, in that order and NOT nested: table_lock ranks below
 // t->lock, so holding one to take the other is a descending acquire.
 void tcp_release(struct tcb *t) {
-    uint64_t f = spin_lock_irqsave(&t->lock);
-    if (t->reclaimed) { spin_unlock_irqrestore(&t->lock, f); return; }
-    t->reclaimed = 1;
-    spin_unlock_irqrestore(&t->lock, f);
+    // The claim is an ATOMIC test-and-set rather than a plain read and
+    // write under t->lock, because tcp_alloc's TIME_WAIT reclaim (see
+    // steal_timewait_locked) races for the same slot while holding
+    // table_lock -- and it cannot take t->lock to do it, since
+    // table_lock ranks BELOW t->lock and holding one to take the other
+    // is a descending acquire. Whoever wins the exchange owns the slot;
+    // the loser must not touch it again.
+    int was = __atomic_exchange_n(&t->reclaimed, 1, __ATOMIC_ACQ_REL);
+    if (was) { return; }
 
     uint64_t g = spin_lock_irqsave(&table_lock);
     t->state  = TCP_CLOSED;
@@ -176,9 +192,55 @@ void tcp_release(struct tcb *t) {
     spin_unlock_irqrestore(&table_lock, g);
 }
 
-// An exact 4-tuple match. A listener has remote 0/0 and is found by
-// tcp_find_listener instead, so a segment for an established connection
-// can never be delivered to the listener it was accepted from.
+// Frees a slot whose connection is already finished, or returns 0 if
+// there is none. CALLER MUST HOLD table_lock.
+//
+// TCP_MAX_CONNS is a static table, and a slot is normally handed back by
+// tcp_timer_tick's reclaim rule -- "the socket is gone and the state
+// machine has finished". That rule is correct but it runs at 100Hz, and
+// a server under load finishes connections far faster than one timer
+// pass: an ASP.NET Core app at concurrency 8 was found with THIRTY of
+// the thirty-two slots already dead (CLOSED, socket gone) and merely
+// waiting for a tick, while tcp_alloc refused new connections and the
+// peer saw a reset. Doing the timer's own work here, on demand, is what
+// turns that into a non-event.
+//
+// Two classes, in order of preference:
+//   1. CLOSED with the socket gone -- exactly tcp_timer_tick's reclaim
+//      condition. Nothing can reach the block again; this is not a
+//      policy choice, just early collection.
+//   2. TIME_WAIT with the socket gone -- still serving a purpose (it
+//      absorbs a late retransmit of the peer's FIN for 2*MSL), so the
+//      longest-settled one goes first, and only once class 1 is empty.
+//      Linux does the same under pressure. The cost is that a very late
+//      duplicate for that 4-tuple may reach a new connection, which the
+//      sequence checks already reject.
+static struct tcb *reap_dead_locked(void) {
+    struct tcb *best = 0;
+    int best_is_timewait = 1;
+    for (int i = 0; i < TCP_MAX_CONNS; i++) {
+        struct tcb *t = &conns[i];
+        if (!t->in_use || !t->sock_gone) { continue; }
+        if (__atomic_load_n(&t->reclaimed, __ATOMIC_ACQUIRE)) { continue; }
+
+        if (t->state == TCP_CLOSED) {
+            best = t; best_is_timewait = 0; break;      // class 1 wins outright
+        }
+        if (t->state == TCP_TIME_WAIT && best_is_timewait &&
+            (!best || t->timewait_deadline < best->timewait_deadline)) {
+            best = t;
+        }
+    }
+    if (!best) { return 0; }
+    // Claimed the same way tcp_release does, so the timer's own reclaim
+    // of this slot becomes a no-op instead of freeing it a second time
+    // after it has been handed to a new connection.
+    if (__atomic_exchange_n(&best->reclaimed, 1, __ATOMIC_ACQ_REL)) { return 0; }
+    best->state  = TCP_CLOSED;
+    best->in_use = 0;
+    return best;
+}
+
 struct tcb *tcp_find(uint32_t local_n, uint16_t lport_n,
                      uint32_t remote_n, uint16_t rport_n) {
     uint64_t f = spin_lock_irqsave(&table_lock);
@@ -726,8 +788,20 @@ static void tcp_segment(struct tcb *t, const struct ipv4_header *ip,
             // does not exist yet.
             if (t->parent) {
                 struct tcb *p = t->parent;
-                if (p->accept_n < TCP_BACKLOG_MAX) {
+                // Honour the depth listen() asked for, bounded by the
+                // array. Overflowing used to drop the connection on the
+                // floor while leaving it ESTABLISHED -- a black hole the
+                // peer could not distinguish from a hung server. Reset
+                // it instead: the client learns immediately, which is
+                // what a full backlog is supposed to tell it.
+                int depth = p->backlog;
+                if (depth < 1 || depth > TCP_BACKLOG_MAX) { depth = TCP_BACKLOG_MAX; }
+                if (p->accept_n < depth) {
                     p->accept_q[p->accept_n++] = t;
+                } else {
+                    tx_queue(t, ack, 0, TCP_RST, 0, 0, 0, 0);
+                    set_state(t, TCP_CLOSED);
+                    return;
                 }
                 waitq_wake_all(&p->waiters);
                 poll_head_notify(&p->poll);
@@ -947,7 +1021,8 @@ void tcp_timer_tick(void) {
         // Both are the same question asked properly: the socket is
         // gone, the state machine has finished, so nothing can reach
         // this block again.
-        if (t->sock_gone && t->state == TCP_CLOSED && !t->reclaimed) {
+        if (t->sock_gone && t->state == TCP_CLOSED &&
+            !__atomic_load_n(&t->reclaimed, __ATOMIC_ACQUIRE)) {
             spin_unlock_irqrestore(&t->lock, f);
             tcp_release(t);      // idempotent; the closer may beat us here
             continue;

@@ -454,6 +454,25 @@ int  sched_setaffinity(pid_t pid, size_t cpusetsize, const cpu_set_t *mask);
 - **These are real syscalls**, as with `sched_getcpu`: invisible to a
   caller using the libc functions, relevant only to raw-syscall code.
 
+### Sockets: `socket()` and `accept4()` flags
+
+- **`SOCK_CLOEXEC` is accepted and ignored.** NeoOS has no `FD_CLOEXEC`
+  at all — no descriptor is closed by `exec` — so there is nothing for
+  the flag to set. Refusing it is not an option: every modern runtime
+  ORs it into `socket()`'s type argument, and NeoOS used to compare the
+  raw argument against `SOCK_STREAM` and answer `-EPROTONOSUPPORT`,
+  which is what stopped .NET creating any socket at all.
+- **`SOCK_NONBLOCK` on `accept4()` applies to the accept as well as to
+  the accepted socket.** Linux applies it only to the accepted socket
+  and decides whether the accept itself blocks from the LISTENER's own
+  `O_NONBLOCK`. A program that sets the listener non-blocking with
+  `fcntl` gets Linux's behaviour here either way; one that relies on a
+  blocking `accept4(..., SOCK_NONBLOCK)` gets `-EAGAIN` instead.
+- **`listen()`'s backlog is honoured, capped at 128.** A connection
+  that completes its handshake with the queue full is RESET. It used to
+  be left ESTABLISHED and never queued, which the peer could not tell
+  from a hung server.
+
 ## Synchronisation: `<futex.h>`, `<semaphore.h>`, `<pthread.h>`
 
 The kernel provides exactly one synchronisation primitive — Linux's
@@ -490,12 +509,27 @@ one compare-exchange; these calls run only when it fails.
 
 #### Divergences from Linux
 
-- **Only `FUTEX_WAIT` and `FUTEX_WAKE` exist.** `FUTEX_REQUEUE` /
-  `FUTEX_CMP_REQUEUE` are absent, so `pthread_cond_broadcast` wakes
-  every waiter instead of moving them to the mutex's queue — correct,
-  but a thundering herd. The `*_BITSET` operations, `FUTEX_WAKE_OP`,
-  and priority-inheritance futexes (`FUTEX_LOCK_PI` and friends) are
-  absent too. Anything else returns `-ENOSYS`.
+- **`FUTEX_REQUEUE` / `FUTEX_CMP_REQUEUE` wake instead of moving.**
+  Linux moves up to `val2` waiters from `uaddr`'s queue to `uaddr2`'s
+  so a condvar broadcast does not wake N threads that all immediately
+  block again on one mutex. NeoOS wakes them where they are: moving one
+  would mean holding two futex buckets at once, and both are
+  `LOCK_RANK_FUTEX`, which the rank checker refuses by design. This is
+  legal rather than approximate — a requeued waiter must be prepared to
+  be woken on the target anyway, and every futex user re-tests its
+  condition in a loop because `FUTEX_WAIT` may return spuriously. The
+  cost is the thundering herd requeue exists to avoid, a performance
+  property, not a semantic one. `CMP_REQUEUE` does perform the compare
+  and returns `-EAGAIN` on mismatch.
+
+  These were `-ENOSYS` until 2026-09-08, which was NOT a benign gap:
+  musl's `pthread_cond_timedwait` releases its internal lock with
+  `futex(l, FUTEX_REQUEUE, 0, 1, r)` and checks the result only to fall
+  back between the private and shared forms, so `-ENOSYS` from both
+  left a thread blocked in that lock forever.
+- **The `*_BITSET` operations, `FUTEX_WAKE_OP`, and the
+  priority-inheritance futexes (`FUTEX_LOCK_PI` and friends) are
+  absent.** Anything else returns `-ENOSYS`.
 - **`FUTEX_PRIVATE_FLAG` is accepted and ignored.** On Linux it selects
   a cheaper process-private key. NeoOS keys *every* futex by physical
   address, which is correct for private and shared alike, so the hint

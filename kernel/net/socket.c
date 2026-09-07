@@ -333,6 +333,17 @@ static int addr_out(struct k_sockaddr *addr, uint32_t *len,
 
 int64_t socket_create(int domain, int type, int protocol) {
     if (domain != AF_INET) { return -EAFNOSUPPORT; }
+
+    // Linux's socket(2) takes SOCK_NONBLOCK and SOCK_CLOEXEC OR'd INTO
+    // the type argument, and masks them off before deciding what kind
+    // of socket to make. This compared the raw argument against
+    // SOCK_STREAM, so every socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC,
+    // ...) -- which is what .NET, and any modern runtime avoiding a
+    // separate fcntl round trip, issues for EVERY socket it creates --
+    // came back -EPROTONOSUPPORT.
+    int flags = type & (SOCK_NONBLOCK | SOCK_CLOEXEC);
+    type &= ~(SOCK_NONBLOCK | SOCK_CLOEXEC);
+
     if (type != SOCK_STREAM && type != SOCK_DGRAM) { return -EPROTONOSUPPORT; }
     // A standards-compliant getaddrinfo() fills ai_protocol with the
     // REAL protocol number for the socket type it's describing
@@ -368,6 +379,13 @@ int64_t socket_create(int domain, int type, int protocol) {
     f->priv     = s;
     f->readable = 1;
     f->writable = 1;
+    // SOCK_NONBLOCK is honoured; SOCK_CLOEXEC is accepted and ignored,
+    // because NeoOS has no FD_CLOEXEC at all -- no descriptor is closed
+    // by exec today, so there is nothing to set. Refusing the flag
+    // would be worse (it is how every modern runtime opens a socket)
+    // and silently keeping the fd across exec is the behaviour a caller
+    // gets from every other NeoOS fd. Recorded in docs/stdlib.md.
+    f->nonblock = (flags & SOCK_NONBLOCK) ? 1 : 0;
     return fd;
 }
 

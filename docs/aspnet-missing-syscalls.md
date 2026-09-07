@@ -6,8 +6,8 @@ handler, built NativeAOT for `linux-musl-x64` against the
 `~/opt/cross-x86_64-neoos` toolchain, boots on NeoOS, binds
 `0.0.0.0:30000`, and answers real requests: `curl` from the host (via
 QEMU `hostfwd`) gets `HTTP/1.1 200 OK` with the handler's body. Verified
-**50/50 sequential requests**. Concurrent request handling is not yet
-stable — see "Known remaining issue" below.
+**40/40 sequential requests** and concurrency 2 and 4. Concurrency 8
+under sustained load is not yet stable — see "Known remaining issue".
 
 ## Kernel fixes this needed (all landed)
 
@@ -30,26 +30,50 @@ stable — see "Known remaining issue" below.
 
 ## Known remaining issue — concurrent request handling
 
-Under 3+ simultaneous in-flight requests, the .NET process either hangs
-or hits an `AccessViolation` at a fixed address inside
-`ConcurrentQueueSegment<SocketAsyncEngine.SocketIOEvent>::.ctor` — i.e.
-a `new Slot[N]` GC allocation returns an **unmapped** address (`err=0x6`
-write to non-present page in the `0x5000…` mmap range). This is GC-heap
-corruption that only appears once several .NET threadpool threads are
-allocating and handling sockets in parallel — the most concurrent
-multithreaded workload NeoOS has ever run.
+**Status as of 2026-09-08: substantially better, not finished.** Four
+kernel bugs blocking Kestrel were found and fixed (below). ASP.NET Core
+now serves **40/40 sequential requests** and passes at concurrency 2 and
+4. At concurrency 8 under sustained load it still stops answering.
 
-Not yet root-caused. Candidates, roughly in order:
-- a pre-existing NeoOS `mm` race (concurrent `mmap`/`munmap`/COW from
-  multiple threads of one process)
-- a scheduler / TLS / `fs_base` issue under many threads (this area has
-  had several recent fixes — see `git log`)
-- the epoll `epoll_forget_fd` ↔ `epoll_wait` snapshot window handing a
-  just-closed connection's stale `data` pointer to .NET's engine
-  (partially mitigated: `epoll_wait` now drops `POLLNVAL` entries)
+The failure is a HANG, not the `AccessViolation` this section used to
+describe — no `[usrflt]`, no `[fault-audit]`, nothing in the kernel log.
+The GC-corruption theory is superseded: the original AccessViolation was
+the mm frame-exhaustion bug root-caused in the concurrent-request-crash
+spec (thread stacks were eagerly committing 8MiB each), which is fixed.
 
-Sequential HTTP serving is solid; this is the next thing to chase for a
-real Kestrel workload.
+What the kernel sees at the point it stops: **24 of the 32 TCBs sitting
+in `CLOSE_WAIT` with their socket still open, and `tcp_close` never
+called.** CLOSE_WAIT means the peer sent FIN, NeoOS ACKed, and the
+application has not closed its end. So Kestrel is accepting connections
+and then neither serving nor closing them — its `SocketAsyncEngine` is
+not draining what it accepted. `userland/epolltcp.c` (the .NET-free
+oracle, `make epolltcp`) does the same epoll accept/serve/close cycle at
+concurrency 8 and passes 16/16, which puts this above the kernel's epoll
+layer.
+
+Two things to chase next, in order:
+1. Why the engine stops draining. Instrument which syscall its event
+   thread is parked in when the table fills.
+2. `TCP_MAX_CONNS` is **32**, statically allocated (~76KB per TCB: 32KB
+   send + 32KB receive + reassembly). That is far too few for a web
+   server whatever else is fixed, and the buffers should become dynamic
+   rather than the count simply raised.
+
+### Kernel fixes this milestone (all landed)
+
+| area | fix |
+|---|---|
+| `kernel/net/socket.c` | `socket_create` compared the RAW `type` argument against `SOCK_STREAM`, so `socket(AF_INET, SOCK_STREAM\|SOCK_CLOEXEC, IPPROTO_TCP)` -- what .NET issues for every socket -- returned `-EPROTONOSUPPORT`. Linux masks `SOCK_NONBLOCK`/`SOCK_CLOEXEC` off first. Now masked, `SOCK_NONBLOCK` honoured on the new fd, `SOCK_CLOEXEC` accepted and ignored (NeoOS has no `FD_CLOEXEC`). **This alone is what took the app from answering nothing to serving HTTP.** |
+| `kernel/ipc/futex.c` | `FUTEX_REQUEUE`/`FUTEX_CMP_REQUEUE` were `-ENOSYS`. musl's `pthread_cond_timedwait` releases its internal lock with `futex(l, FUTEX_REQUEUE, 0, 1, r)` and only checks the result to fall back between the private and shared forms -- so `-ENOSYS` from both meant a thread blocked in the condvar's own lock was never woken at all. NeoOS wakes the waiters rather than moving them (see the DIVERGENCE note in `futex.c`). |
+| `kernel/net/tcp.c` | A connection completing its handshake when the listener's accept queue was full was left ESTABLISHED and never queued -- a black hole the peer could not tell from a hung server. It is reset now. `TCP_BACKLOG_MAX` 8 -> 128, and `listen()`'s own backlog is honoured. |
+| `kernel/net/tcp.c` | `tcp_alloc` refused new connections while dead slots waited on a 100Hz timer to be collected; under load 30 of 32 slots were already finished. It now reaps a finished slot on demand (`reap_dead_locked`), preferring CLOSED-and-socket-gone and falling back to the longest-settled TIME_WAIT. |
+| `kernel/net/socket.c` | `accept4`'s `SOCK_NONBLOCK` applies to the accept AND the accepted socket, where Linux applies it only to the accepted socket. Recorded as a divergence. |
+
+Note also that the shim mappings for `sched_setaffinity` and friends
+already existed in `third_party/shim/`; the ENOSYS 203 hang was a
+**stale `neoos-musl/upstream` tree**. Rebuild musl (`build.sh` with
+`KERNEL_SHIM_DIR` pointing at this repo) before concluding a syscall is
+missing.
 
 ## Test app publish recipe
 

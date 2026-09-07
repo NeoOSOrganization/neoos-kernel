@@ -67,7 +67,15 @@ _Static_assert(sizeof(struct tcp_header) == 20, "TCP header must be 20 bytes");
 #define TCP_RCVBUF      32768
 #define TCP_REASM_SEGS  8
 #define TCP_REASM_MAX   1460
-#define TCP_BACKLOG_MAX 8
+// The accept queue depth, per listener. EIGHT was too small for any
+// real server: a connection that completes its handshake when the queue
+// is full used to be left ESTABLISHED and simply never queued -- the
+// peer saw a connected socket, sent its request, and waited forever for
+// a reply nobody would ever accept. Kestrel serving eight concurrent
+// curls hit that on the very first batch. The queue is an array of
+// pointers inside every TCB, so the cost of the larger bound is
+// 128 * 8 bytes = 1KiB per connection slot.
+#define TCP_BACKLOG_MAX 128
 #define TCP_DEFAULT_MSS 536
 #define TCP_MAX_MSS     1460
 

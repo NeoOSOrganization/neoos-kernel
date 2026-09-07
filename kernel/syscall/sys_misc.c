@@ -40,11 +40,15 @@ int64_t sys_getcpu(struct syscall_args *a) {
 }
 
 int64_t sys_futex(struct syscall_args *a) {
-    // Linux's argument order, unchanged: uaddr, op, val, timeout. The
-    // fifth and sixth (uaddr2, val3) belong to REQUEUE and the BITSET
-    // operations, neither of which is implemented, so they are not read.
+    // Linux's argument order, unchanged: uaddr, op, val, timeout/val2,
+    // uaddr2, val3. The fourth slot is a timeout POINTER for the WAIT
+    // operations and an integer COUNT (val2) for the REQUEUE ones, so
+    // both readings are passed down and futex_op picks by command.
+    // uaddr2 is not read: NeoOS's requeue wakes rather than moves, so
+    // there is no target queue to name (see futex.c).
     return futex_op((uint32_t *)(uintptr_t)a->a1, (int)a->a2, (uint32_t)a->a3,
-                    (const struct k_timespec *)(uintptr_t)a->a4);
+                    (const struct k_timespec *)(uintptr_t)a->a4,
+                    (uint32_t)a->a4, (uint32_t)a->frame->r9);
 }
 
 // ---- the clock -------------------------------------------------------
