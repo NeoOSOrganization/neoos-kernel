@@ -117,6 +117,7 @@
 // calling thread's OS-level id), so this reuses the existing syscall
 // number rather than adding a new one for a second name on it.
 #define NEO_THREAD_SELF          20
+#define NEO_MREMAP              109
 
 // ---- Linux x86-64 numbers, as musl issues them ----------------------
 #define LX_READ              0
@@ -215,6 +216,7 @@
 #define LX_INOTIFY_INIT1     294
 #define LX_GETRUSAGE          98
 #define LX_GETTID            186
+#define LX_MREMAP             25
 
 static long neo_strlen(const char *s) {
     long n = 0;
@@ -417,6 +419,7 @@ long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a
     // crash-trap right after -- a #GP (hlt is privileged), not the
     // SIGABRT abort() actually meant to raise. See docs/stdlib.md.
     case LX_GETTID:            return neo(NEO_THREAD_SELF, 0, 0, 0, 0, 0, 0);
+    case LX_MREMAP:            return neo(NEO_MREMAP, a1, a2, a3, a4, 0, 0);
 
     default:
         // Not forwarded. This is the signal that a primitive belongs in

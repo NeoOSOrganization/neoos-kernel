@@ -91,6 +91,25 @@ int64_t sys_madvise(struct syscall_args *a) {
     return 0;
 }
 
+// mremap(old_addr, old_size, new_size, flags) -- see vma_mremap's own
+// comment for the deliberately narrow semantics. Found missing (and
+// its absence a real, confirmed cause of a GC crash, not just a
+// tidiness gap) chasing a real .NET GC.Collect() FailFast: musl's
+// pthread_getattr_np() probes the MAIN thread's own stack size via
+// repeated mremap() calls expecting -ENOMEM exactly at the real
+// boundary; with mremap() ENOSYS'd, the probe's own retry loop
+// (`while (mremap(...) == MAP_FAILED && errno==ENOMEM)`) never even
+// entered -- ENOSYS isn't ENOMEM -- so it reported the main thread's
+// stack as 1 page instead of its real size, and the GC's own
+// conservative stack scan, bounded by that lie, walked past its
+// self-imposed limit and FailFast'd resolving a return address it
+// had no business reading yet.
+int64_t sys_mremap(struct syscall_args *a) {
+    struct process *p = current_proc();
+    if (!p) { return -ESRCH; }
+    return vma_mremap(p, a->a1, a->a2, a->a3, (uint32_t)a->a4);
+}
+
 int64_t sys_mlock(struct syscall_args *a) {
     uint64_t addr = a->a1, len = a->a2;
     if (len == 0) { return 0; }

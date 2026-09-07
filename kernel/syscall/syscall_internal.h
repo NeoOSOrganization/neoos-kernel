@@ -200,5 +200,6 @@ int64_t sys_inotify_init1(struct syscall_args *a);
 int64_t sys_inotify_add_watch(struct syscall_args *a);
 int64_t sys_inotify_rm_watch(struct syscall_args *a);
 int64_t sys_getrusage(struct syscall_args *a);
+int64_t sys_mremap(struct syscall_args *a);
 
 #endif

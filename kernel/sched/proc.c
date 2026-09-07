@@ -154,6 +154,34 @@ int thread_stack_alloc(struct process *p, uint64_t *out_top) {
     p->stack_slots[slot >> 6] |= 1ULL << (slot & 63);
     *out_top = top;
     spin_unlock_irqrestore(&p->mm_lock, f);
+
+    // Registered AFTER releasing mm_lock, same reasoning as spawn_argv/
+    // exec_task registering elf_load's PT_LOAD segments separately from
+    // elf_load's own mapping work: vma_register_image_segment takes
+    // p->mm_lock itself, and taking it twice here would self-deadlock.
+    //
+    // This stack's pages were already mapped directly above via
+    // paging_map_into(), exactly like elf_load's PT_LOAD segments used
+    // to be -- and exactly like those, having page-table entries with
+    // no VMA record means vma_find() sees nothing here at all. That
+    // gap was invisible until something outside the kernel actually
+    // asked "what does this address range belong to": musl's
+    // pthread_getattr_np(), for the process's OWN (main) thread only
+    // (a pthread_create()'d thread's stack is a real, separately
+    // vma_mmap()'d region and was never affected), probes its own
+    // stack SIZE by calling mremap() to try to grow a fake mapping
+    // libc.auxv points near, relying on it failing with ENOMEM exactly
+    // at the real boundary. With no VMA here for mremap() to find,
+    // that probe can never converge to the truth -- confirmed live,
+    // chasing a real GC crash: PalGetMaximumStackBounds() (dotnet/
+    // runtime's own name for this call) came back with the main
+    // thread's stack reported as far smaller than it actually is
+    // (the probe's own worst case: 1 page instead of 2048), and the
+    // GC's own conservative stack scan, bounded by that lie, walked
+    // straight past its self-imposed limit and FailFast'd trying to
+    // resolve a return address it had no business reading yet.
+    vma_register_image_segment(p, top - (uint64_t)USER_STACK_PAGES * PMM_FRAME_SIZE,
+                                top, 3 /* PROT_READ | PROT_WRITE */);
     return slot;
 }
 

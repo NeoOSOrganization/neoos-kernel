@@ -377,6 +377,46 @@ int vma_mprotect(struct process *p, uint64_t addr, uint64_t len, uint32_t prot) 
     return rc;
 }
 
+// mremap(old_addr, old_size, new_size, flags) -- deliberately narrow:
+// answers "is this address range mapped", the question every real
+// caller found so far actually needs, rather than implementing
+// Linux's full move/grow-a-mapping machinery (MREMAP_MAYMOVE/FIXED/
+// DONTUNMAP are all -EINVAL; nothing on NeoOS needs them yet -- see
+// docs/stdlib.md).
+//
+// [old_addr, old_addr+old_size) must be covered by ONE existing VMA
+// (matching Linux's own requirement); if [old_addr, old_addr+new_size)
+// is ALSO covered by that same VMA, this "succeeds in place" (returns
+// old_addr, grown or shrunk against a boundary that was already
+// correct) -- nothing is actually resized, because nothing needs to
+// be: the one caller this exists for, musl's pthread_getattr_np()
+// probing its own (main) thread's stack size via repeated mremap()
+// calls at shrinking addresses, is really asking "how far does this
+// VMA extend", and -ENOMEM the moment the probe steps outside it is
+// the exact answer that makes the probe converge on the truth.
+static int64_t vma_mremap_locked(struct process *p, uint64_t old_addr,
+                                  uint64_t old_size, uint64_t new_size, uint32_t flags) {
+    if (flags != 0) { return -EINVAL; }
+    if (old_addr & 0xFFF) { return -EINVAL; }
+    if (old_size == 0 || new_size == 0) { return -EINVAL; }
+
+    uint64_t old_end = old_addr + page_up(old_size);
+    uint64_t new_end = old_addr + page_up(new_size);
+
+    struct vma *v = vma_find(p, old_addr);
+    if (!v) { return -EFAULT; }
+    if (old_end > v->end || new_end > v->end) { return -ENOMEM; }
+    return (int64_t)old_addr;
+}
+
+int64_t vma_mremap(struct process *p, uint64_t old_addr, uint64_t old_size,
+                    uint64_t new_size, uint32_t flags) {
+    uint64_t f = spin_lock_irqsave(&p->mm_lock);
+    int64_t rc = vma_mremap_locked(p, old_addr, old_size, new_size, flags);
+    spin_unlock_irqrestore(&p->mm_lock, f);
+    return rc;
+}
+
 int vma_range_mapped(struct process *p, uint64_t addr, uint64_t len) {
     if (len == 0) { return 1; }
     uint64_t end = addr + len;

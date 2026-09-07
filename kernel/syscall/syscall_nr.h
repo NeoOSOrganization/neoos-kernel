@@ -293,7 +293,14 @@
 // running.
 #define SYS_GETRUSAGE           108
 
+// mremap(old_addr, old_size, new_size, flags) -- deliberately narrow,
+// see kernel/mm/vma.c's vma_mremap_locked for the real semantics.
+// Found missing (and confirmed the direct cause of a real .NET GC
+// crash, not a tidiness gap) via musl's pthread_getattr_np() probing
+// the main thread's own stack size. See docs/stdlib.md.
+#define SYS_MREMAP              109
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX              109
+#define SYS_MAX              110
 
 #endif

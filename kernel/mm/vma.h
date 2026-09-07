@@ -58,6 +58,13 @@ int     vma_mprotect(struct process *p, uint64_t addr, uint64_t len, uint32_t pr
 // (EFAULT / ENOMEM against an address that names no mapping).
 int     vma_range_mapped(struct process *p, uint64_t addr, uint64_t len);
 
+// mremap(2) -- deliberately narrow. See vma.c's own comment on
+// vma_mremap_locked for the actual semantics and why they're enough.
+// Returns old_addr (Linux's "resized in place" success shape) or a
+// negative errno; never moves or actually resizes anything.
+int64_t vma_mremap(struct process *p, uint64_t old_addr, uint64_t old_size,
+                    uint64_t new_size, uint32_t flags);
+
 // Maps [phys, phys+len) into `p` at a kernel-chosen address, eagerly
 // (every page mapped now), backed by device-owned physical frames.
 // prot must not include PROT_EXEC (W^X). Returns the user address, or a

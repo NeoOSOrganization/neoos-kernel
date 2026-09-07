@@ -824,11 +824,18 @@ running, past the epoll wall above:
   `appsettings.json`, whether or not the app ever reloads
   configuration at runtime.
 - **`getrusage(who, usage)`** — every field of `struct rusage` is
-  zero: NeoOS has no per-process/thread CPU-time, page-fault, or
-  context-switch accounting to report honestly instead, and `who`
+  zero except `ru_utime`, which is approximated from wall-clock time
+  since boot: NeoOS has no per-process/thread CPU-time, page-fault, or
+  context-switch accounting to report exactly instead, and `who`
   (`RUSAGE_SELF`/`CHILDREN`/`THREAD`) makes no difference for the
-  same reason. Zero reads as "unknown", which is the truth. **Fatal
-  without this** — called during the GC's own startup diagnostics.
+  same reason. `ru_utime` is deliberately **not** just tick-quantized
+  wall-clock, either: it is forced strictly monotonic at microsecond
+  granularity (never equal to or less than the previous call's
+  answer), because a caller diffing two readings close enough
+  together to land in the same 10ms timer tick would otherwise see a
+  ZERO delta — indistinguishable from "this thread never ran" — from
+  a merely-coarse approximation. **Fatal without this** — called
+  during the GC's own startup diagnostics.
 - **`gettid()`** — not a new primitive at all: it is exactly
   NeoOS's own `thread_self()` (`SYS_THREAD_SELF`) under Linux's name,
   so the shim maps it there directly rather than adding a second
@@ -843,6 +850,67 @@ running, past the epoll wall above:
   `SIGABRT` `abort()` actually meant to raise. The lesson generalizes:
   an `-ENOSYS` a caller does not check can corrupt a LATER, unrelated
   call's arguments instead of failing where it was actually made.
+
+## `mremap`
+
+```c
+#include <sys/mman.h>
+void *mremap(void *old_addr, size_t old_size, size_t new_size, int flags);
+```
+
+Deliberately narrow: answers "is this address range mapped", not
+Linux's full move/grow-a-mapping machinery. `[old_addr, old_addr +
+old_size)` must be covered by one existing mapping; if `[old_addr,
+old_addr + new_size)` is *also* covered by that same mapping, this
+"succeeds in place" and returns `old_addr` unchanged — nothing is
+actually resized, because for the one caller this exists for, nothing
+needs to be. `flags` must be `0`; `MREMAP_MAYMOVE`/`MREMAP_FIXED`/
+`MREMAP_DONTUNMAP` are all `-EINVAL` (nothing on NeoOS needs an actual
+move or shrink-with-hole-punching yet).
+
+That one caller is musl's own `pthread_getattr_np()`, probing the
+**main** thread's stack size (a `pthread_create()`'d thread's stack
+is a real, separately `mmap()`'d region with its size already known
+directly — this path is main-thread-only) by calling `mremap()`
+against addresses near `libc.auxv` at shrinking offsets, relying on
+it failing with `-ENOMEM` *exactly* at the real boundary. With
+`mremap` `-ENOSYS`'d, that probe's own retry loop (`while
+(mremap(...) == MAP_FAILED && errno == ENOMEM) ...`) never even
+engaged — `ENOSYS` isn't `ENOMEM` — so it silently reported the main
+thread's stack as **1 page**, regardless of its real size (2048 pages
+after the `USER_STACK_PAGES` fix elsewhere in this doc).
+
+Confirmed as a real, live bug, not a hypothetical: found chasing a
+genuine .NET GC `FailFast` (`RaiseFailFastException`, via
+`WKS::GCHeap::Promote` → `UnixNativeCodeManager::FindMethodInfo` —
+the GC's own stack-walker failing to resolve a return address during
+a stack scan) triggered by nothing more than `Thread.Start()` +
+`GC.Collect()`. The GC's conservative scan of the main thread's stack,
+bounded by the lying 1-page answer, walked past its own self-imposed
+limit into stack content it had no business reading yet.
+
+Needed a second, independent fix alongside it: `mremap`'s own "is
+this range mapped" check relies on a real VMA existing for the range
+in the first place, and the main thread's own stack
+(`kernel/sched/proc.c`'s `thread_stack_alloc`) had the exact same gap
+`elf_load()`'s `PT_LOAD` segments did before an earlier fix in this
+same investigation — pages mapped directly via `paging_map_into()`,
+with no `vma_insert()` ever called, so `vma_find()` saw nothing there
+at all. Fixed by registering one, the same way `elf_load()`'s segments
+are (`vma_register_image_segment`, called after releasing `mm_lock`
+to avoid taking it twice).
+
+**Confirmed insufficient alone**: with both fixes in place, `mremap`
+no longer returns `-ENOSYS` and the main thread's stack size is now
+reported correctly — but the same `GC.Collect()` FailFast still
+happens, byte-identical. The remaining cause is not about main-thread
+stack bounds; it is most likely about the **worker** thread's own
+stack/execution-context (its bounds come from `pthread_create`'s own
+tracking, untouched by either fix here) or something in how a
+suspended thread's register/stack state is captured for the GC's
+stack walk — a question this milestone's tools (static disassembly,
+kernel-side syscall tracing) could not resolve further without a live
+debugger attached to the guest.
 
 ## File descriptors are objects, not vnodes
 

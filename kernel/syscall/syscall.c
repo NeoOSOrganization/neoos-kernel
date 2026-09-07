@@ -269,6 +269,7 @@ static const struct syscall_desc syscall_table[SYS_MAX] = {
     [SYS_INOTIFY_ADD_WATCH] = { sys_inotify_add_watch, "inotify_add_watch" },
     [SYS_INOTIFY_RM_WATCH]  = { sys_inotify_rm_watch,  "inotify_rm_watch" },
     [SYS_GETRUSAGE]         = { sys_getrusage,         "getrusage" },
+    [SYS_MREMAP]            = { sys_mremap,            "mremap" },
     [SYS_SPAWNV]          = { sys_spawnv,          "spawnv" },
     [SYS_FCNTL]           = { sys_fcntl,           "fcntl" },
     [SYS_CHDIR]           = { sys_chdir,           "chdir" },
