@@ -206,7 +206,10 @@ struct tcb *tcp_find_listener(uint32_t local_n, uint16_t lport_n);
 int  tcp_connect(struct tcb *t, uint32_t dst_n, uint16_t dport_n);
 int  tcp_listen(struct tcb *t, int backlog);
 int  tcp_send(struct tcb *t, const uint8_t *data, uint32_t len, uint32_t *sent);
-int  tcp_recv(struct tcb *t, uint8_t *out, uint32_t len, uint32_t *got);
+// peek != 0 copies from the receive buffer without consuming it (the
+// MSG_PEEK path): rcv_head/rcv_len are left untouched and no window
+// update is sent.
+int  tcp_recv(struct tcb *t, uint8_t *out, uint32_t len, uint32_t *got, int peek);
 void tcp_close(struct tcb *t);
 void tcp_shutdown_write(struct tcb *t);
 // Pushes whatever the window and Nagle allow. Called after a send and

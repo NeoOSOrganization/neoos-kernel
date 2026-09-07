@@ -1100,3 +1100,94 @@ future port needs whichever calls those numbers actually are.
 sockets, threads, file I/O, or any real workload through NativeAOT.
 Each is likely to surface its own wall of missing syscalls the same
 way this milestone did, one at a time.
+
+## Refresh — NativeAOT GC stack walks: `.eh_frame` was gc'd away
+
+TCP sockets and threads were then made to work, but every
+`GC.Collect()` from a non-main thread `FailFast`ed inside
+`UnixNativeCodeManager::FindMethodInfo` — blocking ASP.NET Core / any
+real GC workload.
+
+Root cause: **`userland/user.ld` never placed `.eh_frame` /
+`.eh_frame_hdr`.** On x86_64, NativeAOT unwinds *managed* code with
+DWARF CFI — a GC stack walk goes `FindMethodInfo` →
+`UnwindHelpers::GetUnwindProcInfo` → libunwind `getInfoFromDwarfSection`,
+which locates `.eh_frame` via the `PT_GNU_EH_FRAME` segment indexing
+`.eh_frame_hdr`. ILC's link line passes `--eh-frame-hdr` *and*
+`--gc-sections`. With `.eh_frame` unlisted in the script it was an
+orphan that nothing in the kept graph relocates to (it is reached only
+through a program header at run time), so — exactly like `.init_array`
+and `.init`/`.fini` before it — `--gc-sections` dropped it entirely,
+`--eh-frame-hdr` then had nothing to index, and the image shipped with
+zero `.eh_frame*` sections and no `PT_GNU_EH_FRAME`. The GC's walk of
+the collecting thread starts at the return address baked into the
+`RhCollect` p/invoke transition frame (a real managed PC), and
+`FindMethodInfo` cannot resolve any PC with no unwind data in the
+image.
+
+Immediate fix: `user.ld` now has `KEEP()`'d `.eh_frame_hdr` /
+`.eh_frame` / `.gcc_except_table` output sections (`.eh_frame_hdr`
+first so bfd ld points `PT_GNU_EH_FRAME` at it — verified: the section
+and the `GNU_EH_FRAME` phdr are both present in the relinked binary,
+and a booted worker thread now runs five `GC.Collect()` cycles clean).
+
+### Structural fix — `user.ld` is now derived from the stock script
+
+This was the **fourth** time `--gc-sections` (from NativeAOT's link
+line) silently dropped a section the old hand-minimised `user.ld`
+never named: `crtn.o`'s `.init`/`.fini` closer, then
+`.init_array`/`.fini_array`, then now `.eh_frame`. Each cost a
+multi-day debug. Root problem: `user.ld` was written from a blank page
+listing only `.text`/`.rodata`/`.data`/`.bss`/`.tdata`/`.tbss`.
+
+`user.ld` has been rewritten to **mirror the stock GNU ld default
+script** (`x86_64-neoos-linux-musl-ld --verbose`) — every section it
+`KEEP()`s and every boundary symbol it `PROVIDE_HIDDEN()`s is now
+reproduced, with only five deliberate deviations documented in the
+file header (load address; `_DYNAMIC`; `.init`/`.fini`/`__unbox` routed
+to a bounded-W+X writable segment; `.tdata` before `.tbss`; no RELRO
+markers). Added beyond the earlier state: `.ctors`/`.dtors`/`.jcr`
+KEEP, `.rela.dyn`/`.rela.plt` with `__rela_iplt_start/end` brackets
+(static ifunc-resolver support — currently unused but the next
+silent-failure landmine), explicit deterministic placement of
+`.note.*`, `.got`/`.got.plt`, `.data.rel.ro`, `.sframe`, `.gnu_extab`.
+`--gc-sections` is kept (it is ILC's default, there is no central
+NeoOS knob to disable it per-port, and the size win is real); the
+linker script now simply carries the complete root set the way a
+normal toolchain's does. Regression: gauntlet 15/15, both NeoOS-native
+userland and the NativeAOT GC test rebuilt and verified.
+
+## Refresh — ASP.NET Core / Kestrel serves HTTP (2026-09-07)
+
+A NativeAOT `WebApplication` (`Microsoft.NET.Sdk.Web`, `MapGet("/")`)
+now binds `0.0.0.0:30000` on NeoOS and answers real HTTP requests --
+`curl` from the host through QEMU `hostfwd` gets `HTTP/1.1 200 OK` plus
+the handler body. **50/50 sequential requests verified.** Concurrent
+handling is not yet stable (a GC-heap `AccessViolation` under several
+parallel threadpool threads -- see `docs/aspnet-missing-syscalls.md`).
+
+Kernel changes it needed, all landed and gauntlet-checked:
+
+- **`sys_poll.c` -- epoll re-snapshots.** `epoll_wait` took one snapshot
+  of its fd set and blocked forever. .NET's `SocketAsyncEngine` starts
+  its event-loop thread (calling `epoll_wait` on an **empty** set) and
+  registers its sockets only afterwards from another thread. `epoll_wait`
+  now loops, re-snapshotting under a bounded `poll_core` deadline.
+- **`epoll.c` + `fd_table.c` -- close() removes an fd from epoll sets.**
+  Linux does this implicitly; .NET closes a connection socket with no
+  `EPOLL_CTL_DEL` and reuses the fd number, so `epoll_ctl(ADD)` hit
+  `EEXIST`. New `epoll_forget_fd()` (called from `fd_table_close()` /
+  `fd_table_dup2()`), a global epoll-object registry, a new
+  `LOCK_RANK_EPOLL_LIST` (17; the ranks above it shifted up one), and
+  `epoll_ctl_do()` now also fires `waitq_poll_notify()`.
+- **`socket.c` + `tcp.c` -- `MSG_PEEK` / `MSG_DONTWAIT`.** Both were
+  ignored. .NET's 1-byte `MSG_PEEK` probe was **consuming** the first
+  request byte, so `GET` parsed as `ET` and every request 405'd.
+  `tcp_recv()` gained a `peek` argument; `MSG_DONTWAIT` now forces the
+  one call non-blocking.
+- **`socket.c` -- `ioctl(FIONREAD)` / `ioctl(FIONBIO)`.** `sock_ioctl`
+  answered `ENOTTY` to everything; `FIONREAD` now returns `rcv_len`.
+
+Still ENOSYS and needed for the full picture: `sched_setaffinity` (203)
+-- .NET **Server GC hangs before `Main`** without it, so a web app must
+publish with `-p:ServerGarbageCollection=false` for now.

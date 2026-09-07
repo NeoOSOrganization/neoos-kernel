@@ -128,27 +128,32 @@
 // through, because poll_head_notify holds it across the wake -- and
 // above every object lock (pipe 10, socket 12, tty 8) so a driver can
 // notify with its own lock held.
-#define LOCK_RANK_POLLHEAD   17
-#define LOCK_RANK_WAITQ      18
-#define LOCK_RANK_RUNQUEUE   19
-#define LOCK_RANK_FDTABLE    20  // file descriptor table (per-bucket locks, after VFS)
-#define LOCK_RANK_HEAP       21
-#define LOCK_RANK_PMM        22
+// Global list of all epoll objects, walked by epoll_forget_fd() when a
+// descriptor is closed. Held across each epoll_obj->lock (POLLHEAD), so
+// it must rank strictly below it. A near-leaf: reached from
+// fd_table_close() with only lower locks released, and from epoll_close.
+#define LOCK_RANK_EPOLL_LIST 17
+#define LOCK_RANK_POLLHEAD   18
+#define LOCK_RANK_WAITQ      19
+#define LOCK_RANK_RUNQUEUE   20
+#define LOCK_RANK_FDTABLE    21  // file descriptor table (per-bucket locks, after VFS)
+#define LOCK_RANK_HEAP       22
+#define LOCK_RANK_PMM        23
 // The signal-queue pool: a leaf allocator taken while a process's
 // p->lock (rank 1, LOCK_RANK_PROCESS) is held, and holding nothing
 // itself. It sits innermost rather than beside LOCK_RANK_PROCESS
 // because equal ranks are an inversion -- acquisition must be strictly
 // ascending.
-#define LOCK_RANK_SIGQUEUE   23
+#define LOCK_RANK_SIGQUEUE   24
 // TLB shootdown bookkeeping: the deferred-free queue is filled from
 // paging_unmap_from, which runs UNDER a process's mm_lock (rank 3), so
 // it must rank strictly below it. It is a leaf -- tlb_flush_deferred
 // releases it before calling pmm_free.
-#define LOCK_RANK_TLB        24
+#define LOCK_RANK_TLB        25
 // Input subsystem: key event fan-out and grab. Taken from the keyboard
 // IRQ (so it must be a leaf-ish rank), but held only during ring-buffer
 // append -- never across tty_input_char or waitq_wake calls.
-#define LOCK_RANK_INPUT     25
+#define LOCK_RANK_INPUT     26
 // The NIC's transmit path. There is ONE shared bounce buffer and one
 // TX queue, and virtio_net_transmit spins waiting for the device to
 // hand the buffer back -- so two concurrent transmits scribble on each
@@ -162,17 +167,17 @@
 // since every ARP path drops its own lock before transmitting -- and it
 // is held across the device wait, which is precisely why nothing may be
 // acquired underneath it.
-#define LOCK_RANK_VIRTIO_TX 26
+#define LOCK_RANK_VIRTIO_TX 27
 // The loopback deferred-delivery queue. A LEAF in the strict sense: it
 // is held ONLY across a copy into or out of the queue, never across
 // net_ipv4_input, and every caller reaches it holding nothing -- the
 // transmit paths all release their own locks first. So it sits at the
 // top, where a lock taken from anywhere and holding nothing belongs.
-#define LOCK_RANK_LOOPBACK  27
+#define LOCK_RANK_LOOPBACK  28
 // ac97_lock: taken alone around a PCM-OUT BDL segment write, never
 // nested under or within another lock -- same leaf profile as
 // LOCK_RANK_INPUT/LOCK_RANK_VIRTIO_TX/LOCK_RANK_LOOPBACK above it.
-#define LOCK_RANK_AC97      28
+#define LOCK_RANK_AC97      29
 // The kernel virtual terminals: vt_active, each VT's diff cache
 // (vc->shown / shown_valid) and kd_mode. Sits ABOVE TTY because the
 // write path is tty_obj_write -> t->lock -> vt_backend_output ->

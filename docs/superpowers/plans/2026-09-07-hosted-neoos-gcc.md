@@ -771,3 +771,45 @@ Gauntlet 15/15 (one host-contention retry, within this project's
 established baseline) after the fix. This closes out the "run a
 dotnet NativeAOT hello world on NeoOS" investigation this whole
 section has been chasing.
+
+## Follow-up 2 — NativeAOT GC stack walks: `.eh_frame` was gc'd away (2026-09-07)
+
+After hello-world, TCP sockets and `System.Threading.Thread` were made
+to work, but **every `GC.Collect()` called from a non-main thread**
+`FailFast`ed inside `UnixNativeCodeManager::FindMethodInfo` (reached
+from `StackFrameIterator::CalculateCurrentMethodState` during the GC's
+own stack walk of the collecting thread). Minimal repro: spawn a
+`Thread`, allocate, call `GC.Collect()` — no ASP.NET Core needed. This
+was the wall blocking the Kestrel/ASP.NET milestone.
+
+Root cause, and it is the **fourth** instance of the exact mechanism
+this section already documents three times: `userland/user.ld` never
+placed `.eh_frame` / `.eh_frame_hdr`. On x86_64, NativeAOT unwinds its
+*managed* code with DWARF CFI — `FindMethodInfo` →
+`UnwindHelpers::GetUnwindProcInfo` → libunwind `getInfoFromDwarfSection`,
+which finds `.eh_frame` through the `PT_GNU_EH_FRAME` segment that
+indexes `.eh_frame_hdr`. ILC's own link line passes **both**
+`-Wl,--eh-frame-hdr` and `-Wl,--gc-sections`. With `.eh_frame` unlisted
+in the script it was an orphan nothing in the kept graph *relocates*
+to (it is found only via a program header at run time), so
+`--gc-sections` dropped it wholesale — exactly as it had dropped
+`.init_array` and `crtn.o`'s `.init`/`.fini` closer. `--eh-frame-hdr`
+then had nothing to index, so the shipped image had **zero
+`.eh_frame*` sections and no `PT_GNU_EH_FRAME` phdr** (confirmed with
+`readelf -lS`: only `LOAD`/`LOAD`/`TLS`/`GNU_STACK`). With no unwind
+data in the image, `FindMethodInfo` cannot resolve *any* managed PC;
+the first managed stack walk that actually happens is the GC's, and it
+starts at the return address baked into the `RhCollect` p/invoke
+transition frame.
+
+Fixed the same way as its three predecessors: `KEEP()`'d
+`.eh_frame_hdr` / `.eh_frame` / `.gcc_except_table` output sections in
+`user.ld` (`.eh_frame_hdr` first so bfd ld can point `PT_GNU_EH_FRAME`
+at it). Verified end to end: relinking with the
+`~/opt/cross-x86_64-neoos` hosted toolchain
+(`-p:CppCompilerAndLinker=x86_64-neoos-linux-musl-gcc
+-p:StaticExecutable=true -p:PositionIndependentExecutable=false`)
+produces both sections plus a populated `GNU_EH_FRAME` phdr, and a
+booted NeoOS runs a worker thread through five `GC.Collect()` +
+`GC.WaitForPendingFinalizers()` cycles cleanly ("after GC 4",
+"main done", exit 0) where it previously FailFasted on the first.

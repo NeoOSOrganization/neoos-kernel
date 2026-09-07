@@ -1119,12 +1119,18 @@ int tcp_send(struct tcb *t, const uint8_t *data, uint32_t len, uint32_t *sent) {
     return 0;
 }
 
-int tcp_recv(struct tcb *t, uint8_t *out, uint32_t len, uint32_t *got) {
+int tcp_recv(struct tcb *t, uint8_t *out, uint32_t len, uint32_t *got, int peek) {
     uint64_t f = spin_lock_irqsave(&t->lock);
     if (t->rcv_len) {
         uint32_t n = len < t->rcv_len ? len : t->rcv_len;
         for (uint32_t i = 0; i < n; i++) {
             out[i] = t->rcvbuf[(t->rcv_head + i) % TCP_RCVBUF];
+        }
+        if (peek) {
+            // MSG_PEEK: leave the byte stream and the window as they are.
+            spin_unlock_irqrestore(&t->lock, f);
+            *got = n;
+            return 0;
         }
         t->rcv_head = (t->rcv_head + n) % TCP_RCVBUF;
         t->rcv_len -= n;

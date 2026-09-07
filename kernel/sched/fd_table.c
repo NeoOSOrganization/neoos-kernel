@@ -4,6 +4,7 @@
 #include "fs/vfs.h"
 #include "fs/file.h"
 #include "drivers/char/serial.h"
+#include "sync/epoll.h"
 #include "errno.h"
 
 static inline unsigned fd_bucket(int fd) {
@@ -200,7 +201,16 @@ void fd_table_close(struct fd_table *table, int fd) {
     }
     spin_unlock_irqrestore(&b->lock, flags);
 
-    if (had) { file_close(&closing); }
+    if (had) {
+        // Linux strips a closed descriptor from every epoll set it was
+        // registered in. .NET's SocketAsyncEngine depends on this: it
+        // closes a connection socket without EPOLL_CTL_DEL first, then
+        // reuses the freed fd number for the next connection -- and its
+        // epoll_ctl(ADD) on the reused number would hit EEXIST against
+        // the stale entry.
+        epoll_forget_fd(table, fd);
+        file_close(&closing);
+    }
 }
 
 // Direct fd setter, used at process creation for fds 0-2. Must not be
@@ -286,7 +296,7 @@ int fd_table_dup2(struct fd_table *table, int oldfd, int newfd) {
     spin_unlock_irqrestore(&nb->lock, nf);
 
     file_dup(&src);                 // the new slot's reference on the object
-    if (had) { file_close(&closing); }
+    if (had) { epoll_forget_fd(table, newfd); file_close(&closing); }
     return newfd;
 }
 

@@ -5,6 +5,7 @@
 
 #include "sync/epoll.h"
 #include "sync/lock.h"
+#include "sync/waitq.h"
 #include "fs/file.h"
 #include "sched/proc.h"
 #include "sched/fd_table.h"
@@ -15,6 +16,45 @@
 #define EPOLL_CTL_ADD 1
 #define EPOLL_CTL_DEL 2
 #define EPOLL_CTL_MOD 3
+
+// Every live epoll object, so a close() of any descriptor can strip it
+// from every set it was registered in (epoll_forget_fd, below).
+static struct epoll_obj *g_epoll_list;
+static struct spinlock   g_epoll_lock;
+static int               g_epoll_lock_ready;
+
+static void epoll_global_init_once(void) {
+    // No dedicated init hook; first epoll_create() sets this up. Racing
+    // creates would both see 0 and both init -- harmless, spin_init is
+    // idempotent for this purpose and the very first process to make an
+    // epoll fd is long past SMP bring-up being a factor here.
+    if (!g_epoll_lock_ready) {
+        spin_init(&g_epoll_lock, LOCK_RANK_EPOLL_LIST, "epoll-list");
+        g_epoll_lock_ready = 1;
+    }
+}
+
+void epoll_forget_fd(struct fd_table *owner, int fd) {
+    if (!g_epoll_lock_ready || !owner) { return; }
+    uint64_t gf = spin_lock_irqsave(&g_epoll_lock);
+    for (struct epoll_obj *o = g_epoll_list; o; o = o->g_next) {
+        if (o->owner != owner) { continue; }
+        uint64_t of = spin_lock_irqsave(&o->lock);
+        struct epoll_entry **pp = &o->list;
+        while (*pp) {
+            if ((*pp)->fd == fd) {
+                struct epoll_entry *dead = *pp;
+                *pp = dead->next;
+                o->nfds--;
+                kfree(dead);
+            } else {
+                pp = &(*pp)->next;
+            }
+        }
+        spin_unlock_irqrestore(&o->lock, of);
+    }
+    spin_unlock_irqrestore(&g_epoll_lock, gf);
+}
 
 static int64_t epoll_read(struct file_descriptor *f, void *buf, uint64_t len) {
     (void)f; (void)buf; (void)len;
@@ -60,6 +100,14 @@ static void epoll_close(struct file_descriptor *f) {
     spin_unlock_irqrestore(&o->lock, flags);
     if (!last) { return; }
 
+    // Off the global list before freeing, under the same lock
+    // epoll_forget_fd() walks it with.
+    uint64_t gf = spin_lock_irqsave(&g_epoll_lock);
+    struct epoll_obj **gpp = &g_epoll_list;
+    while (*gpp && *gpp != o) { gpp = &(*gpp)->g_next; }
+    if (*gpp) { *gpp = o->g_next; }
+    spin_unlock_irqrestore(&g_epoll_lock, gf);
+
     struct epoll_entry *e = o->list;
     while (e) {
         struct epoll_entry *next = e->next;
@@ -92,12 +140,16 @@ int epoll_create(int flags) {
     struct process *p = current_proc();
     if (!p) { return -ESRCH; }
 
+    epoll_global_init_once();
+
     struct epoll_obj *o = kmalloc(sizeof(*o));
     if (!o) { return -ENOMEM; }
     spin_init(&o->lock, LOCK_RANK_POLLHEAD, "epoll");
     o->list = 0;
     o->nfds = 0;
     o->refs = 1;
+    o->owner = p->fd_table;
+    o->g_next = 0;
 
     int fd = fd_table_alloc(p->fd_table);
     if (fd < 0) { kfree(o); return fd; }
@@ -108,6 +160,13 @@ int epoll_create(int flags) {
     f->priv = o;
     f->readable = 0;
     f->writable = 0;
+
+    // On the global list only once it is fully wired -- an error path
+    // that kfree()s `o` must never leave a dangling pointer here.
+    uint64_t gf = spin_lock_irqsave(&g_epoll_lock);
+    o->g_next = g_epoll_list;
+    g_epoll_list = o;
+    spin_unlock_irqrestore(&g_epoll_lock, gf);
     return fd;
 }
 
@@ -150,5 +209,14 @@ int epoll_ctl_do(struct file_descriptor *epf, int op, int fd, uint32_t events, u
     }
 
     spin_unlock_irqrestore(&o->lock, flags);
+
+    // Wake any epoll_wait() blocked on this object so it re-snapshots
+    // the list. A thread can legitimately call epoll_wait() on an empty
+    // set and have another thread register fds afterwards (.NET's
+    // SocketAsyncEngine does exactly this); without this nudge that
+    // waiter only re-checks on its EPOLL_REEVAL_TICKS safety timer.
+    if (rc == 0 && (op == EPOLL_CTL_ADD || op == EPOLL_CTL_MOD)) {
+        waitq_poll_notify();
+    }
     return rc;
 }

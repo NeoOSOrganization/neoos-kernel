@@ -53,7 +53,7 @@ static int64_t stream_connect(struct socket *s, int nonblock,
                               uint32_t ip_n, uint16_t port_n);
 static int64_t stream_send(struct socket *s, int nonblock,
                            const void *buf, uint64_t len);
-static int64_t stream_recv(struct socket *s, int nonblock, void *buf, uint64_t len);
+static int64_t stream_recv(struct socket *s, int nonblock, void *buf, uint64_t len, int peek);
 
 struct socket {
     struct spinlock lock;        // LOCK_RANK_SOCKET
@@ -649,12 +649,20 @@ static int64_t recv_one(struct socket *s, int nonblock, void *buf, uint64_t len,
     return (int64_t)give;
 }
 
+// MSG_* bits NeoOS acts on (Linux values). MSG_PEEK returns buffered
+// data without consuming it; MSG_DONTWAIT forces this one call
+// non-blocking. The rest (MSG_OOB, MSG_TRUNC, MSG_WAITALL, ...) are
+// still ignored -- see docs/stdlib.md.
+#define K_MSG_PEEK     0x02
+#define K_MSG_DONTWAIT 0x40
+
 int64_t socket_recvfrom(int fd, void *buf, uint64_t len, int flags,
                         struct k_sockaddr *src, uint32_t *src_len) {
-    (void)flags;   // MSG_* are all unimplemented; see docs/stdlib.md
+    int peek = (flags & K_MSG_PEEK) ? 1 : 0;
     int nonblock = 0;
     struct socket *s = sock_ref_of(fd, &nonblock);
     if (!s) { return -EBADF; }
+    if (flags & K_MSG_DONTWAIT) { nonblock = 1; }
 
     // Same dispatch-by-type fix as socket_sendto above: recvfrom() on
     // a connected SOCK_STREAM socket is valid (src NULL behaves like
@@ -666,17 +674,19 @@ int64_t socket_recvfrom(int fd, void *buf, uint64_t len, int flags,
         uint64_t total = 0;
         while (total < len) {
             uint64_t chunk = len - total < sizeof stage ? len - total : sizeof stage;
-            int64_t rc = stream_recv(s, nonblock, stage, chunk);
+            int64_t rc = stream_recv(s, nonblock, stage, chunk, peek);
             if (rc < 0) { sock_put(s); return total > 0 ? (int64_t)total : rc; }
             if (rc == 0) { break; }   // EOF
             uint64_t missed = copy_to_user((uint8_t *)buf + total, stage, (uint64_t)rc);
             if (missed > 0) { sock_put(s); return total > 0 ? (int64_t)total : -EFAULT; }
             total += (uint64_t)rc;
             if ((uint64_t)rc < chunk) { break; }   // short read ends the call
+            // MSG_PEEK does not consume, so a second pass would re-copy
+            // the same leading bytes forever -- one stage-sized peek is
+            // all a caller gets.
+            if (peek) { break; }
         }
         if (src && src_len) {
-            // Real Linux fills in the peer's address for recvfrom() on
-            // a connected socket too, not just an error/no-op.
             addr_out(src, src_len, s->peer_ip_n, s->peer_port_n);
         }
         sock_put(s);
@@ -1057,11 +1067,11 @@ static int64_t stream_send(struct socket *s, int nonblock,
     return (int64_t)done;
 }
 
-static int64_t stream_recv(struct socket *s, int nonblock, void *buf, uint64_t len) {
+static int64_t stream_recv(struct socket *s, int nonblock, void *buf, uint64_t len, int peek) {
     struct tcb *t = s->tcb;
     for (;;) {
         uint32_t got = 0;
-        int rc = tcp_recv(t, (uint8_t *)buf, (uint32_t)len, &got);
+        int rc = tcp_recv(t, (uint8_t *)buf, (uint32_t)len, &got, peek);
         if (rc == 0) { return (int64_t)got; }        // got == 0 means EOF
         if (rc != -EAGAIN) { return rc; }
         if (nonblock) { return -EAGAIN; }
@@ -1088,7 +1098,7 @@ static int64_t sock_read(struct file_descriptor *f, void *buf, uint64_t len) {
     if (!s) { return -EBADF; }
     if (s->type == SOCK_STREAM) {
         if (!s->tcb) { return -ENOTCONN; }
-        return stream_recv(s, f->nonblock, buf, len);
+        return stream_recv(s, f->nonblock, buf, len, 0);
     }
     if (!s->bound) { return -ENOTCONN; }
     return recv_one(s, f->nonblock, buf, len, 0, 0);
@@ -1135,8 +1145,37 @@ static void sock_close(struct file_descriptor *f) {
     sock_put(s);
 }
 
+// FIONREAD / FIONBIO -- Linux's values. .NET's Socket.Available and its
+// blocking-mode toggle go through ioctl(); without FIONREAD, .NET falls
+// back to a 1-byte MSG_PEEK probe on every read, which is a slower and
+// (on NeoOS) racier path.
+#define K_FIONBIO   0x5421
+#define K_FIONREAD  0x541B
+
 static int64_t sock_ioctl(struct file_descriptor *f, uint64_t request, void *arg) {
-    (void)f; (void)request; (void)arg;
+    struct socket *s = (struct socket *)f->priv;
+    if (!s) { return -EBADF; }
+
+    if (request == K_FIONREAD) {
+        int avail = 0;
+        if (s->type == SOCK_STREAM) {
+            if (s->tcb) { avail = (int)s->tcb->rcv_len; }
+        } else if (s->rx_head) {
+            avail = (int)s->rx_head->len;   // one datagram, like Linux
+        }
+        if (!arg) { return -EFAULT; }
+        uint64_t missed = copy_to_user(arg, &avail, sizeof avail);
+        return missed > 0 ? -EFAULT : 0;
+    }
+
+    if (request == K_FIONBIO) {
+        int on = 0;
+        if (!arg) { return -EFAULT; }
+        if (copy_from_user(&on, arg, sizeof on) > 0) { return -EFAULT; }
+        f->nonblock = on ? 1 : 0;
+        return 0;
+    }
+
     return -ENOTTY;
 }
 

@@ -275,6 +275,14 @@ int64_t sys_epoll_ctl(struct syscall_args *a) {
     return epoll_ctl_do(epf, op, fd, events, data);
 }
 
+// A blocked epoll_wait re-snapshots its registration list at least this
+// often. .NET's SocketAsyncEngine starts its event-loop thread (which
+// calls epoll_wait immediately, on an EMPTY set) and only THEN registers
+// its sockets from another thread -- so a single up-front snapshot would
+// block that thread forever. epoll_ctl_do() also fires waitq_poll_notify()
+// to cut the latency to ~0 for the common case; this only bounds it.
+#define EPOLL_REEVAL_TICKS 5
+
 static int64_t epoll_wait_core(struct syscall_args *a) {
     int epfd      = (int)a->a1;
     uint64_t uev  = a->a2;
@@ -289,66 +297,86 @@ static int64_t epoll_wait_core(struct syscall_args *a) {
     if (!epf || epf->ops != &epoll_file_ops) { return -EBADF; }
     struct epoll_obj *o = (struct epoll_obj *)epf->priv;
 
-    // Snapshot the registration list into a pollfd[] array under the
-    // object's own lock, then run poll_core with the lock released --
-    // poll_core can sleep, and nothing may hold a lock across that.
-    uint64_t flags = spin_lock_irqsave(&o->lock);
-    int n = o->nfds;
-    if (n > maxevents) { n = maxevents; }
-    struct pollfd *pfd = 0;
-    uint64_t *edata = 0;
-    if (n > 0) {
-        pfd = kmalloc((uint64_t)n * sizeof(*pfd));
-        edata = kmalloc((uint64_t)n * sizeof(*edata));
-        if (!pfd || !edata) {
-            spin_unlock_irqrestore(&o->lock, flags);
-            if (pfd) { kfree(pfd); }
-            if (edata) { kfree(edata); }
-            return -ENOMEM;
-        }
-        int i = 0;
-        for (struct epoll_entry *e = o->list; e && i < n; e = e->next, i++) {
-            pfd[i].fd = e->fd;
-            pfd[i].events = (short)e->events;
-            pfd[i].revents = 0;
-            edata[i] = e->data;
-        }
-        n = i;   // the list may be shorter than nfds if it changed concurrently
-    }
-    spin_unlock_irqrestore(&o->lock, flags);
+    int64_t user_deadline = deadline_from_ms(timeout_ms);
 
-    if (n == 0) {
-        // Nothing registered: still honour the timeout instead of
-        // returning immediately, matching Linux's epoll_wait on an
-        // empty set.
-        if (timeout_ms != 0) {
-            struct thread *self = current_thread();
-            waitq_poll_enter();
-            waitq_poll_wait((uint64_t)deadline_from_ms(timeout_ms), &self->poll_notified);
-            waitq_poll_leave();
+    for (;;) {
+        // Snapshot the current registration list under the object lock,
+        // then run poll_core with the lock released -- poll_core can
+        // sleep, and nothing may hold a lock across that.
+        uint64_t flags = spin_lock_irqsave(&o->lock);
+        int n = o->nfds;
+        if (n > maxevents) { n = maxevents; }
+        struct pollfd *pfd = 0;
+        uint64_t *edata = 0;
+        if (n > 0) {
+            pfd = kmalloc((uint64_t)n * sizeof(*pfd));
+            edata = kmalloc((uint64_t)n * sizeof(*edata));
+            if (!pfd || !edata) {
+                spin_unlock_irqrestore(&o->lock, flags);
+                if (pfd) { kfree(pfd); }
+                if (edata) { kfree(edata); }
+                return -ENOMEM;
+            }
+            int i = 0;
+            for (struct epoll_entry *e = o->list; e && i < n; e = e->next, i++) {
+                pfd[i].fd = e->fd;
+                pfd[i].events = (short)e->events;
+                pfd[i].revents = 0;
+                edata[i] = e->data;
+            }
+            n = i;
         }
-        return 0;
-    }
+        spin_unlock_irqrestore(&o->lock, flags);
 
-    int64_t ready = poll_core(pfd, (unsigned)n, deadline_from_ms(timeout_ms));
-    if (ready > 0) {
-        struct epoll_event_abi *out = kmalloc((uint64_t)ready * sizeof(*out));
-        if (!out) { kfree(pfd); kfree(edata); return -ENOMEM; }
-        int64_t j = 0;
-        for (int i = 0; i < n && j < ready; i++) {
-            if (pfd[i].revents) {
-                out[j].events = (uint32_t)pfd[i].revents;
+        // Bound the wait so the loop re-snapshots and picks up fds
+        // registered by another thread since this iteration began.
+        int64_t d;
+        if (timeout_ms == 0) {
+            d = 0;
+        } else {
+            int64_t cap = (int64_t)timer_ticks() + EPOLL_REEVAL_TICKS;
+            d = (user_deadline == (int64_t)UINT64_MAX || user_deadline > cap)
+                    ? cap : user_deadline;
+        }
+
+        // poll_core handles n == 0 (its scan loop is empty, it just
+        // honours the deadline) and owns the whole enter/notify/
+        // lost-wakeup dance -- do not reimplement it here.
+        int64_t ready = poll_core(pfd, (unsigned)n, d);
+
+        if (ready > 0) {
+            struct epoll_event_abi *out = kmalloc((uint64_t)ready * sizeof(*out));
+            if (!out) { kfree(pfd); kfree(edata); return -ENOMEM; }
+            int64_t j = 0;
+            for (int i = 0; i < n && j < ready; i++) {
+                if (!pfd[i].revents) { continue; }
+                // A closed fd polls POLLNVAL; epoll never reports it.
+                if (pfd[i].revents == POLLNVAL) { continue; }
+                out[j].events = (uint32_t)(uint16_t)pfd[i].revents;
                 out[j].data = edata[i];
                 j++;
             }
+            kfree(pfd); kfree(edata);
+            if (j > 0) {
+                uint64_t missed = copy_to_user((void *)(uintptr_t)uev, out,
+                                               (uint64_t)j * sizeof(*out));
+                kfree(out);
+                return missed > 0 ? -EFAULT : j;
+            }
+            kfree(out);   // only-POLLNVAL: block and retry
+        } else {
+            kfree(pfd);
+            kfree(edata);
+            if (ready < 0) { return ready; }   // -EINTR / -ENOMEM
         }
-        uint64_t missed = copy_to_user((void *)(uintptr_t)uev, out, (uint64_t)ready * sizeof(*out));
-        kfree(out);
-        if (missed > 0) { ready = -EFAULT; }
+
+        if (timeout_ms == 0) { return 0; }
+        if (user_deadline != (int64_t)UINT64_MAX &&
+            (int64_t)timer_ticks() >= user_deadline) {
+            return 0;
+        }
+        // loop: re-snapshot and re-scan
     }
-    kfree(pfd);
-    kfree(edata);
-    return ready;
 }
 
 int64_t sys_epoll_wait(struct syscall_args *a) {

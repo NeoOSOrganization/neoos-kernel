@@ -7,6 +7,7 @@
 struct file_descriptor;
 struct file_ops;
 struct process;
+struct fd_table;
 
 // epoll(7)'s registration set, built on top of poll_core() rather than
 // as a separate readiness mechanism: an epoll object is just a stored
@@ -32,6 +33,8 @@ struct epoll_obj {
     struct epoll_entry *list;
     int nfds;
     int refs;
+    struct fd_table *owner;    // the process fd table this epoll belongs to
+    struct epoll_obj *g_next;  // global chain, for epoll_forget_fd()
 };
 
 extern const struct file_ops epoll_file_ops;
@@ -43,5 +46,13 @@ int epoll_create(int flags);
 // EPOLL_CTL_ADD/MOD/DEL against `epfd`'s registration list. `event` is
 // NULL only for EPOLL_CTL_DEL (event is unused there, matching Linux).
 int epoll_ctl_do(struct file_descriptor *epf, int op, int fd, uint32_t events, uint64_t data);
+
+// Drop every registration for `fd` from every epoll object owned by
+// `owner`. Called from fd_table_close() so that closing a descriptor
+// removes it from any epoll set automatically -- Linux semantics that
+// .NET's SocketAsyncEngine relies on (it never EPOLL_CTL_DELs a socket
+// it is about to close, and reuses the freed fd number for the next
+// connection).
+void epoll_forget_fd(struct fd_table *owner, int fd);
 
 #endif
