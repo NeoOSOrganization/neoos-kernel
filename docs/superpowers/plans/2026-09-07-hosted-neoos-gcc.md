@@ -575,3 +575,54 @@ DURING execution that the plan (reasonably) couldn't have anticipated:
   2026-09-07-neoos-dotnet-clr-design.md`) remains the lower-risk path
   to a working "C# on NeoOS" in the meantime, since it depends on none
   of CoreCLR's runtime internals.
+
+## Follow-up: real kernel/linker fixes found chasing the NativeAOT crash further
+
+Continuing the investigation above turned up two genuinely real bugs
+and fixed both, committed to `neoos-kernel` (`1bec67e`, `60ea0fa`):
+
+1. **`elf_load()` never registered a VMA for the process's own loaded
+   image.** Every PT_LOAD segment was mapped via raw `paging_map_into()`
+   calls, bypassing `vma_insert()` entirely -- meaning a process's own
+   code/data had page-table entries but no `vma_find()`-visible record,
+   so a later `mprotect()`/`munmap()` against its own image silently
+   no-op'd instead of taking effect. No prior program in this codebase
+   had ever called `mprotect()` on its own image (only on memory it
+   `mmap()`'d itself) until this NativeAOT binary did. Fixed via a new
+   `vma_register_image_segment()`, `elf_info` extended with a
+   `segments[]`/`num_segments` array, called from both `spawn_argv()`
+   and `exec_task()`.
+2. **A bounded W^X exception.** dotnet NativeAOT's unboxing stubs
+   (`__unbox`) are genuinely both executable and self-patched at
+   runtime with zero `mprotect()` calls (confirmed by instrumenting
+   `sys_mprotect` directly). Real Linux allows this by default (W^X
+   lockdown is opt-in hardening there too). Accepted, capped at 16MiB
+   (`ELF_WX_EXCEPTION_MAX_BYTES`) so this stays "one legitimate
+   runtime's small stub region," not a general RWX amnesty -- a
+   deliberate policy relaxation, made only after asking and getting
+   an explicit answer, not unilaterally.
+
+Alongside these, `userland/user.ld` (`60ea0fa`) now explicitly routes
+`.init`/`.fini` (NativeAOT's 1-byte placeholders, also written to at
+runtime with no `mprotect()`) and `__unbox` into the writable `.data`
+output section — GNU ld's orphan-section placement had grouped them
+with `.text` (read+exec only) since `user.ld` had no rule for them.
+
+**Real, measurable progress, not yet a working binary.** With both
+fixes in place, the original page fault at the `.init` boundary is
+gone — confirmed via the QEMU interrupt trace, the fault the binary
+now hits is a **different, later** one: a `#GP` (general protection,
+vector 13) inside `.data`'s own address range (`RIP=0x20000015e00e`,
+14 bytes past `.data`'s start), meaning execution now falls through
+`.init`+`.fini`'s two placeholder bytes into raw `.data` content
+instead of returning cleanly. This points at a further `.init`/`.fini`
+layout or content expectation `libbootstrapper.o` has that this
+linker script doesn't yet match exactly — not investigated further
+this session (severe diminishing returns without a byte-level look at
+what `InitializeRuntime()` actually expects to find/write there,
+likely requiring either disassembling `libbootstrapper.o` directly or
+finding Microsoft's own reference linker script for this SDK to
+compare against). A concrete, well-scoped next step for whoever
+continues this: read `libbootstrapper.o`'s `InitializeRuntime()`
+disassembly around the `.init`/`.fini` references directly, rather
+than continuing to infer intent from crash addresses alone.
