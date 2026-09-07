@@ -58,6 +58,7 @@
 #include "drivers/net/virtio_net.h"
 #include "drivers/audio/ac97.h"
 #include "lib/rand.h"
+#include "lib/rbtree.h"
 
 void kernel_shutdown(void) {
     {   // CS3: the poll-broadcast baseline for CS5.2. Whole-boot totals
@@ -262,6 +263,7 @@ void kmain(void *multiboot_info) {
     syscall_init();
     syscall_table_selftest();
     rand_selftest();
+    rbtree_selftest();
     futex_init();
     file_selftest();
     pipe_selftest();

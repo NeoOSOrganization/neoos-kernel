@@ -1191,3 +1191,17 @@ Kernel changes it needed, all landed and gauntlet-checked:
 Still ENOSYS and needed for the full picture: `sched_setaffinity` (203)
 -- .NET **Server GC hangs before `Main`** without it, so a web app must
 publish with `-p:ServerGarbageCollection=false` for now.
+
+## Kernel data structures (internal, not ABI)
+
+- **`kernel/lib/rbtree`** -- a generic intrusive red-black tree
+  (Linux-idiom API: `rb_link_node` + `rb_insert_color`, `rb_erase`,
+  `rb_first/next/...`), with an O(1) cached-leftmost variant
+  (`rb_root_cached`) and an augmented-subtree-aggregate mechanism
+  (`rb_augment_callbacks`, `rb_{insert,erase}_augmented[_cached]`).
+  Written from CLRS, not ported. Boot selftest `[rbtree] selftest
+  passed` (4096-node build + 20 erase/re-insert churn rounds + a
+  subtree-sum augment, all cross-checked against brute force). The
+  advanced-scheduler roadmap (SCH-1 EEVDF `cfs_rq`, SCH-4 `dl_rq`) and
+  a future timer wheel build on it -- see
+  `docs/superpowers/specs/2026-09-07-advanced-scheduler-design.md`.
