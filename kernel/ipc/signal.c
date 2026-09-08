@@ -50,6 +50,7 @@ void signal_init_thread(struct thread *t) {
 }
 
 int signal_next_pending_in(struct thread *t, sigset_t_k want) {
+    if (!t) { return 0; }              // same null-physmap hazard as above
     struct process *p = t->proc;
     sigset_t_k ready = (t->pending | (p ? p->pending : 0)) & want;
     if (!ready) { return 0; }
@@ -60,6 +61,16 @@ int signal_next_pending_in(struct thread *t, sigset_t_k want) {
 }
 
 int signal_next_deliverable(struct thread *t) {
+    // A null thread is not an error here: current_thread() is NULL on a
+    // CPU that is still on its boot path and has never been through
+    // schedule(), and boot-time code does ask "is there a signal
+    // pending" through waitq_sleep. Without this guard the reads below
+    // go through a null pointer -- which does NOT fault, because the
+    // kernel physmap covers low memory, so they quietly return whatever
+    // bytes live at physical address 0 and the caller is told a signal
+    // is pending. That surfaced as waitq_sleep returning -EINTR before
+    // it ever slept, on a thread that could not have been signalled.
+    if (!t) { return 0; }
     struct process *p = t->proc;
     // Thread-directed first, then process-directed; lowest number wins
     // within each. SIGKILL and SIGSTOP are never blockable, so they are
