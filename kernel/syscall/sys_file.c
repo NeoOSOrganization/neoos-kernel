@@ -748,6 +748,30 @@ int64_t sys_ioctl(struct syscall_args *a) {
 // therefore only need to validate the fd and succeed; the data a
 // successful write() returned from is already on the device.
 // Recorded in docs/stdlib.md.
+// ftruncate(fd, length). The first size-setting operation the vnode
+// layer has: vfs_ops.truncate only ever meant "to zero" (O_TRUNC), which
+// is why fallocate below still answers -EOPNOTSUPP.
+//
+// Linux takes an off_t, so a negative length is -EINVAL rather than a
+// nine-exabyte file. Growing zero-fills; shrinking discards.
+int64_t sys_ftruncate(struct syscall_args *a) {
+    struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
+    if (!f) { return -EBADF; }
+
+    int64_t len = (int64_t)a->a2;
+    if (len < 0) { return -EINVAL; }
+
+    if (!f->vn) { return -EINVAL; }          // pipe, socket, tty: no size
+    if (f->vn->type == VNODE_DIR) { return -EISDIR; }
+    if (!f->vn->mount || !f->vn->mount->ops->truncate_to) { return -EINVAL; }
+
+    int rc = f->vn->mount->ops->truncate_to(f->vn, (uint64_t)len);
+    if (rc == 0 && f->vn->mount->ops->sync_inode) {
+        f->vn->mount->ops->sync_inode(f->vn);
+    }
+    return rc;
+}
+
 int64_t sys_fsync(struct syscall_args *a) {
     struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
     if (!f) { return -EBADF; }
@@ -755,10 +779,13 @@ int64_t sys_fsync(struct syscall_args *a) {
 }
 
 // fallocate(fd, mode, offset, len). NeoOS's filesystems cannot
-// preallocate or punch holes, and the vnode layer has no size-setting
-// operation beyond truncate-to-zero. Honest -EOPNOTSUPP -- callers
-// (SQLite, .NET FileStream) fall back to writing zeros. Recorded in
-// docs/stdlib.md.
+// preallocate or punch holes. The vnode layer does now have a
+// size-setting operation (truncate_to, added for ftruncate), so the
+// plain mode-0 "make sure this range exists" case could be built on it
+// -- but the point of fallocate is to reserve space, and ramfs
+// allocates on write regardless, so a success here would be a promise
+// nothing keeps. Honest -EOPNOTSUPP; callers (SQLite, .NET FileStream)
+// fall back to writing zeros. Recorded in docs/stdlib.md.
 int64_t sys_fallocate(struct syscall_args *a) {
     struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
     if (!f) { return -EBADF; }

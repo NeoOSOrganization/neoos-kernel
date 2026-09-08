@@ -536,6 +536,10 @@ static int devfs_readdir(struct vnode *dir, uint32_t index, struct vfs_dirent *o
     return -ENOENT;
 }
 
+static int devfs_truncate_to(struct vnode *vn, uint64_t len) {
+    (void)vn; (void)len; return -EINVAL;   // no size-setting on this fs
+}
+
 const struct vfs_ops devfs_ops = {
     .mount      = devfs_mount_op,
     .umount     = devfs_umount_op,
@@ -548,6 +552,7 @@ const struct vfs_ops devfs_ops = {
     .mkdir      = devfs_mkdir,
     .unlink     = devfs_unlink,
     .truncate   = devfs_truncate,
+    .truncate_to = devfs_truncate_to,
     .readdir    = devfs_readdir,
 };
 

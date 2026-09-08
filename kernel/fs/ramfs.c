@@ -98,9 +98,18 @@ static int64_t ramfs_read(struct vnode *vn, uint32_t pos, void *buf, uint32_t le
         uint32_t in_page = off % PMM_FRAME_SIZE;
         uint32_t chunk = PMM_FRAME_SIZE - in_page;
         if (chunk > len - done) { chunk = len - done; }
-        if (page >= RAMFS_MAX_PAGES || !n->pages[page]) { return (int64_t)done; }
-        uint8_t *src = (uint8_t *)phys_to_virt(n->pages[page]) + in_page;
-        for (uint32_t k = 0; k < chunk; k++) { dst[done + k] = src[k]; }
+        if (page >= RAMFS_MAX_PAGES) { return (int64_t)done; }
+        if (!n->pages[page]) {
+            // A hole. Pages are allocated on write, so any page inside
+            // the file's length that was never written -- everything in
+            // a file grown by ftruncate, for one -- reads as zeros.
+            // Returning a short read here instead was wrong: it made a
+            // sparse file look truncated to its first hole.
+            for (uint32_t k = 0; k < chunk; k++) { dst[done + k] = 0; }
+        } else {
+            uint8_t *src = (uint8_t *)phys_to_virt(n->pages[page]) + in_page;
+            for (uint32_t k = 0; k < chunk; k++) { dst[done + k] = src[k]; }
+        }
         done += chunk;
     }
     return (int64_t)len;
@@ -162,6 +171,35 @@ static int ramfs_truncate(struct vnode *vn) {
     }
     n->size = 0;
     vn->size = 0;
+    return 0;
+}
+
+// ftruncate. Growing costs nothing -- pages are allocated on write and
+// a hole inside the length reads as zeros -- so it is only a size
+// change. Shrinking frees whole pages entirely past the new end and
+// zeroes the tail of the partial one, so that growing again cannot
+// expose bytes the file used to hold.
+static int ramfs_truncate_to(struct vnode *vn, uint64_t len) {
+    struct ramfs_node *n = (struct ramfs_node *)vn->fs_private;
+    if (len > (uint64_t)RAMFS_MAX_PAGES * PMM_FRAME_SIZE) { return -EFBIG; }
+
+    if (len < n->size) {
+        uint32_t first_whole = (uint32_t)((len + PMM_FRAME_SIZE - 1) / PMM_FRAME_SIZE);
+        for (uint32_t p = first_whole; p < RAMFS_MAX_PAGES; p++) {
+            if (n->pages[p]) { pmm_free(n->pages[p], 0); n->pages[p] = 0; }
+        }
+        uint32_t tail = (uint32_t)(len % PMM_FRAME_SIZE);
+        if (tail) {
+            uint32_t page = (uint32_t)(len / PMM_FRAME_SIZE);
+            if (page < RAMFS_MAX_PAGES && n->pages[page]) {
+                uint8_t *z = (uint8_t *)phys_to_virt(n->pages[page]);
+                for (uint32_t k = tail; k < PMM_FRAME_SIZE; k++) { z[k] = 0; }
+            }
+        }
+    }
+
+    n->size  = (uint32_t)len;
+    vn->size = (uint32_t)len;
     return 0;
 }
 
@@ -230,5 +268,6 @@ const struct vfs_ops ramfs_ops = {
     .mkdir      = ramfs_mkdir,
     .unlink     = ramfs_unlink,
     .truncate   = ramfs_truncate,
+    .truncate_to = ramfs_truncate_to,
     .readdir    = ramfs_readdir,
 };

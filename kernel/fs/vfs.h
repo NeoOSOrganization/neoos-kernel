@@ -98,6 +98,12 @@ struct vfs_ops {
     int     (*mkdir)(struct vnode *dir, const char *name);
     int     (*unlink)(struct vnode *dir, const char *name);
     int     (*truncate)(struct vnode *vn);
+    // Set the file's length, growing (zero-filled) or shrinking. Distinct
+    // from truncate above, which only ever means "to zero" and is what
+    // O_TRUNC uses. A filesystem that cannot resize returns -EINVAL;
+    // before this existed there was no size-setting operation at all,
+    // which is why fallocate still answers -EOPNOTSUPP.
+    int     (*truncate_to)(struct vnode *vn, uint64_t len);
     int     (*readdir)(struct vnode *dir, uint32_t index, struct vfs_dirent *out);
 };
 

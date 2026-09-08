@@ -30,6 +30,7 @@
 #define EINVAL  22
 #define ENFILE  23
 #define EMFILE  24
+#define EFBIG   27
 #define ENOSPC  28
 #define EIO     5
 #define ENOTTY  25

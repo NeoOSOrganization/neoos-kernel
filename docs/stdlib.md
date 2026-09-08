@@ -818,6 +818,35 @@ int close_range(unsigned int first, unsigned int last, unsigned int flags);
   no-op (NeoOS fd tables are already per-process); **`CLOSE_RANGE_CLOEXEC`
   is `-EINVAL`** — there is no close-on-exec state to set.
 
+## `ftruncate` (GUI stack G3)
+
+```c
+#include <unistd.h>
+int ftruncate(int fd, off_t length);
+```
+
+Sets a file's length. Growing extends the file with a hole that reads
+as zeros; shrinking discards the tail, and bytes discarded that way do
+not reappear if the file is grown again. A negative length is
+`-EINVAL`, a directory is `-EISDIR`, and a file larger than the
+filesystem can hold is `-EFBIG`.
+
+Implemented for **ramfs** (`/tmp`). Every other filesystem returns
+`-EINVAL`: fatfs, embedfs, devfs and procfs have no size-setting path.
+There is no `truncate(path, length)` — only the fd form.
+
+This is the first size-setting operation the vnode layer has had;
+`vfs_ops.truncate` only ever meant "to zero", which is what `O_TRUNC`
+uses. `fallocate` still returns `-EOPNOTSUPP`, deliberately: ramfs
+allocates on write, so reserving space is a promise nothing would keep.
+
+**Note on sparse reads.** Adding this exposed a bug worth recording,
+since it changes observable behaviour: a `read()` crossing a hole in a
+ramfs file used to stop at the hole and return a short count, making a
+sparse file look truncated at its first unwritten page. Holes now read
+as zeros, which is what POSIX requires and what a file grown by
+`ftruncate` is made entirely of.
+
 ## `statx`, `fsync`/`fdatasync`, `fallocate`, `access`/`faccessat` (MSC-3)
 
 - **`statx`** fills `STATX_BASIC_STATS` from the same vnode data as

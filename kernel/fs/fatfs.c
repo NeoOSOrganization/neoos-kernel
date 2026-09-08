@@ -2221,6 +2221,10 @@ static int fatfs_readdir_op(struct vnode *dir, uint32_t index, struct vfs_dirent
     return -ENOENT;
 }
 
+static int fatfs_truncate_to(struct vnode *vn, uint64_t len) {
+    (void)vn; (void)len; return -EINVAL;   // no size-setting on this fs
+}
+
 const struct vfs_ops fatfs_ops = {
     .mount      = fatfs_mount_op,
     .umount     = fatfs_umount_op,
@@ -2233,5 +2237,6 @@ const struct vfs_ops fatfs_ops = {
     .mkdir      = fatfs_mkdir_op,
     .unlink     = fatfs_unlink_op,
     .truncate   = fatfs_truncate_op,
+    .truncate_to = fatfs_truncate_to,
     .readdir    = fatfs_readdir_op,
 };

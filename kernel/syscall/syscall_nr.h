@@ -343,7 +343,12 @@
 #define SYS_ACCESS                132
 #define SYS_FACCESSAT            133
 
+// GUI stack G3. ftruncate sizes a file -- needed to size a memfd before
+// mapping it, and the first size-setting operation the vnode layer has
+// ever had. 135 is reserved for memfd_create in the next commit.
+#define SYS_FTRUNCATE       134
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX              134
+#define SYS_MAX              135
 
 #endif

@@ -290,6 +290,10 @@ static int procfs_readdir(struct vnode *dir, uint32_t index,
     return -ENOENT;
 }
 
+static int procfs_truncate_to(struct vnode *vn, uint64_t len) {
+    (void)vn; (void)len; return -EINVAL;   // no size-setting on this fs
+}
+
 const struct vfs_ops procfs_ops = {
     .mount      = procfs_mount_op,
     .umount     = procfs_umount_op,
@@ -302,5 +306,6 @@ const struct vfs_ops procfs_ops = {
     .mkdir      = procfs_mkdir,
     .unlink     = procfs_unlink,
     .truncate   = procfs_truncate,
+    .truncate_to = procfs_truncate_to,
     .readdir    = procfs_readdir,
 };
