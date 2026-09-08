@@ -62,7 +62,7 @@ Established by reading the tree on 2026-09-08, not assumed:
 | capability | state |
 |---|---|
 | `/dev/fb0` | 32bpp linear, full Linux fbdev ABI (`FBIOGET_VSCREENINFO`, `FBIOGET_FSCREENINFO`, `mmap`). `FBIOPUT_VSCREENINFO` returns `-EINVAL` -- no mode setting. |
-| Screen arbitration | **none.** The kernel console and a graphical app both paint `/dev/fb0` and overwrite each other. |
+| Screen arbitration | **mostly present.** `vt.c` implements `KDSETMODE`/`KDGETMODE` per VT at Linux's numbers; a VT in `KD_GRAPHICS` is skipped by the console render path and repainted in full on return to `KD_TEXT`. Two gaps: nothing restores `KD_TEXT` when the owning process dies, and `vesafb.c` has no VT awareness, so an inactive VT's process can still paint. |
 | evdev | `/dev/input/event0`, keyboard only. Single global client list and a single global grab in `kernel/drivers/input/input.c` -- the subsystem has no notion of more than one device. |
 | Mouse | **absent.** |
 | `evdev_client_read` | **never blocks.** Returns `-EAGAIN` even for a blocking fd; the in-tree comment attributes this to lock ordering. `poll`/`epoll` work, which is why nothing has hit it yet. |
@@ -81,35 +81,40 @@ Each gets its own implementation plan. They are listed in dependency
 order; G1, G2 and G3 are independent of each other and can be done in
 any order or in parallel.
 
-### G1 -- Framebuffer ownership
+### G1 -- Framebuffer ownership: close the two remaining gaps
 
-The blocker the gears demo surfaced: one process must be able to claim
-the screen and have the kernel console stop painting.
+**Most of this is already done, contrary to the superseded spec.**
+`kernel/tty/vt.c` implements `KDSETMODE`/`KDGETMODE` per VT with
+`KD_TEXT`/`KD_GRAPHICS` at Linux's numbers (`0x4B3A`/`0x4B3B`), the
+render path already skips a VT in `KD_GRAPHICS`
+(`if (vc->kd_mode == KD_TEXT) render_diff_locked(vc)`), returning to
+`KD_TEXT` triggers a full repaint, and `vt_panic_reset` forces VT 0 back
+to text. The old spec's "the console and a graphical app overwrite each
+other" was true at the gears demo and has since been fixed by the VT
+work. An app claims the screen today, the Linux way, and it works.
 
-Done the Linux way rather than with a bespoke ioctl: **`KDSETMODE` with
-`KD_GRAPHICS` on the tty**, which is exactly how real Linux fbdev
-applications claim the display. `KD_TEXT` restores the console and
-forces a full repaint.
+Two gaps remain, both confirmed by reading the tree on 2026-09-08:
 
-- `KDSETMODE` = `0x4B3A`, `KDGETMODE` = `0x4B3B`, `KD_TEXT` = 0,
-  `KD_GRAPHICS` = 1. Linux values, because an unpatched Linux fbdev
-  program must do the right thing here.
-- **Restoration on death is mandatory.** The mode is owned by the tty,
-  and a process exiting or crashing while its VT is in `KD_GRAPHICS`
-  must leave the machine with a usable console. Tie restoration to tty
-  release, not to an explicit call the app might never reach.
-- VT switching (`Alt+Fn`, already implemented) must keep working. A
-  process whose VT is not active must not reach the framebuffer:
-  `/dev/fb0` writes and its `mmap`ped pages are gated on the owning
-  VT being the active one.
-- **Divergence to record:** Linux negotiates this with
-  `VT_SETMODE`/`VT_PROCESS` and a signal handshake. NeoOS enforces it
-  in the kernel instead. The observable difference is that an app does
-  not get told it lost the screen; it is simply prevented from
-  painting.
+1. **Nothing restores `KD_TEXT` when the owner dies.** Every write to
+   `kd_mode` in `vt.c` is either init, an explicit `KDSETMODE`, or
+   `vt_panic_reset`. A graphical process that crashes -- or simply
+   exits without restoring -- leaves its VT in `KD_GRAPHICS` forever,
+   and the machine has no usable console. Restoration must be tied to
+   release of the `/dev/ttyN` fd that set the mode, not to a call the
+   app might never reach.
+2. **`/dev/fb0` is not gated on the owning VT being active.**
+   `vesafb.c` contains no reference to the VT layer. A process on an
+   inactive VT can write, or keep painting through an existing
+   `mmap`, straight over whatever the foreground VT is showing. Writes
+   and `mmap` faults must be refused unless the caller's VT is the
+   active one.
 
-Verified by a headless QEMU run plus a serial-log selftest, per project
-convention.
+**Divergence to record:** Linux negotiates VT ownership with
+`VT_SETMODE`/`VT_PROCESS` and a signal handshake, so an app is *told*
+it lost the screen. NeoOS enforces it in the kernel instead: the app is
+not told, it is simply prevented from painting. `VT_SETMODE` is
+accepted for ABI compatibility but the process-mode handshake is not
+implemented.
 
 ### G2 -- PS/2 mouse, and an input subsystem that holds two devices
 
