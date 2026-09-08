@@ -42,6 +42,11 @@ extern const struct file_ops vt_file_ops;
 // owns the layout (see struct vt_fd).
 void *vt_fd_new(int index);
 
+// Whether the calling process may paint /dev/fb0 right now.
+int   vt_process_owns_screen(void);
+// The same policy with an explicit pid, for selftests.
+int   vt_screen_gate_check(int pid);
+
 // The VT's current KD_TEXT/KD_GRAPHICS, for selftests to assert on.
 int   vt_selftest_kd_mode(int vt_index);
 

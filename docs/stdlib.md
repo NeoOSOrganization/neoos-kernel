@@ -2254,10 +2254,36 @@ x86-64 layout. Byte `read`/`write`/`lseek` on the fd also work.
   the requested mode equals the current one. The mode is fixed at boot.
 - **32-bpp packed RGB only.** No 8/16/24-bpp, no palette, no panning,
   no acceleration ioctls.
-- **The framebuffer is shared with the in-kernel console.** Until M1b's
-  userspace terminal takes over, `fbcon` is actively drawing on it, so a
-  userland program that mmaps `/dev/fb0` and the kernel will both write
-  pixels. M1b resolves this by moving all rendering to userspace.
+- **Claiming the screen.** A program that wants the framebuffer to
+  itself sets `KDSETMODE`/`KD_GRAPHICS` on its `/dev/ttyN` — Linux's
+  mechanism, at Linux's ioctl numbers — after which the kernel console
+  stops painting that VT and repaints it in full on the return to
+  `KD_TEXT`.
+
+  **DIVERGENCE: the claim is released by the kernel, not negotiated
+  with the process.** Linux uses `VT_SETMODE`/`VT_PROCESS` and a signal
+  handshake, so an application is *told* when it loses the screen.
+  NeoOS instead:
+
+  - restores `KD_TEXT` when the last fd that made the claim is released
+    — including when the process died without tidying up, which is the
+    case that otherwise leaves the machine with no console; and
+  - refuses `write()` and `mmap()` on `/dev/fb0` with **`-EBUSY`** when
+    the caller may not paint. A process that claimed a VT may paint only
+    while that VT is on display; a process that claimed nothing may
+    paint only while nobody else owns the screen (which is what keeps
+    programs that never call `KDSETMODE` working).
+
+  `VT_SETMODE` and `VT_RELDISP` are accepted for ABI compatibility but
+  the process-mode handshake is not implemented, so an application is
+  never signalled.
+
+  **LIMITATION:** the gate applies to the `mmap` *call*, not to later
+  faults on an established mapping. A process that mapped the
+  framebuffer while it owned the screen keeps a usable mapping across a
+  VT switch. Revoking that would require the switch path to unmap every
+  framebuffer mapping; for now a compositor is expected to cooperate by
+  stopping when it loses focus.
 
 ### `poll` / `select`
 

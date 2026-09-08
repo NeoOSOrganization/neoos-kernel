@@ -15,6 +15,7 @@ struct vt_console {
     struct tty tty;
     struct kvt scr;
     int kd_mode;                       // KD_TEXT or KD_GRAPHICS
+    int kd_owner_pid;                  // who claimed it; 0 when KD_TEXT
     struct waitq wait_active;          // VT_WAITACTIVE sleepers
     struct vc_cell shown[VC_MAX_ROWS][VC_MAX_COLS];   // last painted (diff)
     int shown_valid;
@@ -312,6 +313,53 @@ int vt_selftest_kd_mode(int vt_index) {
     return m;
 }
 
+// May the CALLING process paint the framebuffer right now?
+//
+// The rule is about the caller's own claim, not merely about whether
+// anyone is claiming:
+//
+//   - A process that has claimed a VT with KDSETMODE(KD_GRAPHICS) may
+//     paint only while that VT is the one on display. This is the case
+//     that matters: a compositor on VT 0 must go quiet the instant the
+//     user hits Alt+F2, or it paints over VT 1's console.
+//   - A process that has claimed nothing may paint only while nobody
+//     else owns the screen. That keeps existing framebuffer programs
+//     working -- neoos-tinygl opens and mmaps /dev/fb0 without ever
+//     calling KDSETMODE -- while still shutting them out the moment a
+//     compositor takes over.
+//
+// LIMITATION, deliberate and recorded in docs/stdlib.md: this gates the
+// mmap CALL, not subsequent faults on an established mapping. A process
+// that mapped the framebuffer while it owned the screen keeps a usable
+// mapping across a VT switch. Revoking that needs the switch path to
+// unmap every fb mapping, which is a bigger change than this milestone
+// wants; the compositor cooperates by stopping on a Focus event.
+// Split from vt_process_owns_screen so the policy can be tested with a
+// pid of the test's choosing: the interesting cases are "a DIFFERENT
+// process owns the screen" and "the owner is on a VT that is not on
+// display", and boot-time selftests run with no current_proc at all.
+int vt_screen_gate_check(int pid) {
+    uint64_t fl = spin_lock_irqsave(&vt_lock);
+    int owned_by_caller = -1;
+    for (int i = 0; i < VT_COUNT; i++) {
+        if (vts[i].kd_mode == KD_GRAPHICS && vts[i].kd_owner_pid == pid && pid != 0) {
+            owned_by_caller = i;
+            break;
+        }
+    }
+    int active = vt_active;
+    int active_is_claimed = (vts[active].kd_mode == KD_GRAPHICS);
+    spin_unlock_irqrestore(&vt_lock, fl);
+
+    if (owned_by_caller >= 0) { return owned_by_caller == active; }
+    return !active_is_claimed;
+}
+
+int vt_process_owns_screen(void) {
+    struct process *p = current_proc();
+    return vt_screen_gate_check(p ? p->pid : 0);
+}
+
 static int vt_index_of(struct file_descriptor *f) {
     struct vt_fd *v = f->priv;
     return v ? v->index : 0;
@@ -351,6 +399,13 @@ static int64_t vt_fop_ioctl(struct file_descriptor *f, uint64_t request, void *a
         if (request == KDSETMODE && rc == 0 && f->priv) {
             struct vt_fd *v = f->priv;
             v->claimed = ((long)(intptr_t)arg == KD_GRAPHICS);
+            int idx = v->index ? v->index - 1 : vt_active;
+            if (idx >= 0 && idx < VT_COUNT) {
+                struct process *p = current_proc();
+                uint64_t fl = spin_lock_irqsave(&vt_lock);
+                vts[idx].kd_owner_pid = v->claimed && p ? p->pid : 0;
+                spin_unlock_irqrestore(&vt_lock, fl);
+            }
         }
         return rc;
     }
@@ -389,6 +444,7 @@ static void vt_fop_close(struct file_descriptor *f) {
         if (idx >= 0 && idx < VT_COUNT) {
             uint64_t fl = spin_lock_irqsave(&vt_lock);
             vts[idx].kd_mode = KD_TEXT;
+            vts[idx].kd_owner_pid = 0;
             if (idx == vt_active) { render_full_locked(&vts[idx]); }
             spin_unlock_irqrestore(&vt_lock, fl);
         }
@@ -539,6 +595,52 @@ static void vt_kd_release_selftest(void) {
     serial_write_string("[vt] kd-release selftest passed\n");
 }
 
+// The screen gate: who may paint /dev/fb0, and when.
+//
+// Poking kd_owner_pid directly is the point -- the interesting cases
+// are "a DIFFERENT process owns the screen" and "the owner is on a VT
+// that is not on display", and neither can be reached from a single
+// kernel thread through the ioctl path.
+static void vt_screen_gate_selftest(void) {
+    const int me = 4242;               // synthetic: boot has no current_proc
+    int saved = vt_active;
+    const char *why = 0;
+
+    vt_switch(0);
+
+    // Nobody has claimed anything: an unclaimed caller may paint. This
+    // is what keeps neoos-tinygl, which never calls KDSETMODE, working.
+    if (!vt_screen_gate_check(me)) { why = "unclaimed screen refused"; goto done; }
+
+    // We own the active VT.
+    vts[0].kd_mode = KD_GRAPHICS;
+    vts[0].kd_owner_pid = me;
+    if (!vt_screen_gate_check(me)) { why = "owner on the active VT refused"; goto done; }
+
+    // Still ours, but the user switched away. This is the case the gate
+    // exists for: a compositor must go quiet on Alt+F2.
+    vt_switch(1);
+    if (vt_screen_gate_check(me)) { why = "owner painted from a background VT"; goto done; }
+
+    // Someone else owns the VT on display; we claimed nothing.
+    vt_switch(0);
+    vts[0].kd_owner_pid = me + 1000;
+    if (vt_screen_gate_check(me)) { why = "painted over another process's screen"; goto done; }
+
+done:
+    vts[0].kd_mode = KD_TEXT;
+    vts[0].kd_owner_pid = 0;
+    vt_switch(saved);
+
+    if (why) {
+        serial_write_string("[vt] screen-gate selftest FAILED: ");
+        serial_write_string(why);
+        serial_write_string("\n");
+    } else {
+        serial_write_string("[vt] screen-gate selftest passed\n");
+    }
+}
+
 void vt_selftest(void) {
     int fail = 0;
 
@@ -558,4 +660,5 @@ void vt_selftest(void) {
     serial_write_string(fail ? "[vt] selftest FAILED\n" : "[vt] selftest passed\n");
 
     vt_kd_release_selftest();
+    vt_screen_gate_selftest();
 }

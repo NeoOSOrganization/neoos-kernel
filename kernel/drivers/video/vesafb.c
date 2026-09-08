@@ -7,6 +7,7 @@
 #include "sync/poll_head.h"
 #include "sched/proc.h"
 #include "errno.h"
+#include "tty/vt.h"
 
 // vesafb's own state -- the Multiboot2 linear framebuffer. Not a public
 // interface: everything outside kernel/drivers/video/ goes through
@@ -252,6 +253,10 @@ static void bzero_local(void *p, uint64_t n) {
 static int64_t fb_mmap(struct file_descriptor *f, struct mmap_req *r) {
     (void)f;
     if (!fb.present) { return -ENODEV; }
+    // -EBUSY, not -EPERM: the condition is transient and clears on the
+    // next VT switch, and -EBUSY is what Linux fbdev returns for a
+    // framebuffer already in use.
+    if (!vt_process_owns_screen()) { return -EBUSY; }
     if (r->len == 0 || r->off + r->len < r->off) { return -EINVAL; }
     if (r->off + r->len > fb.size) { return -EINVAL; }
     if (r->prot & PROT_EXEC) { return -EINVAL; }        // W^X
@@ -273,6 +278,7 @@ static int64_t fb_read(struct file_descriptor *f, void *buf, uint64_t n) {
 
 static int64_t fb_write(struct file_descriptor *f, const void *buf, uint64_t n) {
     if (!fb.present) { return -ENODEV; }
+    if (!vt_process_owns_screen()) { return -EBUSY; }
     if ((uint64_t)f->position >= fb.size) { return -ENOSPC; }
     uint64_t k = fb.size - (uint64_t)f->position;
     if (k > n) { k = n; }
