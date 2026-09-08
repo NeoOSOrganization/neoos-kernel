@@ -1,4 +1,26 @@
-# NeoOS GUI Stack (C# compositor + LVGL) Implementation Plan
+# NeoOS GUI Stack (C compositor + LVGL + C#) Implementation Plan
+
+> **STATUS 2026-09-09: DELIVERED.** All six phases are implemented and
+> on `main`. A C# application draws through LVGL into a window
+> composited by `neoos-wm`; `make hello` reproduces it and screenshots
+> the result.
+>
+> **Two things changed from this plan while executing it, both for the
+> better:**
+>
+> 1. **The compositor is written in C, not C#** (user's direction). It
+>    is the process that holds the screen for the whole machine, so it
+>    should not carry a garbage collector, and this keeps a managed
+>    runtime off the display path entirely. C# is the application
+>    language, which is where the request put it. Tasks 12-15 below
+>    describe the C# compositor that was NOT built; `userland/wm.c` is
+>    what exists.
+> 2. **G1 was already mostly implemented.** `KDSETMODE`/`KD_GRAPHICS`
+>    and the console render-path skip existed; only restore-on-death
+>    and the inactive-VT gate were missing.
+>
+> Everything else landed as written. The task-by-task detail below is
+> kept as the record of what was done and why.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

@@ -259,7 +259,7 @@ $(USERLAND_BUILD)/TERMCHILD.ELF: $(USERLAND_DIR)/termchild.c $(USERLAND_DIR)/use
 	@mkdir -p $(USERLAND_BUILD)
 	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIBNEOOS_DIR)/lib/crt0.o $(USERLAND_DIR)/termchild.c -L$(LIBNEOOS_DIR)/lib -lneoos
 
-$(DISK_IMG): $(BUILD_DIR)/embedfs_table.c $(USERLAND_BUILD)/TERM.ELF $(USERLAND_BUILD)/INIT.ELF $(USERLAND_BUILD)/NSH.ELF $(USERLAND_BUILD)/LOGIN.ELF
+$(DISK_IMG): $(BUILD_DIR)/embedfs_table.c $(USERLAND_BUILD)/TERM.ELF $(USERLAND_BUILD)/INIT.ELF $(USERLAND_BUILD)/NSH.ELF $(USERLAND_BUILD)/LOGIN.ELF $(USERLAND_BUILD)/WM.ELF
 	mkdir -p $(DISK_SRC)/dir $(DISK_SRC)/nex
 	printf 'Hello from NeoOS FAT16!\n' > $(DISK_SRC)/hello.txt
 	head -c 8192 /dev/zero | tr '\0' 'N' > $(DISK_SRC)/bigfile.txt
@@ -305,6 +305,13 @@ $(DISK_IMG): $(BUILD_DIR)/embedfs_table.c $(USERLAND_BUILD)/TERM.ELF $(USERLAND_
 	@# nothing here) lands under /opt/<name>/, for the port's own code
 	@# to find by a fixed, known path. init.c's base_env puts
 	@# /usr/local/bin on $PATH for exactly this.
+	@# The compositor is a system component, not a port: every image
+	@# gets it, so an installed GUI application has something to connect
+	@# to. It is ~20 KB and does nothing unless a client appears.
+	mmd -i $(DISK_IMG) ::usr/local 2>/dev/null || true
+	mmd -i $(DISK_IMG) ::usr/local/bin 2>/dev/null || true
+	./tools/nexify.sh $(USERLAND_BUILD)/WM.ELF $(BUILD_DIR)/wm.nex
+	mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/wm.nex ::usr/local/bin/wm.nex
 	@echo "disk: PORT_DIRS=$(PORT_DIRS)"
 	@for pair in $(PORT_DIRS); do \
 		name=$${pair%%=*}; path=$${pair#*=}; \
