@@ -38,6 +38,13 @@ struct tty *vt_tty(int vt_index);           // 0 == active, 1..VT_COUNT
 // VT_*/KD* set first.
 extern const struct file_ops vt_file_ops;
 
+// devfs allocates a /dev/ttyN fd's private object through this; vt.c
+// owns the layout (see struct vt_fd).
+void *vt_fd_new(int index);
+
+// The VT's current KD_TEXT/KD_GRAPHICS, for selftests to assert on.
+int   vt_selftest_kd_mode(int vt_index);
+
 void  vt_selftest(void);
 void  vt_stress_selftest(void);   // switch-vs-write race; needs APs online
 

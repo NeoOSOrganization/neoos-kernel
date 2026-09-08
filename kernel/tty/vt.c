@@ -7,6 +7,7 @@
 #include "drivers/char/serial.h"
 #include "sync/waitq.h"
 #include "sync/lock.h"
+#include "mm/heap.h"
 #include "smp/smp.h"
 #include "errno.h"
 
@@ -280,8 +281,40 @@ int64_t vt_ioctl(int vt_index, uint64_t request, void *arg) {
 // ordinary terminal ioctls (TCGETS, TIOCGWINSZ, ...) still work on the
 // same fd.
 
+// What a /dev/ttyN fd's priv points at. It was a bare int cast through
+// a pointer, which was enough while nothing had to be undone on the way
+// out. It is not enough now: a process that puts its VT into
+// KD_GRAPHICS and then dies must not leave the machine with no console,
+// so the fd has to remember that IT made the claim, and the claim has
+// to outlive dup/fork -- hence the refcount.
+struct vt_fd {
+    int index;          // 0 == "whichever VT is active"
+    int claimed;        // this fd put its VT into KD_GRAPHICS
+    int refs;           // dup/fork share one vt_fd
+};
+
+// devfs is the only place that knows the device names, so it opens
+// these; vt.c owns the layout.
+void *vt_fd_new(int index) {
+    struct vt_fd *v = kmalloc(sizeof(struct vt_fd));
+    if (!v) { return 0; }
+    v->index = index;
+    v->claimed = 0;
+    v->refs = 1;
+    return v;
+}
+
+int vt_selftest_kd_mode(int vt_index) {
+    if (vt_index < 0 || vt_index >= VT_COUNT) { return -1; }
+    uint64_t f = spin_lock_irqsave(&vt_lock);
+    int m = vts[vt_index].kd_mode;
+    spin_unlock_irqrestore(&vt_lock, f);
+    return m;
+}
+
 static int vt_index_of(struct file_descriptor *f) {
-    return (int)(long)(intptr_t)f->priv;
+    struct vt_fd *v = f->priv;
+    return v ? v->index : 0;
 }
 
 static struct tty *vt_of(struct file_descriptor *f) {
@@ -312,7 +345,15 @@ static int64_t vt_fop_getdents(struct file_descriptor *f, void *buf, int bytes) 
 
 static int64_t vt_fop_ioctl(struct file_descriptor *f, uint64_t request, void *arg) {
     int64_t rc = vt_ioctl(vt_index_of(f), request, arg);
-    if (rc != -ENOTTY) { return rc; }
+    if (rc != -ENOTTY) {
+        // Remember which fd claimed the screen, so releasing it can hand
+        // the screen back even if the process never got the chance to.
+        if (request == KDSETMODE && rc == 0 && f->priv) {
+            struct vt_fd *v = f->priv;
+            v->claimed = ((long)(intptr_t)arg == KD_GRAPHICS);
+        }
+        return rc;
+    }
     struct tty *t = vt_of(f);
     if (!t) { return -ENODEV; }
     return tty_obj_ioctl(t, request, arg);
@@ -329,8 +370,32 @@ static int vt_fop_poll(struct file_descriptor *f, int events) {
     return tty_obj_poll(t, events);
 }
 
-static void vt_fop_dup(struct file_descriptor *f)   { (void)f; }
-static void vt_fop_close(struct file_descriptor *f) { (void)f; }
+static void vt_fop_dup(struct file_descriptor *f) {
+    struct vt_fd *v = f->priv;
+    if (v) { __atomic_add_fetch(&v->refs, 1, __ATOMIC_SEQ_CST); }
+}
+
+static void vt_fop_close(struct file_descriptor *f) {
+    struct vt_fd *v = f->priv;
+    if (!v) { return; }
+    if (__atomic_sub_fetch(&v->refs, 1, __ATOMIC_SEQ_CST) != 0) { return; }
+
+    // Last reference. If this fd claimed graphics mode, hand the screen
+    // back. This runs on the exit path of a process that crashed just as
+    // much as one that tidied up, which is the whole point: nothing here
+    // may depend on the application having asked.
+    if (v->claimed) {
+        int idx = v->index ? v->index - 1 : vt_active;
+        if (idx >= 0 && idx < VT_COUNT) {
+            uint64_t fl = spin_lock_irqsave(&vt_lock);
+            vts[idx].kd_mode = KD_TEXT;
+            if (idx == vt_active) { render_full_locked(&vts[idx]); }
+            spin_unlock_irqrestore(&vt_lock, fl);
+        }
+    }
+    f->priv = 0;
+    kfree(v);
+}
 
 const struct file_ops vt_file_ops = {
     .name     = "vt",
@@ -400,6 +465,80 @@ void vt_stress_selftest(void) {
     serial_write_string("[vt] stress passed\n");
 }
 
+// A VT left in KD_GRAPHICS by a process that died must come back to
+// KD_TEXT when the last fd that claimed it is released. Otherwise a
+// crashed graphical app leaves the machine with no console, and the
+// only way out is a reboot.
+//
+// VT 1 (the second one) is used throughout: it is not the active VT, so
+// nothing here repaints the screen the test is running on.
+static void vt_kd_release_selftest(void) {
+    struct file_descriptor f = { 0 };
+    struct file_descriptor a = { 0 }, b = { 0 };
+    const int devidx = 2;              // /dev/tty2 -> vts[1]
+    const int vtidx  = 1;
+
+    f.priv = vt_fd_new(devidx);
+    if (!f.priv) {
+        serial_write_string("[vt] kd-release selftest FAILED: alloc\n");
+        return;
+    }
+
+    if (vt_file_ops.ioctl(&f, KDSETMODE, (void *)(long)KD_GRAPHICS) != 0 ||
+        vt_selftest_kd_mode(vtidx) != KD_GRAPHICS) {
+        serial_write_string("[vt] kd-release selftest FAILED: set\n");
+        return;
+    }
+
+    // Releasing the claiming fd restores text mode -- this is the path a
+    // crashing process takes, so it must not depend on the process
+    // having done anything on the way out.
+    vt_file_ops.close(&f);
+    if (vt_selftest_kd_mode(vtidx) != KD_TEXT) {
+        serial_write_string("[vt] kd-release selftest FAILED: not restored\n");
+        vts[vtidx].kd_mode = KD_TEXT;              // do not poison the rest of boot
+        return;
+    }
+
+    // A dup'd fd holds the claim until the LAST reference goes.
+    a.priv = vt_fd_new(devidx);
+    if (!a.priv) {
+        serial_write_string("[vt] kd-release selftest FAILED: alloc2\n");
+        return;
+    }
+    vt_file_ops.ioctl(&a, KDSETMODE, (void *)(long)KD_GRAPHICS);
+    b.priv = a.priv;
+    vt_file_ops.dup(&b);
+    vt_file_ops.close(&a);
+    if (vt_selftest_kd_mode(vtidx) != KD_GRAPHICS) {
+        serial_write_string("[vt] kd-release selftest FAILED: dup released early\n");
+        vts[vtidx].kd_mode = KD_TEXT;
+        return;
+    }
+    vt_file_ops.close(&b);
+    if (vt_selftest_kd_mode(vtidx) != KD_TEXT) {
+        serial_write_string("[vt] kd-release selftest FAILED: dup never released\n");
+        vts[vtidx].kd_mode = KD_TEXT;
+        return;
+    }
+
+    // An fd that never claimed graphics mode must not restore anything
+    // on close -- otherwise any process closing /dev/ttyN would yank the
+    // screen out from under whoever legitimately owns it.
+    vts[vtidx].kd_mode = KD_GRAPHICS;
+    struct file_descriptor bystander = { 0 };
+    bystander.priv = vt_fd_new(devidx);
+    vt_file_ops.close(&bystander);
+    if (vt_selftest_kd_mode(vtidx) != KD_GRAPHICS) {
+        serial_write_string("[vt] kd-release selftest FAILED: bystander stole the release\n");
+        vts[vtidx].kd_mode = KD_TEXT;
+        return;
+    }
+    vts[vtidx].kd_mode = KD_TEXT;
+
+    serial_write_string("[vt] kd-release selftest passed\n");
+}
+
 void vt_selftest(void) {
     int fail = 0;
 
@@ -417,4 +556,6 @@ void vt_selftest(void) {
     if (vt_active != 0) { fail = 1; }
 
     serial_write_string(fail ? "[vt] selftest FAILED\n" : "[vt] selftest passed\n");
+
+    vt_kd_release_selftest();
 }

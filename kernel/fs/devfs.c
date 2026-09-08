@@ -211,7 +211,8 @@ static int vt_dev_open(struct file_descriptor *f) {
         if (*n >= '0' && *n <= '9') { index = *n - '0'; }
     }
     f->ops  = &vt_file_ops;
-    f->priv = (void *)(long)index;
+    f->priv = vt_fd_new(index);
+    if (!f->priv) { return -ENOMEM; }
     return 0;
 }
 
