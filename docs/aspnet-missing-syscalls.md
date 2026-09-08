@@ -30,10 +30,12 @@ under sustained load is not yet stable — see "Known remaining issue".
 
 ## Known remaining issue — concurrent request handling
 
-**Status as of 2026-09-08: substantially better, not finished.** Four
-kernel bugs blocking Kestrel were found and fixed (below). ASP.NET Core
-now serves **40/40 sequential requests** and passes at concurrency 2 and
-4. At concurrency 8 under sustained load it still stops answering.
+**Status as of 2026-09-08: root-caused, fix not yet written.** Four
+kernel bugs blocking Kestrel were found and fixed (below), and ASP.NET
+Core now serves **40/40 sequential requests** and passes at concurrency
+2 and 4. At concurrency 8 under sustained load it stops answering, and
+the cause is now known: **NeoOS's epoll is level-triggered and .NET
+registers EPOLLET.** See the section below.
 
 The failure is a HANG, not the `AccessViolation` this section used to
 describe — no `[usrflt]`, no `[fault-audit]`, nothing in the kernel log.
@@ -51,13 +53,87 @@ oracle, `make epolltcp`) does the same epoll accept/serve/close cycle at
 concurrency 8 and passes 16/16, which puts this above the kernel's epoll
 layer.
 
-Two things to chase next, in order:
-1. Why the engine stops draining. Instrument which syscall its event
-   thread is parked in when the table fills.
-2. `TCP_MAX_CONNS` is **32**, statically allocated (~76KB per TCB: 32KB
-   send + 32KB receive + reassembly). That is far too few for a web
-   server whatever else is fixed, and the buffers should become dynamic
-   rather than the count simply raised.
+### ROOT CAUSE (confirmed 2026-09-08): NeoOS's epoll is level-triggered,
+### .NET's SocketAsyncEngine is edge-triggered
+
+Instrumenting `epoll_ctl_do` to log the event mask userland registers
+gives, for every socket .NET adds to its engine's epoll set:
+
+```
+[ep-dbg] ctl op=1 events=0x80000005
+```
+
+`0x80000005` = `EPOLLET (0x80000000) | EPOLLOUT (0x4) | EPOLLIN (0x1)`.
+So **.NET asks for EDGE-TRIGGERED notification**, and NeoOS's epoll is
+level-triggered only (`kernel/sync/epoll.h` says so explicitly). Worse,
+the flag is not merely ignored, it is silently *erased*:
+`epoll_wait_core` copies the registration into a `struct pollfd` with
+
+```c
+pfd[i].events = (short)e->events;     /* 0x80000005 -> 0x0005 */
+```
+
+a 32-bit mask truncated into a 16-bit field, so `EPOLLET` cannot even be
+seen by the code that would honour it.
+
+**Why that hangs Kestrel rather than merely being inefficient.** The
+usual intuition -- "level-triggered delivers a superset of edge-
+triggered, so it is safe" -- is wrong for a consumer *written against*
+ET. `SocketAsyncEngine`'s loop is:
+
+1. `epoll_wait` returns fd X readable
+2. hand X to the thread pool as a work item
+3. go straight back to `epoll_wait`
+
+Under ET, step 3 blocks until *new* data arrives. Under LT, X is *still*
+readable (nobody has read it yet -- the thread-pool item has not run),
+so `epoll_wait` returns X again immediately, and again, and again. The
+engine thread spins dispatching duplicate work items for the same socket
+as fast as it can, the thread pool fills with them, and the connections
+that were accepted are never actually serviced or closed.
+
+That is exactly the state the kernel observes at the stall: 24 of 32
+TCBs in `CLOSE_WAIT` with the socket still open and `tcp_close` never
+called, 6 more `ESTABLISHED`, and zero request handlers invoked.
+
+It also explains every other data point:
+- **Sequential requests work** (40/40): with one connection in flight
+  the duplicate dispatches are harmless -- the work item runs, drains
+  the socket, and the level goes away.
+- **Concurrency 2 and 4 work**; 8 does not. More sockets simultaneously
+  readable means more duplicate dispatch, and the pool has a fixed size.
+- **`userland/epolltcp.c` passes 16/16 at concurrency 8** -- it is
+  written for level-triggered and drains each fd in the same loop
+  iteration it is reported in, so LT is correct for it. The oracle
+  cleared the kernel's epoll layer because the bug is not in delivery,
+  it is in the *semantics* the caller asked for and did not get.
+
+### The fix
+
+Implement `EPOLLET` in `kernel/sync/epoll.c` + `kernel/syscall/sys_poll.c`:
+
+1. Stop truncating. `struct epoll_entry.events` is already `uint32_t`;
+   the `(short)` cast into `pfd[i].events` is where `EPOLLET` dies.
+   Either carry the ET bit alongside the `pollfd` array or stop routing
+   epoll through `struct pollfd` for this.
+2. Per registration, remember the last reported ready mask
+   (`e->last_ready`). On a scan, report only
+   `now_ready & ~e->last_ready` -- the *edge* -- and store
+   `e->last_ready = now_ready`. When an fd polls not-ready, clear it so
+   the next transition re-arms.
+3. `EPOLL_CTL_MOD` and a re-`ADD` after close must reset `last_ready`,
+   or a reused fd number inherits a stale edge.
+
+Until then, a workaround that would confirm the diagnosis without
+kernel work: force .NET onto its blocking-socket path (it has one) or
+run Kestrel with a single I/O thread.
+
+### Also still true regardless
+
+`TCP_MAX_CONNS` is **32** statically-allocated ~76KB TCBs (32KB send +
+32KB receive + reassembly). That is far too few for a web server
+whatever else is fixed, and the buffers should become dynamically
+allocated rather than the count merely raised.
 
 ### Kernel fixes this milestone (all landed)
 
