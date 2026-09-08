@@ -22,6 +22,7 @@
 #include "tty/tty.h"
 #include "drivers/input/keyboard.h"
 #include "drivers/input/mouse.h"
+#include "ipc/unix_sock.h"
 #include "drivers/input/input.h"
 #include "mm/pmm.h"
 #include "mm/paging.h"
@@ -290,6 +291,7 @@ void kmain(void *multiboot_info) {
     net_selftest();
     tcp_init();
     socket_init();
+    unix_sock_init();
     socket_selftest();
 
     // D2. The ARP cache, before the driver: the driver's transmit hook

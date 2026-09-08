@@ -23,6 +23,14 @@
 #define SYS_MUNMAP     38
 #define SYS_FTRUNCATE 134
 #define SYS_MEMFD_CREATE 135
+#define SYS_SOCKET     45
+#define SYS_BIND       46
+#define SYS_CONNECT    47
+#define SYS_LISTEN     83
+#define SYS_ACCEPT4    84
+
+#define AF_UNIX        1
+#define SOCK_STREAM    1
 
 #define PROT_READ    1
 #define PROT_WRITE   2
@@ -192,10 +200,87 @@ static void test_memfd(void) {
     printf("[uxtest] memfd ok\n");
 }
 
+// ----------------------------------------------------- AF_UNIX sockets
+
+// Linux's layout exactly: a 2-byte family then 108 bytes of path.
+struct sockaddr_un {
+    uint16_t sun_family;
+    char     sun_path[108];
+};
+
+// Abstract namespace: a leading NUL, and the name is the remaining
+// bytes as measured by addrlen -- not a C string, no terminator.
+static uint32_t abstract_addr(struct sockaddr_un *a, const char *name) {
+    a->sun_family = AF_UNIX;
+    long n = slen(name);
+    a->sun_path[0] = 0;
+    for (long i = 0; i < n; i++) { a->sun_path[1 + i] = name[i]; }
+    return (uint32_t)(sizeof(uint16_t) + 1 + n);
+}
+
+static void test_unix_socket(void) {
+    struct sockaddr_un addr;
+    uint32_t alen = abstract_addr(&addr, "neoos-uxtest");
+
+    long srv = neo3(SYS_SOCKET, AF_UNIX, SOCK_STREAM, 0);
+    check(srv >= 0, "server socket");
+    if (srv < 0) { return; }
+    check(neo3(SYS_BIND, srv, &addr, alen) == 0, "bind abstract");
+    check(neo2(SYS_LISTEN, srv, 8) == 0, "listen");
+
+    // A second bind to the same name must be refused, not quietly win.
+    long dup_srv = neo3(SYS_SOCKET, AF_UNIX, SOCK_STREAM, 0);
+    check(neo3(SYS_BIND, dup_srv, &addr, alen) == -98, "duplicate bind is -EADDRINUSE");
+    (void)neo1(SYS_CLOSE, dup_srv);
+
+    long cli = neo3(SYS_SOCKET, AF_UNIX, SOCK_STREAM, 0);
+    check(cli >= 0, "client socket");
+    check(neo3(SYS_CONNECT, cli, &addr, alen) == 0, "connect");
+
+    long acc = neo6(SYS_ACCEPT4, srv, 0, 0, 0, 0, 0);
+    check(acc >= 0, "accept");
+    if (acc < 0) { return; }
+
+    char buf[8];
+    check(neo3(SYS_WRITE, cli, "ping", 4) == 4, "client write");
+    check(neo3(SYS_READ, acc, buf, 4) == 4, "server read");
+    check(buf[0] == 'p' && buf[3] == 'g', "server read content");
+    check(neo3(SYS_WRITE, acc, "pong", 4) == 4, "server write");
+    check(neo3(SYS_READ, cli, buf, 4) == 4, "client read");
+    check(buf[0] == 'p' && buf[3] == 'g', "client read content");
+
+    // Closing one end gives the other EOF, not a hang.
+    (void)neo1(SYS_CLOSE, cli);
+    check(neo3(SYS_READ, acc, buf, 4) == 0, "EOF after the peer closed");
+
+    // Connecting to a name nobody bound is ECONNREFUSED.
+    long orphan = neo3(SYS_SOCKET, AF_UNIX, SOCK_STREAM, 0);
+    struct sockaddr_un nx;
+    uint32_t nxlen = abstract_addr(&nx, "nobody-here");
+    check(neo3(SYS_CONNECT, orphan, &nx, nxlen) == -111, "connect to an unbound name");
+    (void)neo1(SYS_CLOSE, orphan);
+
+    // A pathname address is refused explicitly rather than half-working.
+    struct sockaddr_un pn;
+    pn.sun_family = AF_UNIX;
+    const char *path = "/tmp/ux.sock";
+    long pl = slen(path);
+    for (long i = 0; i <= pl; i++) { pn.sun_path[i] = path[i]; }
+    long pathsock = neo3(SYS_SOCKET, AF_UNIX, SOCK_STREAM, 0);
+    check(neo3(SYS_BIND, pathsock, &pn, (uint32_t)(sizeof(uint16_t) + pl + 1)) == -22,
+          "pathname bind is -EINVAL");
+    (void)neo1(SYS_CLOSE, pathsock);
+
+    (void)neo1(SYS_CLOSE, acc);
+    (void)neo1(SYS_CLOSE, srv);
+    printf("[uxtest] unix socket ok\n");
+}
+
 int main(void) {
     printf("[uxtest] start\n");
     test_ftruncate();
     test_memfd();
+    test_unix_socket();
     if (failures) {
         printf("[uxtest] %d FAILURES\n", failures);
         return 1;

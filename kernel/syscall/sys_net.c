@@ -16,6 +16,7 @@
 #include "ipc/futex.h"
 #include "ipc/pipe.h"
 #include "ipc/socketpair.h"
+#include "ipc/unix_sock.h"
 #include "drivers/char/timer.h"
 #include "mm/vma.h"
 #include "mm/paging.h"
@@ -25,21 +26,42 @@
 #include "smp/smp.h"
 #include "net/socket.h"
 
+// AF_UNIX sockets are a different object with a different ops table, so
+// the address-family split happens HERE rather than inside socket.c --
+// which stays purely AF_INET, as it was.
+static struct file_descriptor *unix_fd(int fd) {
+    struct file_descriptor *f = fd_get(current_proc(), fd);
+    return (f && unix_socket_is(f)) ? f : 0;
+}
+
 int64_t sys_socket(struct syscall_args *a) {
+    if ((int)a->a1 == AF_UNIX) {
+        return unix_socket_create((int)a->a2, (int)a->a3);
+    }
     return socket_create((int)a->a1, (int)a->a2, (int)a->a3);
 }
 
 int64_t sys_bind(struct syscall_args *a) {
+    struct file_descriptor *uf = unix_fd((int)a->a1);
+    if (uf) {
+        return unix_bind(uf, (const struct k_sockaddr *)(uintptr_t)a->a2, (uint32_t)a->a3);
+    }
     return socket_bind((int)a->a1, (const struct k_sockaddr *)(uintptr_t)a->a2,
                        (uint32_t)a->a3);
 }
 
 int64_t sys_connect(struct syscall_args *a) {
+    struct file_descriptor *uf = unix_fd((int)a->a1);
+    if (uf) {
+        return unix_connect(uf, (const struct k_sockaddr *)(uintptr_t)a->a2, (uint32_t)a->a3);
+    }
     return socket_connect((int)a->a1, (const struct k_sockaddr *)(uintptr_t)a->a2,
                           (uint32_t)a->a3);
 }
 
 int64_t sys_listen(struct syscall_args *a) {
+    struct file_descriptor *uf = unix_fd((int)a->a1);
+    if (uf) { return unix_listen(uf, (int)a->a2); }
     return socket_listen((int)a->a1, (int)a->a2);
 }
 
@@ -47,6 +69,11 @@ int64_t sys_listen(struct syscall_args *a) {
 // implements it too -- so only the four-argument form exists here and
 // the shim passes 0.
 int64_t sys_accept4(struct syscall_args *a) {
+    struct file_descriptor *uf = unix_fd((int)a->a1);
+    if (uf) {
+        return unix_accept4(uf, (struct k_sockaddr *)(uintptr_t)a->a2,
+                            (uint32_t *)(uintptr_t)a->a3, (int)a->a4);
+    }
     return socket_accept4((int)a->a1, (struct k_sockaddr *)(uintptr_t)a->a2,
                           (uint32_t *)(uintptr_t)a->a3, (int)a->a4);
 }

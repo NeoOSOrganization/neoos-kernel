@@ -920,6 +920,44 @@ need an fd-object plus a tick-driven expiry/pending-signal poke that
 NeoOS's thread-only timeout machinery does not have yet. `pselect6`
 and `epoll_pwait2` (the other atomic-sigmask variants) likewise.
 
+## AF_UNIX sockets (GUI stack G3)
+
+```c
+int s = socket(AF_UNIX, SOCK_STREAM, 0);
+bind(s, (struct sockaddr *)&addr, len);
+listen(s, backlog);
+int c = accept(s, NULL, NULL);
+```
+
+`socket`, `bind`, `listen`, `accept4` and `connect` on `AF_UNIX`, with
+Linux's `struct sockaddr_un` (a 2-byte family followed by 108 bytes of
+path). `socketpair(2)` still exists and is unchanged; this adds the
+other shape — a process connecting to a name published by a process it
+shares no ancestor with, which is what a compositor needs.
+
+The byte stream is two of the kernel's pipe rings cross-wired, so
+`poll`, `epoll` and edge-triggered re-arming all work with no special
+cases. A listening socket reports `POLLIN` when a connection is waiting.
+
+**DIVERGENCES:**
+
+- **Abstract namespace only.** An address whose `sun_path[0]` is `'\0'`
+  names an abstract socket, and the name is the remaining `addrlen`
+  bytes (not NUL-terminated, embedded NULs allowed) — Linux's rule
+  exactly. A **pathname** address returns `-EINVAL`: binding one would
+  create an `S_IFSOCK` node in the filesystem and resolve it through the
+  VFS, which is not implemented. Most Linux software uses pathname
+  sockets, so this is the gap to close first if a port needs them.
+- **`SOCK_STREAM` only.** `SOCK_DGRAM` on `AF_UNIX` returns
+  `-EPROTOTYPE` for `socket()`, though `socketpair()` still accepts it.
+- **32 bound names system-wide**, 16 queued connections per listener.
+  Exceeding either is `-ENOSPC` and `-ECONNREFUSED` respectively.
+- **`accept` reports no peer address.** An `addrlen` passed in is set to
+  0. An accepted `AF_UNIX` socket has no address of its own to report,
+  and NeoOS does not track the connecting socket's bound name.
+- **No `SO_PEERCRED`**, no credential passing, and `getpeername` on an
+  `AF_UNIX` socket is not routed.
+
 ## socketpair
 
 ```c
