@@ -2,6 +2,17 @@
 
 ## Status
 
+> **SUPERSEDED (2026-09-08) by
+> `2026-09-08-gui-stack-csharp-lvgl-design.md`.** The UI stack is now a
+> C# compositor with LVGL bound from C# via NativeAOT `DirectPInvoke`;
+> the Flutter engine build is off the plan. What remains valid here,
+> and is not repeated in full in the new spec, is the *measured* half:
+> the `/dev/fb0` fbdev ABI status, the W^X/JIT finding, and the
+> argument that software rendering to a framebuffer is sufficient.
+> `flutter-pi` specifically was investigated and rejected -- it
+> hard-requires libdrm, gbm, EGL/GLES2, libsystemd, libinput, libudev
+> and libxkbcommon, and needs hardware 3D acceleration.
+
 **Milestone 0 is DONE and landed.** Software OpenGL runs on NeoOS:
 `neoos-tinygl` renders Brian Paul's gears at 1280x800 into `/dev/fb0`,
 depth-tested and lit, and the scene appears on the real screen. See that
