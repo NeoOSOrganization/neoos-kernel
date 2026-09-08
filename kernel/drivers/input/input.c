@@ -25,28 +25,33 @@ static void *memset_local(void *s, int c, uint64_t n) {
 // Client structure: represents a /dev/input/event0 file descriptor
 struct evdev_client {
     struct evdev_client *next;
+    struct input_dev *dev;             // the device this client reads
     struct input_event ring[256];      // Ring buffer, power of 2 size
     uint32_t head;                     // Next write position
     uint32_t tail;                     // Oldest unread event
     int dropped;                       // Count of dropped events (overflow)
     struct waitq readers;              // Waiters blocked on this client's queue
     struct poll_head poll;             // CS5.2: pollers registered on THIS client
-    uint8_t keystate[KEY_CNT / 8];    // Bitmap of key states
     int refcount;                      // Number of file descriptors referencing this
 };
 
-// Global input subsystem state
-static struct {
-    struct spinlock lock;
-    struct evdev_client *clients;
-    struct evdev_client *grab;         // Non-NULL if a client has exclusive grab
-} input;
+struct input_dev input_kbd;
+struct input_dev input_mouse;
+
+void input_dev_init(struct input_dev *d, const char *name) {
+    spin_init(&d->lock, LOCK_RANK_INPUT, name);
+    d->clients = NULL;
+    d->grab = NULL;
+    d->name = name;
+    d->ev_bits = 0;
+    d->rel_bits = 0;
+    memset_local(d->keystate, 0, sizeof(d->keystate));
+}
 
 // Initialize the input subsystem
 void input_init(void) {
-    spin_init(&input.lock, LOCK_RANK_INPUT, "input");
-    input.clients = NULL;
-    input.grab = NULL;
+    input_dev_init(&input_kbd, "NeoOS AT keyboard");
+    input_kbd.ev_bits = (1u << EV_SYN) | (1u << EV_KEY) | (1u << EV_MSC);
 }
 
 // Helper: ring buffer is full?
@@ -82,6 +87,32 @@ static void get_timestamp(int64_t *tv_sec, int64_t *tv_usec) {
     *tv_usec = (int64_t)((ticks % hz) * (1000000 / hz));
 }
 
+// Push a group of events to every client of dev, then wake its readers.
+// The wake happens after the lock is dropped, which is why the two loops
+// are separate.
+void input_post(struct input_dev *dev, const struct input_event *evs, int n) {
+    if (!dev || n <= 0) { return; }
+
+    int64_t tv_sec, tv_usec;
+    get_timestamp(&tv_sec, &tv_usec);
+
+    uint64_t flags = spin_lock_irqsave(&dev->lock);
+    for (struct evdev_client *c = dev->clients; c; c = c->next) {
+        for (int i = 0; i < n; i++) {
+            struct input_event ev = evs[i];
+            ev.tv_sec = tv_sec;
+            ev.tv_usec = tv_usec;
+            push_event(c, &ev);
+        }
+    }
+    spin_unlock_irqrestore(&dev->lock, flags);
+
+    for (struct evdev_client *c = dev->clients; c; c = c->next) {
+        waitq_wake_all(&c->readers);
+        poll_head_notify(&c->poll);
+    }
+}
+
 // Process a key event: fan out to clients and optionally to TTY
 void input_key_event(const struct key_event *e) {
     if (!e || e->keycode == 0) {
@@ -109,92 +140,58 @@ void input_key_event(const struct key_event *e) {
         return;
     }
 
-    int64_t should_call_tty = 0;
-    int was_grabbed = 0;
+    struct input_dev *dev = &input_kbd;
 
-    // Phase 1: Take the lock, append events to all clients, snapshot grab state
-    uint64_t flags = spin_lock_irqsave(&input.lock);
-
-    // Check if a grab is in effect
-    was_grabbed = (input.grab != NULL);
-
-    int64_t tv_sec, tv_usec;
-    get_timestamp(&tv_sec, &tv_usec);
-
-    // For each client, push three events: MSC_SCAN, KEY (or autorepeat), SYN_REPORT
-    for (struct evdev_client *c = input.clients; c; c = c->next) {
-        struct input_event ev;
-
-        // EV_MSC/MSC_SCAN event with raw scancode
-        ev.tv_sec = tv_sec;
-        ev.tv_usec = tv_usec;
-        ev.type = EV_MSC;
-        ev.code = MSC_SCAN;
-        ev.value = e->raw_scan;
-        push_event(c, &ev);
-
-        // EV_KEY event with keycode and press/release state
-        ev.type = EV_KEY;
-        ev.code = e->keycode;
-        ev.value = e->pressed ? 1 : 0;
-        push_event(c, &ev);
-
-        // EV_SYN/SYN_REPORT to mark end of this logical event
-        ev.type = EV_SYN;
-        ev.code = SYN_REPORT;
-        ev.value = 0;
-        push_event(c, &ev);
-
-        // Update keystate bitmap
-        uint32_t byte_idx = e->keycode / 8;
-        uint32_t bit_idx = e->keycode % 8;
-        if (byte_idx < (KEY_CNT / 8)) {
-            if (e->pressed) {
-                c->keystate[byte_idx] |= (1u << bit_idx);
-            } else {
-                c->keystate[byte_idx] &= ~(1u << bit_idx);
-            }
-        }
+    // Snapshot the grab and update the device keystate under the lock.
+    uint64_t flags = spin_lock_irqsave(&dev->lock);
+    int was_grabbed = (dev->grab != NULL);
+    uint32_t byte_idx = e->keycode / 8;
+    uint32_t bit_idx = e->keycode % 8;
+    if (byte_idx < (KEY_CNT / 8)) {
+        if (e->pressed) { dev->keystate[byte_idx] |= (1u << bit_idx); }
+        else            { dev->keystate[byte_idx] &= ~(1u << bit_idx); }
     }
+    spin_unlock_irqrestore(&dev->lock, flags);
 
-    // Decide whether to call tty_input_char
-    // Only if: no grab is active AND ascii is valid
+    // The three events one keystroke produces: the raw scancode, the
+    // keycode, and the end-of-group marker.
+    struct input_event evs[3];
+    evs[0].type = EV_MSC; evs[0].code = MSC_SCAN;   evs[0].value = e->raw_scan;
+    evs[1].type = EV_KEY; evs[1].code = e->keycode; evs[1].value = e->pressed ? 1 : 0;
+    evs[2].type = EV_SYN; evs[2].code = SYN_REPORT; evs[2].value = 0;
+    input_post(dev, evs, 3);
+
+    // A grab means the keystroke belongs to the grabbing client alone,
+    // so the tty must not also see it.
     if (!was_grabbed && e->ascii >= 0) {
-        should_call_tty = 1;
-    }
-
-    spin_unlock_irqrestore(&input.lock, flags);
-
-    // Phase 2: Wake all clients' reader waitqueues (after releasing the lock)
-    for (struct evdev_client *c = input.clients; c; c = c->next) {
-        waitq_wake_all(&c->readers);
-        poll_head_notify(&c->poll);   // CS5.2: only this client's pollers
-    }
-
-    // Phase 3: If no grab and ascii is valid, deliver to TTY
-    if (should_call_tty) {
         tty_input_char(tty_active(), (char)e->ascii);
     }
 }
 
 // Open a new evdev client
-struct evdev_client *evdev_client_open(void) {
+struct evdev_client *evdev_client_open(struct input_dev *dev) {
+    if (!dev) { return NULL; }
     struct evdev_client *c = kmalloc(sizeof(struct evdev_client));
     if (!c) {
         return NULL;
     }
 
     memset_local(c, 0, sizeof(*c));
+    c->dev = dev;
     c->refcount = 1;
     waitq_init(&c->readers);
     poll_head_init(&c->poll, "evdev-poll");
 
-    uint64_t flags = spin_lock_irqsave(&input.lock);
-    c->next = input.clients;
-    input.clients = c;
-    spin_unlock_irqrestore(&input.lock, flags);
+    uint64_t flags = spin_lock_irqsave(&dev->lock);
+    c->next = dev->clients;
+    dev->clients = c;
+    spin_unlock_irqrestore(&dev->lock, flags);
 
     return c;
+}
+
+struct input_dev *evdev_client_dev(struct evdev_client *c) {
+    return c ? c->dev : NULL;
 }
 
 // Close an evdev client
@@ -203,16 +200,17 @@ void evdev_client_close(struct evdev_client *c) {
         return;
     }
 
-    uint64_t flags = spin_lock_irqsave(&input.lock);
+    struct input_dev *dev = c->dev;
+    uint64_t flags = spin_lock_irqsave(&dev->lock);
 
     // If this client holds the grab, release it
-    if (input.grab == c) {
-        input.grab = NULL;
+    if (dev->grab == c) {
+        dev->grab = NULL;
     }
 
     // Unlink from the clients list
-    struct evdev_client **prev = &input.clients;
-    for (struct evdev_client *client = input.clients; client; client = client->next) {
+    struct evdev_client **prev = &dev->clients;
+    for (struct evdev_client *client = dev->clients; client; client = client->next) {
         if (client == c) {
             *prev = client->next;
             break;
@@ -220,7 +218,7 @@ void evdev_client_close(struct evdev_client *c) {
         prev = &client->next;
     }
 
-    spin_unlock_irqrestore(&input.lock, flags);
+    spin_unlock_irqrestore(&dev->lock, flags);
 
     // Free the client structure
     kfree(c);
@@ -240,7 +238,7 @@ int64_t evdev_client_read(struct evdev_client *c, void *buf, uint64_t len, int n
     struct input_event *out = (struct input_event *)buf;
     uint32_t max_events = len / sizeof(struct input_event);
 
-    uint64_t flags = spin_lock_irqsave(&input.lock);
+    uint64_t flags = spin_lock_irqsave(&c->dev->lock);
 
     // Copy all available events, up to max_events
     uint32_t events_copied = 0;
@@ -251,7 +249,7 @@ int64_t evdev_client_read(struct evdev_client *c, void *buf, uint64_t len, int n
         events_copied++;
     }
 
-    spin_unlock_irqrestore(&input.lock, flags);
+    spin_unlock_irqrestore(&c->dev->lock, flags);
 
     // If we got any events, return them
     if (events_copied > 0) {
@@ -270,7 +268,7 @@ int evdev_client_poll(struct evdev_client *c) {
         return 0;
     }
 
-    uint64_t flags = spin_lock_irqsave(&input.lock);
+    uint64_t flags = spin_lock_irqsave(&c->dev->lock);
     int result = 0;
 
     // Return POLLIN if the ring has events
@@ -278,7 +276,7 @@ int evdev_client_poll(struct evdev_client *c) {
         result = 1;  // POLLIN = 0x001
     }
 
-    spin_unlock_irqrestore(&input.lock, flags);
+    spin_unlock_irqrestore(&c->dev->lock, flags);
     return result;
 }
 
@@ -288,50 +286,47 @@ int evdev_client_grab(struct evdev_client *c, int on) {
         return -EINVAL;
     }
 
-    uint64_t flags = spin_lock_irqsave(&input.lock);
+    struct input_dev *dev = c->dev;
+    uint64_t flags = spin_lock_irqsave(&dev->lock);
 
     if (on) {
         // Try to acquire grab
-        if (input.grab != NULL && input.grab != c) {
-            spin_unlock_irqrestore(&input.lock, flags);
+        if (dev->grab != NULL && dev->grab != c) {
+            spin_unlock_irqrestore(&dev->lock, flags);
             return -EBUSY;
         }
-        input.grab = c;
+        dev->grab = c;
     } else {
         // Release grab
-        if (input.grab == c) {
-            input.grab = NULL;
+        if (dev->grab == c) {
+            dev->grab = NULL;
         }
     }
 
-    spin_unlock_irqrestore(&input.lock, flags);
+    spin_unlock_irqrestore(&dev->lock, flags);
     return 0;
 }
 
-// Get the bitmap of keys currently pressed (for EVIOCGKEY)
-void evdev_client_key_bitmap(uint8_t *out, uint64_t len) {
-    if (!out || len == 0) {
-        return;
-    }
-
-    // Merge the keystate from all clients
+// Get the bitmap of keys currently pressed (for EVIOCGKEY).
+//
+// This reports the DEVICE's key state. It used to merge the per-client
+// bitmaps of every open client, which answered a question nobody asked:
+// EVIOCGKEY means "what are this device's keys doing right now", not
+// "what has some reader seen".
+void evdev_client_key_bitmap(struct evdev_client *c, uint8_t *out, uint64_t len) {
+    if (!c || !out || len == 0) { return; }
     memset_local(out, 0, len);
 
-    uint64_t flags = spin_lock_irqsave(&input.lock);
-
-    for (struct evdev_client *c = input.clients; c; c = c->next) {
-        for (uint64_t i = 0; i < len && i < (KEY_CNT / 8); i++) {
-            out[i] |= c->keystate[i];
-        }
+    struct input_dev *dev = c->dev;
+    uint64_t flags = spin_lock_irqsave(&dev->lock);
+    for (uint64_t i = 0; i < len && i < (KEY_CNT / 8); i++) {
+        out[i] = dev->keystate[i];
     }
-
-    spin_unlock_irqrestore(&input.lock, flags);
+    spin_unlock_irqrestore(&dev->lock, flags);
 }
 
-// Get the current state bitmap of all keys
-void evdev_client_state_bitmap(uint8_t *out, uint64_t len) {
-    // For now, same as key_bitmap (all clients see the same key state)
-    evdev_client_key_bitmap(out, len);
+void evdev_client_state_bitmap(struct evdev_client *c, uint8_t *out, uint64_t len) {
+    evdev_client_key_bitmap(c, out, len);
 }
 
 // Test hook: inject a key event.
@@ -396,7 +391,7 @@ void input_inject_key(uint16_t keycode, int pressed) {
 
 // Selftest
 void input_selftest(void) {
-    struct evdev_client *c = evdev_client_open();
+    struct evdev_client *c = evdev_client_open(&input_kbd);
     if (!c) {
         serial_write_string("[input] selftest FAILED: could not open client\n");
         return;
@@ -443,7 +438,7 @@ void input_selftest(void) {
     (void)evdev_client_read(c, ev, sizeof(ev), 1);
 
     // A second grab attempt fails
-    struct evdev_client *c2 = evdev_client_open();
+    struct evdev_client *c2 = evdev_client_open(&input_kbd);
     if (!c2) {
         serial_write_string("[input] selftest FAILED: could not open c2\n");
         evdev_client_close(c);

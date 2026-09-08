@@ -50,23 +50,14 @@ static int64_t copy_string_to_user(const char *src, void *user_buf, uint64_t siz
     return (int64_t)copy_len;
 }
 
-// Helper: get EV bitmap showing which event types are supported
-// We support: EV_SYN (0), EV_KEY (1), EV_MSC (4)
-static void get_ev_bitmap(uint8_t *out, uint64_t len) {
-    if (!out || len == 0) {
-        return;
-    }
-
-    // Clear the buffer
+// Helper: write a 32-bit capability word out as a little-endian bitmap,
+// which is the shape EVIOCGBIT returns. The keyboard and the mouse
+// advertise different sets, so this reads the device rather than
+// hardcoding one.
+static void put_bitmap32(uint32_t bits, uint8_t *out, uint64_t len) {
+    if (!out || len == 0) { return; }
     for (uint64_t i = 0; i < len; i++) {
-        out[i] = 0;
-    }
-
-    // Set the bits for EV_SYN (bit 0), EV_KEY (bit 1), EV_MSC (bit 4)
-    if (len >= 1) {
-        out[0] |= (1 << 0);  // EV_SYN
-        out[0] |= (1 << 1);  // EV_KEY
-        out[0] |= (1 << 4);  // EV_MSC
+        out[i] = (i < 4) ? (uint8_t)(bits >> (8 * i)) : 0;
     }
 }
 
@@ -167,8 +158,8 @@ static int64_t evdev_fop_ioctl(struct file_descriptor *f, uint64_t request, void
         if (!arg || size == 0) {
             return -EINVAL;
         }
-        const char *name = "NeoOS AT keyboard";
-        return copy_string_to_user(name, arg, size);
+        struct input_dev *dev = evdev_client_dev(c);
+        return copy_string_to_user(dev ? dev->name : "NeoOS input", arg, size);
     }
 
     case 0x07:    // EVIOCGPHYS(len)
@@ -179,22 +170,31 @@ static int64_t evdev_fop_ioctl(struct file_descriptor *f, uint64_t request, void
         if (!arg || size == 0) {
             return -EINVAL;
         }
-        evdev_client_state_bitmap((uint8_t *)arg, size);
+        evdev_client_state_bitmap(c, (uint8_t *)arg, size);
         return (int64_t)size;
     }
 
     case 0x20:    // EVIOCGBIT(0, len) - EV bitmap
     case 0x21:    // EVIOCGBIT(EV_KEY, len)
+    case 0x22:    // EVIOCGBIT(EV_REL, len)
     case 0x24: {  // EVIOCGBIT(EV_MSC, len)
         if (!arg || size == 0) {
             return -EINVAL;
         }
+        struct input_dev *dev = evdev_client_dev(c);
+        if (!dev) { return -EBADF; }
 
-        if (nr == 0x20) {  // EV bitmap
-            get_ev_bitmap((uint8_t *)arg, size);
-        } else if (nr == 0x21) {  // EV_KEY bitmap
-            evdev_client_key_bitmap((uint8_t *)arg, size);
-        } else if (nr == 0x24) {  // EV_MSC bitmap
+        if (nr == 0x20) {          // which EV_* types this device reports
+            put_bitmap32(dev->ev_bits, (uint8_t *)arg, size);
+        } else if (nr == 0x21) {   // EV_KEY
+            // NOTE: this reports the keys currently DOWN, not the set of
+            // keys the device can report. That is what it did before the
+            // device split and is left alone here to keep this a pure
+            // refactor; it is a real EVIOCGBIT divergence.
+            evdev_client_key_bitmap(c, (uint8_t *)arg, size);
+        } else if (nr == 0x22) {   // EV_REL
+            put_bitmap32(dev->rel_bits, (uint8_t *)arg, size);
+        } else if (nr == 0x24) {   // EV_MSC
             get_msc_bitmap((uint8_t *)arg, size);
         }
 
@@ -273,7 +273,7 @@ int evdev_devfs_open(struct file_descriptor *f) {
         return -EINVAL;
     }
 
-    struct evdev_client *c = evdev_client_open();
+    struct evdev_client *c = evdev_client_open(&input_kbd);
     if (!c) {
         return -ENOMEM;
     }
