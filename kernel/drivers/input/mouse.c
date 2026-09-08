@@ -7,6 +7,8 @@
 
 #include "drivers/input/mouse.h"
 #include "drivers/char/serial.h"
+#include "drivers/input/input.h"
+#include "arch/io.h"
 
 static uint8_t pkt[4];
 static int pkt_len = 3;      // 4 after a successful IntelliMouse knock
@@ -126,4 +128,111 @@ void mouse_decode_selftest(void) {
     mouse_set_packet_size(3);
 
     serial_write_string("[mouse] decode selftest passed\n");
+}
+
+// ---- the i8042 auxiliary port -----------------------------------------
+
+#define PS2_DATA 0x60
+#define PS2_CMD  0x64
+#define PS2_STAT 0x64
+
+// Bounded spins: a machine with no aux port must not wedge the boot.
+static int ps2_wait_write(void) {
+    for (int i = 0; i < 100000; i++) {
+        if (!(inb(PS2_STAT) & 0x02)) { return 1; }
+    }
+    return 0;
+}
+
+static int ps2_wait_read(void) {
+    for (int i = 0; i < 100000; i++) {
+        if (inb(PS2_STAT) & 0x01) { return 1; }
+    }
+    return 0;
+}
+
+// A command for the MOUSE has to be introduced with 0xD4; without the
+// prefix the controller hands the byte to the keyboard instead.
+static int aux_cmd(uint8_t cmd, uint8_t *ack) {
+    if (!ps2_wait_write()) { return 0; }
+    outb(PS2_CMD, 0xD4);
+    if (!ps2_wait_write()) { return 0; }
+    outb(PS2_DATA, cmd);
+    if (!ps2_wait_read()) { return 0; }
+    uint8_t r = inb(PS2_DATA);
+    if (ack) { *ack = r; }
+    return r == 0xFA;                    // 0xFA is ACK
+}
+
+int mouse_init(void) {
+    input_dev_init(&input_mouse, "NeoOS PS/2 mouse");
+    input_mouse.ev_bits  = (1u << EV_SYN) | (1u << EV_KEY) | (1u << EV_REL);
+    input_mouse.rel_bits = (1u << REL_X) | (1u << REL_Y) | (1u << REL_WHEEL);
+
+    if (!ps2_wait_write()) { return 0; }
+    outb(PS2_CMD, 0xA8);                 // enable the aux port
+
+    // Turn the aux interrupt (IRQ12) on in the controller config byte,
+    // and clear the aux clock-disable bit while we are here.
+    if (!ps2_wait_write()) { return 0; }
+    outb(PS2_CMD, 0x20);
+    if (!ps2_wait_read()) { return 0; }
+    uint8_t cfg = inb(PS2_DATA);
+    cfg |= 0x02;
+    cfg &= (uint8_t)~0x20;
+    if (!ps2_wait_write()) { return 0; }
+    outb(PS2_CMD, 0x60);
+    if (!ps2_wait_write()) { return 0; }
+    outb(PS2_DATA, cfg);
+
+    if (!aux_cmd(0xF6, 0)) { return 0; }  // set defaults
+
+    // The IntelliMouse knock: sample rates 200, 100, 80 in that order
+    // make a wheel mouse start answering 0xF2 with id 3 and switch to
+    // 4-byte packets. A plain mouse keeps answering 0.
+    uint8_t id = 0;
+    if (aux_cmd(0xF3, 0)) { aux_cmd(200, 0); }
+    if (aux_cmd(0xF3, 0)) { aux_cmd(100, 0); }
+    if (aux_cmd(0xF3, 0)) { aux_cmd(80, 0); }
+    if (aux_cmd(0xF2, 0) && ps2_wait_read()) { id = inb(PS2_DATA); }
+    mouse_set_packet_size(id == 3 ? 4 : 3);
+
+    if (!aux_cmd(0xF4, 0)) { return 0; }  // enable reporting
+
+    serial_write_string("[mouse] ps/2 aux port ready, packet=");
+    serial_write_hex64(id == 3 ? 4 : 3);
+    serial_write_string("\n");
+    return 1;
+}
+
+// Turn a decoded packet into its evdev event group and post it. Only
+// axes that MOVED and buttons that CHANGED are reported, which is what
+// Linux does and what keeps a resting mouse silent.
+void mouse_post_packet(const struct mouse_packet *p) {
+    static uint8_t prev_buttons;
+    struct input_event ev[8];
+    int n = 0;
+
+    if (p->dx)     { ev[n].type = EV_REL; ev[n].code = REL_X;     ev[n].value = p->dx;     n++; }
+    if (p->dy)     { ev[n].type = EV_REL; ev[n].code = REL_Y;     ev[n].value = p->dy;     n++; }
+    if (p->dwheel) { ev[n].type = EV_REL; ev[n].code = REL_WHEEL; ev[n].value = p->dwheel; n++; }
+
+    static const uint16_t btn[3] = { BTN_LEFT, BTN_RIGHT, BTN_MIDDLE };
+    for (int i = 0; i < 3; i++) {
+        uint8_t was = prev_buttons & (uint8_t)(1u << i);
+        uint8_t now = p->buttons   & (uint8_t)(1u << i);
+        if (was != now) {
+            ev[n].type = EV_KEY; ev[n].code = btn[i]; ev[n].value = now ? 1 : 0; n++;
+        }
+    }
+    prev_buttons = p->buttons;
+
+    if (n == 0) { return; }              // nothing changed; stay silent
+    ev[n].type = EV_SYN; ev[n].code = SYN_REPORT; ev[n].value = 0; n++;
+    input_post(&input_mouse, ev, n);
+}
+
+void mouse_handler(void) {
+    struct mouse_packet p;
+    if (mouse_decode(inb(PS2_DATA), &p)) { mouse_post_packet(&p); }
 }

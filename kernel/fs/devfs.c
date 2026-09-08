@@ -226,17 +226,13 @@ static const struct devfs_dev devices[] = {
     { "zero",    VNODE_DEVICE, &zero_file_ops, zero_open },
     { "input",   VNODE_DIR,    NULL,           NULL },
     { "input/event0", VNODE_DEVICE, &evdev_file_ops, evdev_devfs_open },
-    // Appended AFTER input/* so the hardcoded inode ids in devfs_lookup /
-    // devfs_readdir for the input dir (5) and event0 (6) do not shift.
+    { "input/event1", VNODE_DEVICE, &evdev_file_ops, evdev_mouse_devfs_open },
     { "fb0",     VNODE_DEVICE, &fb_file_ops,  fb_open },
     { "ptmx",    VNODE_DEVICE, NULL,          ptmx_open },
     { "kmsg",    VNODE_DEVICE, &kmsg_file_ops, kmsg_open },
     { "urandom", VNODE_DEVICE, &random_file_ops, random_open },
     { "random",  VNODE_DEVICE, &random_file_ops, random_open },
-    // The six kernel virtual terminals, plus tty0 = whichever is
-    // active. Appended here rather than next to CONSOLE for the same
-    // reason fb0/ptmx/kmsg were: inode ids are positional and the
-    // input/* ids are hardcoded in devfs_lookup / devfs_readdir.
+    // The six kernel virtual terminals, plus tty0 = whichever is active.
     { "tty0",    VNODE_DEVICE, &vt_file_ops,  vt_dev_open },
     { "tty1",    VNODE_DEVICE, &vt_file_ops,  vt_dev_open },
     { "tty2",    VNODE_DEVICE, &vt_file_ops,  vt_dev_open },
@@ -392,65 +388,71 @@ static int devfs_read_inode(struct vfs_mount *m, uint64_t inode_id, struct vnode
 
 static int devfs_sync_inode(struct vnode *vn) { (void)vn; return 0; }
 
+// Length of the directory component of "dir/leaf", or 0 if the entry is
+// flat. Everything below is derived from the table with this rather
+// than from hardcoded inode numbers.
+static uint64_t devfs_dir_len(const char *entry) {
+    for (uint64_t i = 0; entry[i]; i++) {
+        if (entry[i] == '/') { return i; }
+    }
+    return 0;
+}
+
+static int devfs_name_is(const char *entry, uint64_t len, const char *name) {
+    for (uint64_t i = 0; i < len; i++) {
+        if (name[i] != entry[i] || name[i] == 0) { return 0; }
+    }
+    return name[len] == 0;
+}
+
+static int devfs_copy_name(struct vfs_dirent *out, const char *src) {
+    int j = 0;
+    while (src[j] && j < VFS_NAME_MAX - 1) { out->name[j] = src[j]; j++; }
+    out->name[j] = 0;
+    return j;
+}
+
 static int devfs_lookup(struct vnode *dir, const char *name, uint64_t *out_inode_id) {
-    // Handle hierarchical lookups for input/event0.
-    // If we're in the "input" directory (inode_id 5) and looking for "event0", return the event0 device.
-    // If we're in the root and looking for "input", return the input dir.
-
-    if (dir && dir->inode_id == 5) {  // We're in the "input" directory
-        if (name_eq(name, "event0")) {
-            *out_inode_id = 6;  // input/event0 is at devices[5], which is inode_id 6 (1-indexed)
-            return 0;
-        }
-        return -ENOENT;
-    }
-
-    if (dir && dir->inode_id == 20) {   // "snd" directory
-        if (name_eq(name, "controlC0")) { *out_inode_id = 21; return 0; }
-        if (name_eq(name, "pcmC0D0p"))  { *out_inode_id = 22; return 0; }
-        return -ENOENT;
-    }
-
-    // Inside /dev/pts: dynamic entries.
+    // /dev/pts is the one directory whose children are made at runtime
+    // rather than listed in the table.
     if (dir && dir->inode_id == DEVFS_PTS_INODE) {
         uint64_t id = dyn_lookup_pts(name);
         if (id) { *out_inode_id = id; return 0; }
         return -ENOENT;
     }
 
-    // Default root-level lookup (dir->inode_id == 0 or dir is NULL)
-    for (uint64_t i = 0; i < DEVFS_COUNT; i++) {
-        const char *entry_name = devices[i].name;
-
-        // Check if this entry contains a "/"
-        int has_slash = 0;
-        for (const char *p = entry_name; *p; p++) {
-            if (*p == '/') {
-                has_slash = 1;
-                break;
-            }
-        }
-
-        if (has_slash) {
-            // This is a hierarchical entry like "input/event0"
-            // Only match the "input" part at root level
-            if (name_eq(name, "input")) {
-                *out_inode_id = i + 1;  // devices[i] corresponds to inode_id i+1
-                return 0;
-            }
-            if (name_eq(name, "snd")) {
+    // Any other directory: match "<thisdir>/<name>" against the table.
+    //
+    // This used to be one hardcoded block per directory -- inode 5 meant
+    // "input" with its only child at inode 6, inode 20 meant "snd" with
+    // children 21 and 22 -- and the table carried comments warning that
+    // entries must not be reordered or those numbers would quietly point
+    // at the wrong device. Deriving the ids is what made room for
+    // input/event1 without renumbering anything.
+    if (dir && dir->inode_id > 0 && dir->inode_id <= DEVFS_COUNT &&
+        devices[dir->inode_id - 1].type == VNODE_DIR) {
+        const char *dname = devices[dir->inode_id - 1].name;
+        for (uint64_t i = 0; i < DEVFS_COUNT; i++) {
+            uint64_t dl = devfs_dir_len(devices[i].name);
+            if (!dl) { continue; }
+            if (devfs_name_is(devices[i].name, dl, dname) &&
+                name_eq(devices[i].name + dl + 1, name)) {
                 *out_inode_id = i + 1;
                 return 0;
             }
-        } else {
-            // Regular flat entry
-            if (name_eq(entry_name, name)) {
-                *out_inode_id = i + 1;  // devices[i] corresponds to inode_id i+1
-                return 0;
-            }
         }
+        return -ENOENT;
     }
 
+    // Root: flat entries only. Each subdirectory has its own table
+    // entry, so "input" is found here and "input/event0" is skipped.
+    for (uint64_t i = 0; i < DEVFS_COUNT; i++) {
+        if (devfs_dir_len(devices[i].name)) { continue; }
+        if (name_eq(devices[i].name, name)) {
+            *out_inode_id = i + 1;
+            return 0;
+        }
+    }
     return -ENOENT;
 }
 
@@ -481,43 +483,13 @@ static int devfs_unlink(struct vnode *dir, const char *name) {
 static int devfs_truncate(struct vnode *vn) { (void)vn; return -EPERM; }
 
 static int devfs_readdir(struct vnode *dir, uint32_t index, struct vfs_dirent *out) {
-    // Handle hierarchical directory listing.
-    // At root level (inode_id 0), list all top-level devices and the "input" directory (once).
-    // At input directory level (inode_id 5), list "event0".
-
-    if (dir && dir->inode_id == 5) {  // We're in the "input" directory
-        if (index != 0) { return -ENOENT; }  // Only one entry in input/
-        // Return "event0"
-        memcpy_local(out->name, "event0", 7);
-        out->type = DT_CHR;
-        out->ino = 6;  // input/event0 is at devices[5], inode_id 6
-        return 0;
-    }
-
-    if (dir && dir->inode_id == 20) {   // "snd" directory
-        if (index == 0) {
-            memcpy_local(out->name, "controlC0", 10);
-            out->type = DT_CHR; out->ino = 21;
-            return 0;
-        }
-        if (index == 1) {
-            memcpy_local(out->name, "pcmC0D0p", 9);
-            out->type = DT_CHR; out->ino = 22;
-            return 0;
-        }
-        return -ENOENT;
-    }
-
     // /dev/pts: the used dynamic slots, in slot order.
     if (dir && dir->inode_id == DEVFS_PTS_INODE) {
         uint32_t seen = 0;
         for (int i = 0; i < DEVFS_DYN_MAX; i++) {
             if (!dyn[i].used) { continue; }
             if (seen == index) {
-                const char *leaf = dyn[i].path + 4;   // skip "pts/"
-                int k = 0;
-                while (leaf[k] && k < VFS_NAME_MAX - 1) { out->name[k] = leaf[k]; k++; }
-                out->name[k] = 0;
+                devfs_copy_name(out, dyn[i].path + 4);   // skip "pts/"
                 out->type = DT_CHR;
                 out->ino  = DEVFS_DYN_BASE + i;
                 return 0;
@@ -527,61 +499,40 @@ static int devfs_readdir(struct vnode *dir, uint32_t index, struct vfs_dirent *o
         return -ENOENT;
     }
 
-    // Root level listing (dir->inode_id == 0 or dir is NULL)
-    uint32_t count = 0;
-    int input_dir_listed = 0;
-
-    for (uint64_t i = 0; i < DEVFS_COUNT; i++) {
-        const char *entry_name = devices[i].name;
-
-        // Check if this is a hierarchical entry
-        int has_slash = 0;
-        for (const char *p = entry_name; *p; p++) {
-            if (*p == '/') {
-                has_slash = 1;
-                break;
-            }
-        }
-
-        if (has_slash) {
-            // This is a hierarchical entry like "input/event0"
-            // Only show the "input" dir if we haven't shown it yet
-            if (!input_dir_listed && count == index) {
-                memcpy_local(out->name, "input", 6);
-                out->type = DT_DIR;
-                out->ino = i + 1;  // devices[i] corresponds to inode_id i+1, but we want the "input" dir entry
-                // Actually, we need the inode_id of the "input" directory, which is devices[4] at index 4
-                // Find the "input" directory entry
-                for (uint64_t j = 0; j < DEVFS_COUNT; j++) {
-                    if (name_eq(devices[j].name, "input")) {
-                        out->ino = j + 1;
-                        break;
-                    }
-                }
-                input_dir_listed = 1;
+    // Any other directory: its children are the table entries carrying
+    // its name as a prefix.
+    if (dir && dir->inode_id > 0 && dir->inode_id <= DEVFS_COUNT &&
+        devices[dir->inode_id - 1].type == VNODE_DIR) {
+        const char *dname = devices[dir->inode_id - 1].name;
+        uint32_t seen = 0;
+        for (uint64_t i = 0; i < DEVFS_COUNT; i++) {
+            uint64_t dl = devfs_dir_len(devices[i].name);
+            if (!dl || !devfs_name_is(devices[i].name, dl, dname)) { continue; }
+            if (seen == index) {
+                devfs_copy_name(out, devices[i].name + dl + 1);
+                out->type = (devices[i].type == VNODE_DIR) ? DT_DIR : DT_CHR;
+                out->ino  = i + 1;
                 return 0;
             }
-            if (!input_dir_listed) {
-                count++;
-                input_dir_listed = 1;  // Only list input once
-            }
-        } else {
-            // Regular flat entry
-            if (count == index) {
-                int j = 0;
-                while (entry_name[j] && j < VFS_NAME_MAX - 1) {
-                    out->name[j] = entry_name[j];
-                    j++;
-                }
-                out->name[j] = '\0';
-                out->type = DT_CHR;
-                out->ino = i + 1;  // devices[i] corresponds to inode_id i+1
-                return 0;
-            }
-            count++;
+            seen++;
         }
+        return -ENOENT;
     }
 
+    // Root. Flat entries only, and a directory is reported as one --
+    // the previous version listed the first hierarchical entry's parent
+    // once and skipped every other, so /dev never showed "snd" at all.
+    uint32_t count = 0;
+    for (uint64_t i = 0; i < DEVFS_COUNT; i++) {
+        if (devfs_dir_len(devices[i].name)) { continue; }
+        if (count == index) {
+            devfs_copy_name(out, devices[i].name);
+            out->type = (devices[i].type == VNODE_DIR) ? DT_DIR : DT_CHR;
+            out->ino  = i + 1;
+            return 0;
+        }
+        count++;
+    }
     return -ENOENT;
 }
 

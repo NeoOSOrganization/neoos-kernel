@@ -193,6 +193,19 @@ void kmain(void *multiboot_info) {
     serial_write_hex64(acpi.irq1_gsi);
     serial_write_string(" vector=0x21\n");
 
+    // The PS/2 mouse shares the i8042 controller with the keyboard but
+    // has its own line, IRQ12. No firmware in practice publishes an
+    // override for it, so its GSI is the ISA number, resolved against
+    // the same IOAPIC base as IRQ1.
+    uint8_t mouse_pin = (uint8_t)(12 - acpi.ioapic_gsi_base);
+    ioapic_set_redirection(mouse_pin, VECTOR_MOUSE, acpi.irq1_polarity,
+                            acpi.irq1_trigger, (uint8_t)lapic_get_id());
+    if (!mouse_init()) {
+        serial_write_string("[mouse] no aux port; /dev/input/event1 stays silent\n");
+    }
+    serial_write_string("[ioapic] mouse routed: gsi=12 vector=0x2c\n");
+    input_isolation_selftest();
+
     heap_init();
     heap_selftest();
     pid_alloc_selftest();   // AFTER heap_init: the allocator kmallocs free-list entries
@@ -419,18 +432,6 @@ void kmain(void *multiboot_info) {
     dns_probe_selftest();
     tcp_selftest();
 
-    // AFTER the network selftests, and that placement is load-bearing:
-    // this one sleeps and needs another thread to wake it, so it needs
-    // interrupts and a live scheduler. Everything above virtio_net's
-    // interrupt window runs with interrupts off, where timer_ticks()
-    // does not advance and no other thread can be scheduled -- placing
-    // it there hung the boot rather than failing it.
-    //
-    // Outside the quiet-boot guard on purpose: it only writes to the
-    // serial log, and it is the check that the compositor's blocking
-    // read on /dev/input/event* actually sleeps.
-    input_blocking_read_selftest();
-
     // Everything the banner reports is now known: framebuffer/console up,
     // pmm seeded, CPU probed, every AP online.
     banner_show();
@@ -454,6 +455,12 @@ void kmain(void *multiboot_info) {
     futex_selftest();
     smp_parallel_selftest_start();
     smp_steal_selftest_start();
+    // Same family, same reason: this one sleeps on an evdev client and
+    // needs a second thread to wake it, so it cannot run anywhere on the
+    // boot path -- there current_thread() is NULL, nothing may sleep,
+    // interrupts are off and timer_ticks() does not advance. Spawned
+    // before the scheduler starts and run by it, like its neighbours.
+    input_blocking_read_selftest();
 
     serial_write_string("NeoOS: interrupts enabled, starting scheduler\n");
     __asm__ volatile ("sti");

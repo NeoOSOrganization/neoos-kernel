@@ -572,6 +572,7 @@ CORE_REQUIRED_MARKERS := \
 	"[mouse] decode selftest passed" \
 	"[input] selftest passed" \
 	"[input] blocking-read selftest passed" \
+	"[input] isolation selftest passed" \
 	"[ac97] selftest passed" \
 	"[ac97] /dev/snd selftest passed" \
 	"[uaccess] selftest passed"

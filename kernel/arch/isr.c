@@ -10,6 +10,7 @@
 #include "smp/membarrier.h"
 #include "drivers/irq/lapic.h"
 #include "drivers/input/keyboard.h"
+#include "drivers/input/mouse.h"
 #include "drivers/net/virtio_net.h"
 #include "drivers/audio/ac97.h"
 #include "mm/paging.h"
@@ -254,6 +255,12 @@ static void isr_handler_inner(struct registers *regs) {
 
     if (regs->vector_number == VECTOR_KEYBOARD) {
         keyboard_handler();
+        lapic_send_eoi();
+        return;
+    }
+
+    if (regs->vector_number == VECTOR_MOUSE) {
+        mouse_handler();
         lapic_send_eoi();
         return;
     }

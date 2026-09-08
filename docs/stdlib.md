@@ -2285,6 +2285,36 @@ x86-64 layout. Byte `read`/`write`/`lseek` on the fd also work.
   framebuffer mapping; for now a compositor is expected to cooperate by
   stopping when it loses focus.
 
+### `/dev/input/event0` and `/dev/input/event1`
+
+Linux evdev character devices, 24-byte `struct input_event` in Linux's
+x86-64 layout. `event0` is the AT keyboard; **`event1` is the PS/2
+mouse**, reporting `EV_REL` (`REL_X`, `REL_Y`, and `REL_WHEEL` when the
+IntelliMouse negotiation succeeds) and `EV_KEY` (`BTN_LEFT`,
+`BTN_RIGHT`, `BTN_MIDDLE`). Both sign conventions follow Linux: `REL_Y`
+is positive downward, and `REL_WHEEL` is positive upward, each the
+opposite of what the PS/2 wire carries.
+
+Supported ioctls: `EVIOCGVERSION`, `EVIOCGID`, `EVIOCGNAME`,
+`EVIOCGKEY`, `EVIOCGRAB`, and `EVIOCGBIT` for `0`, `EV_KEY`, `EV_REL`
+and `EV_MSC`.
+
+A blocking `read()` blocks until an event arrives; `O_NONBLOCK` returns
+`-EAGAIN`. `poll`/`epoll` work on both nodes.
+
+**DIVERGENCES:**
+
+- `EVIOCGBIT(EV_KEY)` reports the keys currently **held down**, not the
+  set of keys the device is capable of reporting. An application using
+  it to decide "is this a keyboard" will get an empty bitmap from an
+  idle device.
+- No `EVIOCGABS`/`EV_ABS` and no `EVIOCGPHYS`/`EVIOCGUNIQ` (both return
+  `-ENOENT`): there is no absolute pointing device and no topology to
+  report.
+- `EVIOCSCLOCKID` returns `-EINVAL`; timestamps are boot-epoch based.
+- A grab (`EVIOCGRAB`) is per device. Grabbing the keyboard stops
+  keystrokes reaching the tty; it has no effect on the mouse.
+
 ### `poll` / `select`
 
 ```c

@@ -12,6 +12,7 @@
 #include "mm/heap.h"
 #include "sched/proc.h"
 #include "smp/smp.h"
+#include "drivers/input/mouse.h"
 #include <errno.h>
 
 // Simple memset implementation for freestanding environment
@@ -506,6 +507,66 @@ park:
 void input_blocking_read_selftest(void) {
     if (!thread_alloc_kernel(input_blkread_driver)) {
         serial_write_string("[input] blocking-read selftest SKIPPED: no thread\n");
+    }
+}
+
+// The two devices must not leak into each other. This is the property
+// the device split exists for, and it is cheap to state: a keystroke
+// must not appear on event1 and a mouse packet must not appear on
+// event0.
+void input_isolation_selftest(void) {
+    struct evdev_client *k = evdev_client_open(&input_kbd);
+    struct evdev_client *m = evdev_client_open(&input_mouse);
+    struct input_event ev[16];
+    const char *why = 0;
+
+    if (!k || !m) { why = "open"; goto out; }
+
+    // Grab the keyboard so the injected keystroke cannot reach the tty.
+    evdev_client_grab(k, 1);
+    input_inject_key(30, 1);                       // KEY_A press
+    if (evdev_client_read(m, ev, sizeof(ev), 1) > 0) {
+        why = "key reached the mouse"; goto out;
+    }
+    if (evdev_client_read(k, ev, sizeof(ev), 1) <= 0) {
+        why = "key missed the keyboard"; goto out;
+    }
+    input_inject_key(30, 0);
+    (void)evdev_client_read(k, ev, sizeof(ev), 1);
+
+    struct mouse_packet p = { .dx = 3, .dy = -4, .dwheel = 0, .buttons = 0x01 };
+    mouse_post_packet(&p);
+    if (evdev_client_read(k, ev, sizeof(ev), 1) > 0) {
+        why = "motion reached the keyboard"; goto out;
+    }
+    int64_t n = evdev_client_read(m, ev, sizeof(ev), 1);
+    if (n != 4 * (int64_t)sizeof(struct input_event)) {
+        why = "wrong mouse event count"; goto out;
+    }
+    if (ev[0].type != EV_REL || ev[0].code != REL_X    || ev[0].value != 3  ||
+        ev[1].type != EV_REL || ev[1].code != REL_Y    || ev[1].value != -4 ||
+        ev[2].type != EV_KEY || ev[2].code != BTN_LEFT || ev[2].value != 1  ||
+        ev[3].type != EV_SYN || ev[3].code != SYN_REPORT) {
+        why = "mouse event content"; goto out;
+    }
+
+    // A resting mouse says nothing at all: no axes moved, no buttons
+    // changed, so there is no group to post -- not even a SYN.
+    struct mouse_packet still = { .dx = 0, .dy = 0, .dwheel = 0, .buttons = 0x01 };
+    mouse_post_packet(&still);
+    if (evdev_client_read(m, ev, sizeof(ev), 1) > 0) {
+        why = "resting mouse still reported"; goto out;
+    }
+
+out:
+    if (k) { evdev_client_grab(k, 0); evdev_client_close(k); }
+    if (m) { evdev_client_close(m); }
+    if (why) {
+        serial_write_string("[input] isolation selftest FAILED: ");
+        serial_write_string(why);
+        serial_write_string("\n");
+    } else {
+        serial_write_string("[input] isolation selftest passed\n");
     }
 }
 

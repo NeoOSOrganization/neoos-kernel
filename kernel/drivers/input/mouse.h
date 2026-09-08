@@ -22,6 +22,16 @@ int  mouse_decode(uint8_t byte, struct mouse_packet *out);
 // and the device reports a scroll wheel. Resets the packet position.
 void mouse_set_packet_size(int n);
 
+// Brings up the aux port and negotiates the wheel. Returns 1 on
+// success, 0 if the controller never answered -- a machine with no aux
+// port must not wedge the boot.
+int  mouse_init(void);
+
+// Fan a decoded packet out to /dev/input/event1. Exposed so a selftest
+// can post one without any hardware.
+void mouse_post_packet(const struct mouse_packet *p);
+
+void mouse_handler(void);
 void mouse_decode_selftest(void);
 
 #endif

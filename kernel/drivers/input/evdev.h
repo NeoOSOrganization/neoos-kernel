@@ -70,7 +70,9 @@ struct input_id {
 // The evdev file operations for /dev/input/event0
 extern const struct file_ops evdev_file_ops;
 
-// Called when opening /dev/input/event0. Initializes f->priv with an evdev client.
+// Called when opening /dev/input/event0 (keyboard) or event1 (mouse).
+// Initializes f->priv with an evdev client bound to that device.
 int evdev_devfs_open(struct file_descriptor *f);
+int evdev_mouse_devfs_open(struct file_descriptor *f);
 
 #endif

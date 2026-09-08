@@ -106,4 +106,8 @@ void input_selftest(void);
 // it runs after smp_start_aps() rather than with the others.
 void input_blocking_read_selftest(void);
 
+// Keyboard and mouse must not leak into each other. Runs after
+// mouse_init, since it posts to the mouse device.
+void input_isolation_selftest(void);
+
 #endif

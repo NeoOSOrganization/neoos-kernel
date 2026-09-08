@@ -267,13 +267,15 @@ const struct file_ops evdev_file_ops = {
     .close    = evdev_fop_close,
 };
 
-// Called by devfs when /dev/input/event0 is opened
-int evdev_devfs_open(struct file_descriptor *f) {
+// devfs open for a given device. /dev/input/event0 is the keyboard and
+// event1 is the mouse; everything else about the two nodes is identical,
+// which is the point of the device split.
+static int evdev_open_dev(struct file_descriptor *f, struct input_dev *dev) {
     if (!f) {
         return -EINVAL;
     }
 
-    struct evdev_client *c = evdev_client_open(&input_kbd);
+    struct evdev_client *c = evdev_client_open(dev);
     if (!c) {
         return -ENOMEM;
     }
@@ -282,4 +284,12 @@ int evdev_devfs_open(struct file_descriptor *f) {
     f->ops = &evdev_file_ops;
 
     return 0;
+}
+
+int evdev_devfs_open(struct file_descriptor *f) {
+    return evdev_open_dev(f, &input_kbd);
+}
+
+int evdev_mouse_devfs_open(struct file_descriptor *f) {
+    return evdev_open_dev(f, &input_mouse);
 }
