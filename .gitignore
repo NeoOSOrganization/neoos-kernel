@@ -12,3 +12,4 @@ iso/
 *.swo
 *~
 .DS_Store
+build/*.ppm
