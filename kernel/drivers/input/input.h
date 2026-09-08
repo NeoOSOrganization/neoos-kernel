@@ -102,4 +102,8 @@ void input_inject_key(uint16_t keycode, int pressed);
 // Selftest: tests fan-out, grab semantics, client queue management
 void input_selftest(void);
 
+// Needs a second CPU to deliver the event the sleeper waits for, so
+// it runs after smp_start_aps() rather than with the others.
+void input_blocking_read_selftest(void);
+
 #endif

@@ -564,10 +564,13 @@ CORE_REQUIRED_MARKERS := \
 	"[con] selftest passed" \
 	"[kvt] selftest passed" \
 	"[vt] selftest passed" \
+	"[vt] kd-release selftest passed" \
+	"[vt] screen-gate selftest passed" \
 	"[banner]" \
 	"[rtc] selftest passed" \
 	"[keyboard] decode selftest passed" \
 	"[input] selftest passed" \
+	"[input] blocking-read selftest passed" \
 	"[ac97] selftest passed" \
 	"[ac97] /dev/snd selftest passed" \
 	"[uaccess] selftest passed"

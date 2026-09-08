@@ -417,6 +417,18 @@ void kmain(void *multiboot_info) {
     dns_probe_selftest();
     tcp_selftest();
 
+    // AFTER the network selftests, and that placement is load-bearing:
+    // this one sleeps and needs another thread to wake it, so it needs
+    // interrupts and a live scheduler. Everything above virtio_net's
+    // interrupt window runs with interrupts off, where timer_ticks()
+    // does not advance and no other thread can be scheduled -- placing
+    // it there hung the boot rather than failing it.
+    //
+    // Outside the quiet-boot guard on purpose: it only writes to the
+    // serial log, and it is the check that the compositor's blocking
+    // read on /dev/input/event* actually sleeps.
+    input_blocking_read_selftest();
+
     // Everything the banner reports is now known: framebuffer/console up,
     // pmm seeded, CPU probed, every AP online.
     banner_show();

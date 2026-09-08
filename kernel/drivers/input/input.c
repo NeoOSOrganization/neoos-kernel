@@ -11,6 +11,7 @@
 #include "sync/poll_head.h"
 #include "mm/heap.h"
 #include "sched/proc.h"
+#include "smp/smp.h"
 #include <errno.h>
 
 // Simple memset implementation for freestanding environment
@@ -26,6 +27,10 @@ static void *memset_local(void *s, int c, uint64_t n) {
 struct evdev_client {
     struct evdev_client *next;
     struct input_dev *dev;             // the device this client reads
+    // Set by input_post under dev->lock, cleared by a reader that is
+    // about to sleep. See evdev_client_read for why a plain
+    // waitq_sleep(&readers, &dev->lock) is not available here.
+    volatile int readable;
     struct input_event ring[256];      // Ring buffer, power of 2 size
     uint32_t head;                     // Next write position
     uint32_t tail;                     // Oldest unread event
@@ -104,6 +109,7 @@ void input_post(struct input_dev *dev, const struct input_event *evs, int n) {
             ev.tv_usec = tv_usec;
             push_event(c, &ev);
         }
+        c->readable = 1;
     }
     spin_unlock_irqrestore(&dev->lock, flags);
 
@@ -237,29 +243,50 @@ int64_t evdev_client_read(struct evdev_client *c, void *buf, uint64_t len, int n
 
     struct input_event *out = (struct input_event *)buf;
     uint32_t max_events = len / sizeof(struct input_event);
+    struct input_dev *dev = c->dev;
 
-    uint64_t flags = spin_lock_irqsave(&c->dev->lock);
+    uint64_t flags = spin_lock_irqsave(&dev->lock);
+    for (;;) {
+        uint32_t events_copied = 0;
+        while (events_copied < max_events && !ring_empty(c)) {
+            uint32_t idx = c->tail & 0xFF;
+            out[events_copied] = c->ring[idx];
+            c->tail++;
+            events_copied++;
+        }
+        if (events_copied > 0) {
+            spin_unlock_irqrestore(&dev->lock, flags);
+            return events_copied * (int64_t)sizeof(struct input_event);
+        }
+        if (nonblock) {
+            spin_unlock_irqrestore(&dev->lock, flags);
+            return -EAGAIN;
+        }
 
-    // Copy all available events, up to max_events
-    uint32_t events_copied = 0;
-    while (events_copied < max_events && !ring_empty(c)) {
-        uint32_t idx = c->tail & 0xFF;
-        out[events_copied] = c->ring[idx];
-        c->tail++;
-        events_copied++;
+        // This used to return -EAGAIN even here, with a comment blaming
+        // lock ordering. That comment was right: LOCK_RANK_INPUT is a
+        // deliberate LEAF, taken from the keyboard IRQ holding nothing,
+        // and it ranks ABOVE LOCK_RANK_WAITQ -- so the usual
+        // waitq_sleep(&q, &dev->lock) handoff is a rank inversion and
+        // panics. poll and epoll covered for the gap, which is why
+        // nothing had noticed, but a compositor reads the event fd
+        // directly and would have spun at 100% CPU.
+        //
+        // So the lock is dropped BEFORE sleeping, and the lost-wakeup
+        // window that opens is closed the way waitq_poll_wait closes
+        // its own: c->readable is set by input_post under dev->lock and
+        // cleared here under the same lock, and waitq_sleep_unless
+        // re-checks it under the WAIT QUEUE's lock -- the same lock a
+        // waker must take. A producer that delivers in the window
+        // therefore either set the flag before we test it (we do not
+        // sleep) or takes the queue lock after we are enqueued (its
+        // wake finds us).
+        c->readable = 0;
+        spin_unlock_irqrestore(&dev->lock, flags);
+        int rc = waitq_sleep_unless(&c->readers, 0, &c->readable);
+        if (rc == -EINTR) { return -EINTR; }
+        flags = spin_lock_irqsave(&dev->lock);
     }
-
-    spin_unlock_irqrestore(&c->dev->lock, flags);
-
-    // If we got any events, return them
-    if (events_copied > 0) {
-        return events_copied * (int64_t)sizeof(struct input_event);
-    }
-
-    // No events and blocking? Return EAGAIN (non-blocking behavior)
-    // A real implementation would wait on waitq, but that requires
-    // better lock ordering which we address by just returning EAGAIN
-    return nonblock ? -EAGAIN : -EAGAIN;
 }
 
 // Poll for readiness
@@ -387,6 +414,99 @@ void input_inject_key(uint16_t keycode, int pressed) {
     }
 
     input_key_event(&e);
+}
+
+// A blocking read with an empty ring must sleep until an event arrives,
+// not spin and not return -EAGAIN.
+//
+// The READER is a spawned kernel thread, not the boot thread. That is
+// not incidental: on a CPU still on its boot path current_thread() is
+// NULL, and nothing may sleep from there -- waitq would enqueue a null
+// thread. A spawned thread is both a valid context and the one that
+// resembles how this call is really made.
+static volatile int     blkread_state;      // 0 running, 1 pass, 2 fail
+static volatile int64_t blkread_rc;
+static struct evdev_client *blkread_client;
+
+static void input_blocking_read_reader(void) {
+    struct input_event ev[8];
+    int64_t n = evdev_client_read(blkread_client, ev, sizeof(ev), 0);
+    blkread_rc = n;
+    if (n > 0 && ev[1].type == EV_KEY && ev[1].code == 30 && ev[1].value == 1) {
+        blkread_state = 1;
+    } else {
+        blkread_state = 2;
+    }
+    for (;;) { __asm__ volatile("hlt"); }
+}
+
+// The driver runs on its OWN kernel thread, not on the boot path. The
+// boot path cannot host this: the BSP never enters the scheduler while
+// it is booting, so current_thread() is NULL there, nothing may sleep,
+// no other thread can be scheduled, and with interrupts off
+// timer_ticks() does not even advance. Spawning the driver defers the
+// whole check to a live system, at the cost of the marker appearing
+// later in the log than the other selftests.
+static void input_blkread_driver(void) {
+    struct evdev_client *c = evdev_client_open(&input_kbd);
+    if (!c) {
+        serial_write_string("[input] blocking-read selftest FAILED: open\n");
+        goto park;
+    }
+
+    // Non-blocking on an empty ring is still -EAGAIN.
+    struct input_event ev[8];
+    if (evdev_client_read(c, ev, sizeof(ev), 1) != -EAGAIN) {
+        serial_write_string("[input] blocking-read selftest FAILED: nonblock not EAGAIN\n");
+        goto park;
+    }
+
+    // Grab for the duration: input_key_event suppresses the tty while a
+    // grab is held, so the injected keystroke cannot land in whatever
+    // console is underneath.
+    evdev_client_grab(c, 1);
+
+    blkread_state = 0;
+    blkread_rc = 0;
+    blkread_client = c;
+    if (!thread_alloc_kernel(input_blocking_read_reader)) {
+        serial_write_string("[input] blocking-read selftest SKIPPED: no thread\n");
+        evdev_client_grab(c, 0);
+        goto park;
+    }
+
+    // Let the reader reach the sleep, then deliver what it waits for.
+    uint64_t start = timer_ticks();
+    while (timer_ticks() - start < 5 && blkread_state == 0) { __asm__ volatile("pause"); }
+    input_inject_key(30, 1);           // KEY_A press
+
+    // Bounded: a read that spun instead of sleeping would otherwise hang
+    // the system, and a hang says much less than a failure.
+    start = timer_ticks();
+    while (blkread_state == 0 && timer_ticks() - start < 200) { __asm__ volatile("pause"); }
+
+    if (blkread_state == 1) {
+        serial_write_string("[input] blocking-read selftest passed\n");
+    } else if (blkread_state == 0) {
+        serial_write_string("[input] blocking-read selftest FAILED: reader never returned\n");
+    } else {
+        serial_write_string("[input] blocking-read selftest FAILED: rc=");
+        serial_write_hex64((uint64_t)blkread_rc);
+        serial_write_string("\n");
+    }
+
+    input_inject_key(30, 0);           // release, so the keystate is clean
+    evdev_client_grab(c, 0);
+    // The client is deliberately NOT closed: the reader thread is parked
+    // in hlt and still holds the pointer.
+park:
+    for (;;) { __asm__ volatile("hlt"); }
+}
+
+void input_blocking_read_selftest(void) {
+    if (!thread_alloc_kernel(input_blkread_driver)) {
+        serial_write_string("[input] blocking-read selftest SKIPPED: no thread\n");
+    }
 }
 
 // Selftest
