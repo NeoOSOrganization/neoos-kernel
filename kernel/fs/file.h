@@ -65,6 +65,17 @@ struct file_ops {
     // fd. The broadcast therefore shrinks as objects are converted.
     struct poll_head *(*poll_head)(struct file_descriptor *f);
 
+    // Optional (nullable). The object's readiness counter, for an object
+    // that raises its readiness somewhere OTHER than a poll head a
+    // poller can register on -- a TCP stream socket is the one case
+    // today (see sock_poll_head: the TCB is recycled, so pollers live on
+    // the global broadcast instead). Edge-triggered epoll needs to tell
+    // "still ready, already reported" from "went away and came back",
+    // and polling the object cannot: both look ready. Only consulted
+    // when poll_head returns 0; when neither exists, an EPOLLET
+    // registration on this object degrades to level-triggered.
+    uint64_t (*ready_seq)(struct file_descriptor *f);
+
     // Optional (nullable). Only device fds that support mmap set it --
     // /dev/fb0 in M1a. file_mmap() returns -ENODEV when it is null.
     int64_t (*mmap)(struct file_descriptor *f, struct mmap_req *req);
@@ -92,6 +103,9 @@ int64_t file_getdents(struct file_descriptor *f, void *buf, int bytes);
 int64_t file_bind_vnode_ops(struct file_descriptor *f);
 int64_t file_ioctl(struct file_descriptor *f, uint64_t request, void *arg);
 int     file_poll(struct file_descriptor *f, int events);
+// Fills *out with the object's readiness counter and returns 1, or
+// returns 0 if this object has no counter to offer. See file_ops.
+int     file_ready_seq(struct file_descriptor *f, uint64_t *out);
 int64_t file_mmap(struct file_descriptor *f, struct mmap_req *req);
 void    file_dup(struct file_descriptor *f);
 void    file_close(struct file_descriptor *f);

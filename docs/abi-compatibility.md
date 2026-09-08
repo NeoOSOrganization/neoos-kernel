@@ -1199,6 +1199,45 @@ by placement/stealing — that is SCH-2. .NET Server GC no longer hangs
 on an outright ENOSYS, but until SCH-2 honours the mask a web app is
 still best published with `-p:ServerGarbageCollection=false`.
 
+## Refresh — ASP.NET Core / Kestrel under concurrency (2026-09-08)
+
+The previous refresh's "concurrent handling is not yet stable" is
+resolved. Kestrel now answers **40/40 at concurrency 8** and
+**100/100 at concurrency 16**. The `AccessViolation` that section
+blamed was the mm frame-exhaustion bug fixed separately (thread stacks
+eagerly committing 8 MiB each); what remained was a hang, and it was
+two kernel bugs, one of them an ABI-visible epoll gap.
+
+- **`EPOLLET` is implemented** (`sync/epoll.{c,h}`, `syscall/sys_poll.c`,
+  `sync/poll_head.{c,h}`, `fs/file.{c,h}`, `net/socket.c`,
+  `ipc/socketpair.c`, `ipc/pipe.c`). It was previously accepted and
+  silently dropped — `epoll_wait_core` truncated the 32-bit mask into a
+  `short`, so the bit could not even be seen. .NET's
+  `SocketAsyncEngine` registers every socket `EPOLLET|EPOLLOUT|EPOLLIN`
+  and its dispatch loop is only correct under ET, so level-triggered
+  delivery — a superset, and therefore "safe" by the usual intuition —
+  made it dispatch the same socket repeatedly until its thread pool
+  filled. Semantics, and the two deliberate divergences (a re-arm is
+  per object rather than per direction; an object exposing no readiness
+  counter degrades to level-triggered), are in `docs/stdlib.md`.
+  `file_ops` gained an optional `ready_seq` hook for objects with no
+  poll head to register on, which today means TCP stream sockets.
+- **The wall clock stopped under load** (`drivers/char/timer.c`), so no
+  timed wait expired: the LAPIC one-shot was re-armed only *after* a
+  possible `schedule()` that does not return until the preempted task
+  runs again (fewer than 500 BSP timer interrupts across a two-minute
+  boot, measured), and the tick accumulator banked the interval the
+  scheduler asked for rather than the clamped one the hardware was
+  armed with. Not an ABI change, but ABI-visible in every direction
+  that matters: `poll`/`epoll_wait` timeouts, `nanosleep`, and TCP's
+  own retransmit and delayed-ACK deadlines are all counted in these
+  ticks. A `epoll_wait(..., 100)` took minutes to return.
+
+Regression tests: `make epollet` (8 EPOLLET conformance cases on a pipe
+and a socketpair, no network, no host driver), `make epolltcp
+EPOLLTCP_CONC=8` (the level-triggered oracle, unchanged), and the
+15-run gauntlet.
+
 ## Kernel data structures (internal, not ABI)
 
 - **`kernel/lib/rbtree`** -- a generic intrusive red-black tree

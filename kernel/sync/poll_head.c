@@ -4,7 +4,12 @@
 
 void poll_head_init(struct poll_head *h, const char *name) {
     h->list = 0;
+    h->seq  = 0;
     spin_init(&h->lock, LOCK_RANK_POLLHEAD, name);
+}
+
+uint64_t poll_head_seq(struct poll_head *h) {
+    return h ? __atomic_load_n(&h->seq, __ATOMIC_ACQUIRE) : 0;
 }
 
 // Never notified: see the header. It still takes registrations, which
@@ -52,6 +57,11 @@ void poll_head_notify(struct poll_head *h) {
     // has not queued itself yet sees the flag under the broadcast
     // queue's lock and declines to sleep. See waitq_poll_wait.
     uint64_t f = spin_lock_irqsave(&h->lock);
+    // Before the wakes, and unconditionally: a poller that is not
+    // registered right now (an epoll_wait between two of its own
+    // re-snapshots) still has to learn that this happened, and the
+    // counter is the only part of a notify that outlives it.
+    __atomic_add_fetch(&h->seq, 1, __ATOMIC_RELEASE);
     for (struct poll_reg *r = h->list; r; r = r->next) {
         __atomic_store_n(&r->t->poll_notified, 1, __ATOMIC_RELEASE);
     }

@@ -1223,6 +1223,23 @@ static struct poll_head *sock_poll_head(struct file_descriptor *f) {
     return &s->poll;
 }
 
+// The readiness counter edge-triggered epoll needs, for the one kind of
+// object that has no poll head to carry it: a stream socket, whose
+// readiness is raised on the TCB (wake() -> poll_head_notify(&t->poll))
+// while pollers sit on the global broadcast, for the recycling reason
+// sock_poll_head explains above.
+//
+// Reading &t->poll's counter is safe even though a TCB may be recycled
+// under us: TCBs come from a static table, so the address is always
+// mapped, and a stale or recycled read shows a DIFFERENT number, which
+// costs one spurious edge -- a duplicate report, never a missed one.
+static uint64_t sock_ready_seq(struct file_descriptor *f) {
+    struct socket *s = (struct socket *)f->priv;
+    if (!s || s->type != SOCK_STREAM) { return 0; }
+    struct tcb *t = s->tcb;
+    return t ? poll_head_seq(&t->poll) : 0;
+}
+
 static int sock_poll(struct file_descriptor *f, int events) {
     struct socket *s = (struct socket *)f->priv;
     if (!s) { return POLLERR; }
@@ -1265,6 +1282,7 @@ static const struct file_ops sock_ops = {
     .ioctl    = sock_ioctl,
     .poll     = sock_poll,
     .poll_head = sock_poll_head,
+    .ready_seq = sock_ready_seq,
     .dup      = sock_dup,
     .close    = sock_close,
 };

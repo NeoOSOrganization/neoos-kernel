@@ -49,5 +49,10 @@ int64_t      pipe_write_ep(struct pipe *p, int nonblock, const void *buf, uint64
 void         pipe_dup_ep(struct pipe *p, int as_reader, int as_writer);
 void         pipe_close_ep(struct pipe *p, int as_reader, int as_writer);
 int          pipe_poll_ep(struct pipe *p, int as_reader, int as_writer, int events);
+// This pipe's readiness counter (its poll head's, see poll_head.h). A
+// socketpair end sums the two it straddles to give edge-triggered epoll
+// something to compare against, since the end itself has no single head
+// to register on.
+uint64_t     pipe_ready_seq_ep(struct pipe *p);
 
 #endif

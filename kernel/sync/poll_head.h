@@ -36,6 +36,15 @@ struct thread;
 struct poll_head {
     struct spinlock  lock;
     struct poll_reg *list;
+    // Bumped by poll_head_notify on every readiness change, whether or
+    // not anyone was registered to hear it. Edge-triggered epoll needs
+    // to tell "still ready, already reported" from "went away and came
+    // back" -- two states that look identical to a poll() of the object
+    // -- and this counter is the difference. It lives on the OBJECT, not
+    // on a registration, so it survives the window between one
+    // epoll_wait's unregister and the next one's register, where an
+    // event would otherwise be lost.
+    uint64_t seq;
 };
 
 struct poll_reg {
@@ -65,5 +74,10 @@ void poll_head_unregister(struct poll_reg *r);
 // This object became ready: wake every poller registered on it, and
 // nobody else.
 void poll_head_notify(struct poll_head *h);
+
+// The object's readiness counter (see `seq` above). Read without the
+// head lock: a torn or stale read can only cost a spurious edge, never
+// a missed one, because the counter only ever moves forward.
+uint64_t poll_head_seq(struct poll_head *h);
 
 #endif

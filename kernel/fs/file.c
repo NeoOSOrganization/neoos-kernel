@@ -231,6 +231,20 @@ int file_poll(struct file_descriptor *f, int events) {
     return o->poll(f, events);
 }
 
+int file_ready_seq(struct file_descriptor *f, uint64_t *out) {
+    const struct file_ops *o = ops_of(f);
+    if (!o) { return 0; }
+    // The poll head first: it is the object's real readiness signal, and
+    // poll_head_notify already counts every one it raises. ready_seq is
+    // the fallback for an object that has no head a poller can hold.
+    if (o->poll_head) {
+        struct poll_head *h = o->poll_head(f);
+        if (h) { *out = poll_head_seq(h); return 1; }
+    }
+    if (o->ready_seq) { *out = o->ready_seq(f); return 1; }
+    return 0;
+}
+
 int64_t file_mmap(struct file_descriptor *f, struct mmap_req *req) {
     const struct file_ops *o = ops_of(f);
     if (!o || !o->mmap) { return -ENODEV; }   // mmap is optional, unlike the rest

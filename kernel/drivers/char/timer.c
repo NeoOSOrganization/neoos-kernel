@@ -21,15 +21,33 @@
 // DEBUG_HZ (kernel build knob) is now a no-op: preemption granularity is
 // the per-task slice, tunable at runtime via sched_setattr.
 
-static volatile uint64_t tick_count = 0;
 static uint32_t lapic_ticks_per_10ms = 0;
 
 // rdtsc-based nanosecond clock calibration (BSP, at timer_init).
 static uint64_t g_tsc_base = 0;
 static uint64_t g_tsc_per_10ms = 0;
 
-// BSP-only: real nanoseconds accumulated toward the next 10 ms wall tick.
+// The wall clock: 100 Hz, advanced by the BSP's timer interrupt.
+//
+// bsp_ns_accum holds the real nanoseconds banked toward the next tick.
+// What is banked is the interval the hardware was ARMED for, which is
+// not always the interval the scheduler asked for -- see MIN_ARM_NS.
 static uint64_t bsp_ns_accum = 0;
+static volatile uint64_t tick_count = 0;
+
+// The floor and ceiling the LAPIC one-shot is actually armed within.
+// The floor is an interrupt-storm guard; the ceiling keeps the wall
+// clock from going more than one tick without an update.
+//
+// next_ns is clamped to this range BEFORE it is banked, which it was
+// not: ns_to_lapic_count clamped the count it programmed while the
+// accumulator kept crediting the unclamped request, so a run queue
+// handing out 50 us slices banked 50 us for every 500 us of real time
+// and the whole wall clock ran up to 10x slow under load. Every timed
+// sleep in the system is measured in these ticks -- poll and epoll
+// timeouts, TCP's retransmit and delayed-ACK deadlines, nanosleep -- so
+// "slow clock" reads as "this timeout never expires".
+#define MIN_ARM_NS (HOUSE_NS / 20)   // 500 us, matching ns_to_lapic_count
 
 uint64_t timer_ticks(void) { return tick_count; }
 
@@ -48,6 +66,22 @@ static uint32_t ns_to_lapic_count(uint64_t ns) {
     if (c < lo) { c = lo; }
     if (c > lapic_ticks_per_10ms) { c = lapic_ticks_per_10ms; }
     return (uint32_t)c;
+}
+
+// Arms this CPU's one-shot for the running task's remaining slice,
+// clamped to the range the LAPIC is actually programmed within, and
+// banks that same clamped value so the wall clock counts real time
+// rather than what was asked for (see MIN_ARM_NS).
+static void timer_arm_next(struct cpu *c) {
+    uint64_t next_ns = HOUSE_NS;
+    if (c->current) {
+        uint64_t rem = sched_slice_remaining_ns(&c->rq);
+        if (rem < next_ns) { next_ns = rem; }
+    }
+    if (next_ns < MIN_ARM_NS) { next_ns = MIN_ARM_NS; }
+    if (next_ns > HOUSE_NS)   { next_ns = HOUSE_NS; }
+    c->timer_armed_ns = next_ns;
+    lapic_timer_start_oneshot(ns_to_lapic_count(next_ns), VECTOR_TIMER);
 }
 
 // EVERY CPU takes this from its own LAPIC one-shot. Only the BSP owns
@@ -82,18 +116,31 @@ void timer_handler(void) {
     // the BSP, ap_main on an AP) with no thread to save that context
     // into. tlb_shootdown enables interrupts while waiting for acks, and
     // a tick landing in that window would strand the BSP mid-kmain.
-    uint64_t next_ns = HOUSE_NS;
-    if (c->current) {
-        if (sched_tick(&c->rq)) {
-            schedule();
-            c = this_cpu();   // current has changed; still this CPU
-        }
-        uint64_t rem = sched_slice_remaining_ns(&c->rq);
-        if (rem < next_ns) { next_ns = rem; }
-    }
+    int resched = c->current ? sched_tick(&c->rq) : 0;
 
-    c->timer_armed_ns = next_ns;
-    lapic_timer_start_oneshot(ns_to_lapic_count(next_ns), VECTOR_TIMER);
+    // ARM THE NEXT ONE-SHOT BEFORE schedule(), not after.
+    //
+    // A one-shot that is not re-armed is a timer that has stopped, and
+    // schedule() does not come back here in the ordinary sense: it
+    // switches stacks, and this frame resumes only when the task we just
+    // preempted is picked again -- which, on a CPU whose timer we just
+    // let die, may be never. The BSP would take its first mid-handler
+    // preemption and stop ticking for the rest of the boot, taking the
+    // shared wall clock (above) with it and hanging every timed sleep in
+    // the system. Measured before this: fewer than 500 BSP timer
+    // interrupts across a two-minute boot, and a 100 ms epoll_wait that
+    // never returned.
+    //
+    // The interval is computed for the task being preempted rather than
+    // the one about to be picked, which is the price for arming first:
+    // the next task may be interrupted up to one HOUSE_NS early and get
+    // the rest of its slice on the following one-shot. Deliberately NOT
+    // re-armed after schedule() returns -- that would leave the stretch
+    // between the two arms unbanked, and the wall clock would lose
+    // exactly the time a preempted task spent waiting to run again.
+    timer_arm_next(c);
+
+    if (resched) { schedule(); }
 }
 
 void timer_init(void) {

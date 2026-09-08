@@ -6,8 +6,8 @@ handler, built NativeAOT for `linux-musl-x64` against the
 `~/opt/cross-x86_64-neoos` toolchain, boots on NeoOS, binds
 `0.0.0.0:30000`, and answers real requests: `curl` from the host (via
 QEMU `hostfwd`) gets `HTTP/1.1 200 OK` with the handler's body. Verified
-**40/40 sequential requests** and concurrency 2 and 4. Concurrency 8
-under sustained load is not yet stable — see "Known remaining issue".
+**40/40 sequential requests**, **40/40 at concurrency 8**, and
+**100/100 at concurrency 16** (2026-09-08, after EPOLLET landed).
 
 ## Kernel fixes this needed (all landed)
 
@@ -28,112 +28,117 @@ under sustained load is not yet stable — see "Known remaining issue".
 | 309 | `getcpu` | ENOSYS — benign so far | `[shim] ENOSYS 309`. Kernel *has* `SYS_GETCPU` (41); the shim just doesn't map Linux 309 → 41. One-line shim fix. |
 | — | UDP `MSG_PEEK` | not implemented | `recv_one()` (datagram path) still ignores `MSG_PEEK`/`MSG_DONTWAIT`. Only the TCP path was fixed. DNS works without it. |
 
-## Known remaining issue — concurrent request handling
+## Concurrent request handling — FIXED (2026-09-08)
 
-**Status as of 2026-09-08: root-caused, fix not yet written.** Four
-kernel bugs blocking Kestrel were found and fixed (below), and ASP.NET
-Core now serves **40/40 sequential requests** and passes at concurrency
-2 and 4. At concurrency 8 under sustained load it stops answering, and
-the cause is now known: **NeoOS's epoll is level-triggered and .NET
-registers EPOLLET.** See the section below.
+Concurrency 8 used to stop answering under sustained load: a HANG, not
+the `AccessViolation` this section once described (that was the mm
+frame-exhaustion bug fixed earlier — thread stacks eagerly committing
+8 MiB each). No `[usrflt]`, no `[fault-audit]`, nothing in the kernel
+log. What the kernel saw at the stall: **24 of the 32 TCBs in
+`CLOSE_WAIT` with the socket still open and `tcp_close` never called**
+— Kestrel accepting connections and then neither serving nor closing
+them.
 
-The failure is a HANG, not the `AccessViolation` this section used to
-describe — no `[usrflt]`, no `[fault-audit]`, nothing in the kernel log.
-The GC-corruption theory is superseded: the original AccessViolation was
-the mm frame-exhaustion bug root-caused in the concurrent-request-crash
-spec (thread stacks were eagerly committing 8MiB each), which is fixed.
+Two kernel bugs, found in that order. Both are fixed, and ASP.NET Core
+now serves 40/40 at concurrency 8 and 100/100 at concurrency 16.
 
-What the kernel sees at the point it stops: **24 of the 32 TCBs sitting
-in `CLOSE_WAIT` with their socket still open, and `tcp_close` never
-called.** CLOSE_WAIT means the peer sent FIN, NeoOS ACKed, and the
-application has not closed its end. So Kestrel is accepting connections
-and then neither serving nor closing them — its `SocketAsyncEngine` is
-not draining what it accepted. `userland/epolltcp.c` (the .NET-free
-oracle, `make epolltcp`) does the same epoll accept/serve/close cycle at
-concurrency 8 and passes 16/16, which puts this above the kernel's epoll
-layer.
+### Bug 1: NeoOS's epoll was level-triggered; .NET registers EPOLLET
 
-### ROOT CAUSE (confirmed 2026-09-08): NeoOS's epoll is level-triggered,
-### .NET's SocketAsyncEngine is edge-triggered
-
-Instrumenting `epoll_ctl_do` to log the event mask userland registers
-gives, for every socket .NET adds to its engine's epoll set:
+Instrumenting `epoll_ctl_do` showed, for every socket .NET adds to its
+engine's epoll set:
 
 ```
 [ep-dbg] ctl op=1 events=0x80000005
 ```
 
-`0x80000005` = `EPOLLET (0x80000000) | EPOLLOUT (0x4) | EPOLLIN (0x1)`.
-So **.NET asks for EDGE-TRIGGERED notification**, and NeoOS's epoll is
-level-triggered only (`kernel/sync/epoll.h` says so explicitly). Worse,
-the flag is not merely ignored, it is silently *erased*:
-`epoll_wait_core` copies the registration into a `struct pollfd` with
-
-```c
-pfd[i].events = (short)e->events;     /* 0x80000005 -> 0x0005 */
-```
-
-a 32-bit mask truncated into a 16-bit field, so `EPOLLET` cannot even be
-seen by the code that would honour it.
+`0x80000005` = `EPOLLET | EPOLLOUT | EPOLLIN`. NeoOS's epoll was
+level-triggered only, and the flag was not merely ignored, it was
+erased: `epoll_wait_core` copied the registration into a
+`struct pollfd` with `pfd[i].events = (short)e->events`, truncating a
+32-bit mask into 16 bits.
 
 **Why that hangs Kestrel rather than merely being inefficient.** The
-usual intuition -- "level-triggered delivers a superset of edge-
-triggered, so it is safe" -- is wrong for a consumer *written against*
-ET. `SocketAsyncEngine`'s loop is:
+usual intuition — "level-triggered delivers a superset of edge-
+triggered, so it is safe" — is wrong for a consumer *written against*
+ET. `SocketAsyncEngine`'s loop is: `epoll_wait` returns fd X readable →
+hand X to the thread pool → straight back to `epoll_wait`. Under ET
+that blocks until *new* data arrives. Under LT, X is still readable
+(the work item has not run yet), so the engine spins dispatching
+duplicate work items for the same socket, the pool fills, and accepted
+connections are never serviced or closed.
 
-1. `epoll_wait` returns fd X readable
-2. hand X to the thread pool as a work item
-3. go straight back to `epoll_wait`
+It also explained every other data point: sequential requests worked
+(one connection, duplicates harmless); 2 and 4 worked, 8 did not; and
+`userland/epolltcp.c` passed 16/16 at concurrency 8 because it is
+*written* for LT and drains each fd in the iteration it is reported in.
 
-Under ET, step 3 blocks until *new* data arrives. Under LT, X is *still*
-readable (nobody has read it yet -- the thread-pool item has not run),
-so `epoll_wait` returns X again immediately, and again, and again. The
-engine thread spins dispatching duplicate work items for the same socket
-as fast as it can, the thread pool fills with them, and the connections
-that were accepted are never actually serviced or closed.
+**The fix** (`kernel/sync/epoll.{c,h}`, `kernel/syscall/sys_poll.c`,
+`kernel/sync/poll_head.{c,h}`, `kernel/fs/file.{c,h}`,
+`kernel/net/socket.c`, `kernel/ipc/socketpair.c`, `kernel/ipc/pipe.c`):
+stop truncating the mask; per registration remember the mask already
+reported (`last_ready`) and the object's readiness counter at that
+moment (`last_seq`); report `ready_now & ~last_ready`; re-arm when the
+object's counter moves. `poll_head_notify` bumps that counter, and a
+TCP stream socket — which has no poll head, because the TCB is recycled
+and pollers must not be threaded onto it — exposes its TCB's counter
+through the new `file_ops.ready_seq`. `EPOLL_CTL_MOD` and a re-`ADD`
+re-arm. Full semantics and the two deliberate divergences are in
+`docs/stdlib.md`.
 
-That is exactly the state the kernel observes at the stall: 24 of 32
-TCBs in `CLOSE_WAIT` with the socket still open and `tcp_close` never
-called, 6 more `ESTABLISHED`, and zero request handlers invoked.
+Sampling alone would NOT have been enough: if the level drops and rises
+entirely between two `epoll_wait` calls (the worker drains the socket
+on a pool thread while the engine is in `epoll_wait`, then the next
+request arrives), "ready now" equals "ready last time" and the edge is
+invisible. That is what the per-object counter is for, and
+`userland/epollet.c` case 8 is the regression test for exactly it.
 
-It also explains every other data point:
-- **Sequential requests work** (40/40): with one connection in flight
-  the duplicate dispatches are harmless -- the work item runs, drains
-  the socket, and the level goes away.
-- **Concurrency 2 and 4 work**; 8 does not. More sockets simultaneously
-  readable means more duplicate dispatch, and the pool has a fixed size.
-- **`userland/epolltcp.c` passes 16/16 at concurrency 8** -- it is
-  written for level-triggered and drains each fd in the same loop
-  iteration it is reported in, so LT is correct for it. The oracle
-  cleared the kernel's epoll layer because the bug is not in delivery,
-  it is in the *semantics* the caller asked for and did not get.
+### Bug 2: the wall clock stopped, so no timed wait ever expired
 
-### The fix
+Found while writing that test: `epoll_wait(fd, ..., 100)` never
+returned. Two defects in `kernel/drivers/char/timer.c`, both of which
+made `timer_ticks()` — the unit EVERY timed sleep in the system is
+measured in, including TCP's retransmit and delayed-ACK deadlines —
+advance far slower than real time:
 
-Implement `EPOLLET` in `kernel/sync/epoll.c` + `kernel/syscall/sys_poll.c`:
+1. **The one-shot was re-armed AFTER `schedule()`.** `timer_handler`
+   computed the next interval at the end of the function, past a
+   `schedule()` call that switches stacks and does not come back until
+   the preempted task is picked again. A CPU that took one mid-handler
+   preemption therefore had no armed timer at all — and could not
+   schedule that task back without one. Measured: fewer than 500 BSP
+   timer interrupts across a two-minute boot. The clock is BSP-owned,
+   so it simply stopped.
+2. **The accumulator banked what was asked for, not what was armed.**
+   `ns_to_lapic_count` clamps the programmed count to a ~500 us floor
+   while `bsp_ns_accum` kept crediting the unclamped request, so a busy
+   run queue handing out 50 us slices banked 50 us for every 500 us of
+   real time — a clock running up to 10x slow under exactly the load
+   this milestone is about.
 
-1. Stop truncating. `struct epoll_entry.events` is already `uint32_t`;
-   the `(short)` cast into `pfd[i].events` is where `EPOLLET` dies.
-   Either carry the ET bit alongside the `pollfd` array or stop routing
-   epoll through `struct pollfd` for this.
-2. Per registration, remember the last reported ready mask
-   (`e->last_ready`). On a scan, report only
-   `now_ready & ~e->last_ready` -- the *edge* -- and store
-   `e->last_ready = now_ready`. When an fd polls not-ready, clear it so
-   the next transition re-arms.
-3. `EPOLL_CTL_MOD` and a re-`ADD` after close must reset `last_ready`,
-   or a reused fd number inherits a stale edge.
+Fixed by arming before any `schedule()` and clamping the interval to
+the range the LAPIC is actually programmed within before banking it.
+This is invisible to a program that only ever blocks forever (which is
+why .NET, whose engine passes `timeout = -1`, hit bug 1 and not this
+one) and fatal to anything using a real timeout.
 
-Until then, a workaround that would confirm the diagnosis without
-kernel work: force .NET onto its blocking-socket path (it has one) or
-run Kestrel with a single I/O thread.
+### Regression tests
+
+- `make epollet` — `userland/epollet.c`, 8 EPOLLET conformance cases on
+  a pipe and a socketpair, no network and no host driver. Case 1 pins
+  level-triggered behaviour down so the ET work cannot quietly change
+  it; case 8 is the drain-and-refill-between-waits case above.
+- `make epolltcp EPOLLTCP_CONC=8` — the LT oracle, unchanged, still
+  16/16.
+- `./tools/gauntlet.sh` — 15/15.
 
 ### Also still true regardless
 
 `TCP_MAX_CONNS` is **32** statically-allocated ~76KB TCBs (32KB send +
-32KB receive + reassembly). That is far too few for a web server
-whatever else is fixed, and the buffers should become dynamically
-allocated rather than the count merely raised.
+32KB receive + reassembly). Concurrency 16 passes with room to spare --
+each connection closes and its slot is reaped on demand -- but 32 is
+still the ceiling on connections IN FLIGHT, which is far too few for a
+web server, and the buffers should become dynamically allocated rather
+than the count merely raised.
 
 ### Kernel fixes this milestone (all landed)
 
@@ -163,3 +168,11 @@ dotnet publish -c Release -r linux-musl-x64 -p:PublishAot=true \
 ```
 csproj carries `<ExtraLinkerArg Include="-T,.../userland/user.ld" />` and
 `<ExtraLinkerArg Include="--no-relax" />`.
+
+One gotcha with the .NET 10 ILCompiler: its link step always appends
+clang's `--target=x86_64-linux-musl`, which the NeoOS cross **gcc**
+rejects, and the `TargetTriple` property it comes from is set inside
+the targets file (so `-p:TargetTriple=` on the command line does not
+clear it). Point `CppCompilerAndLinker` at a one-line wrapper that
+drops any `--target=*` argument and `exec`s the real
+`x86_64-neoos-linux-musl-gcc`.

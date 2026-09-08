@@ -993,26 +993,60 @@ then calls the same core. `struct epoll_event` matches Linux's
 x86_64 ABI exactly, including the `__attribute__((packed))` that
 removes the padding its natural alignment would otherwise have.
 
+`EPOLLET` (edge-triggered mode) is implemented, and is not optional
+in practice: .NET's `SocketAsyncEngine` registers **every** socket
+with `EPOLLET|EPOLLOUT|EPOLLIN` (`0x80000005`). NeoOS was
+level-triggered only at first, on the reasonable-sounding theory
+that level-triggered delivers a superset of edge-triggered and is
+therefore safe for any caller. It is not safe for a caller *written
+against* edge-triggered: that engine's loop is "epoll_wait → hand
+the fd to the thread pool → straight back to epoll_wait", which is
+correct only because ET does not report the same readiness twice.
+Under LT the work item has not run yet, the fd is still ready, and
+the same socket is dispatched again and again until the pool is full
+of duplicates and nothing is served — an ASP.NET Core app that
+answered sequential requests fine and hung at concurrency 8.
+
+How it works: each registration remembers the readiness mask already
+reported (`epoll_entry.last_ready`) and the object's readiness
+counter at that moment (`last_seq`). A scan reports
+`ready_now & ~last_ready`, so a level that is merely still there is
+not re-reported; when the object's counter has moved — every
+`poll_head_notify` bumps it, and a TCP stream socket, which has no
+poll head, exposes its TCB's through `file_ops.ready_seq` — the
+registration is re-armed and whatever it is ready for is news again.
+The counter is what makes a drop-and-rise *between* two `epoll_wait`
+calls an edge, which comparing "ready now" against "ready last time"
+cannot see. `EPOLL_CTL_MOD` and a re-`ADD` re-arm, per epoll(7), so
+a reused fd number never inherits a consumed edge.
+
 ### Divergences from Linux
 
-- **Level-triggered only.** `EPOLLET` (edge-triggered mode) is
-  accepted in the registered `events` mask but has no distinct
-  effect — every registration behaves as level-triggered, which is
-  strictly more notifications, never fewer, than edge-triggered
-  would give. A caller using the default (level-triggered, by far
-  the common case) sees no difference; one that specifically depends
-  on edge-triggered's "only once per readiness transition" contract
-  to avoid busy-looping would need to add rate-limiting Linux
-  wouldn't have required.
+- **A re-arm is per object, not per direction.** An `EPOLLET`
+  registration is re-armed by *any* readiness change on the object,
+  so a bit that is only still level-ready can be reported again when
+  something unrelated happens to the same fd — reading a socketpair
+  frees buffer space, which re-arms it, and `EPOLLOUT` comes back
+  even though writability never lapsed. Linux's ET has the same
+  shape (its wakeup callback is per socket too) but is finer in
+  places NeoOS is not. The property applications depend on holds:
+  a bit is never re-reported *without* some real readiness event on
+  that object, so an edge-triggered consumer cannot spin. Anything
+  correct under Linux ET — drain until `EAGAIN`, then wait — is
+  correct here.
+- **An object with no readiness counter degrades to
+  level-triggered.** If a file's ops supply neither `poll_head` nor
+  `ready_seq`, an `EPOLLET` registration on it is re-armed on every
+  scan, which is level-triggered behaviour. Deliberate: a missed
+  edge is a hang, a spurious one is a wasted wakeup. Every object a
+  program can usefully wait on today (pipes, socketpairs, TCP and
+  UDP sockets, ttys, eventfd, evdev) has one.
+- **`EPOLLONESHOT`, `EPOLLEXCLUSIVE`, `EPOLLWAKEUP`** — accepted as
+  bits in the events mask, not acted on.
 - **`epoll_pwait`'s `sigmask` is accepted and not applied** — NeoOS
   has no per-call signal-mask swap for any blocking syscall (the one
   place that need is met today is `rt_sigsuspend`). Every caller in
   this milestone passes a null mask.
-- **No `EPOLLEXCLUSIVE`/`EPOLLWAKEUP` semantics** — accepted as bits
-  in the events mask, not acted on. Both are about behavior across
-  *multiple* processes/epoll-instances sharing one fd or waking a
-  suspended system, neither of which arises in NeoOS's process model
-  yet.
 
 ## `readlink`, `inotify_init1`/`inotify_add_watch`/`inotify_rm_watch`, `getrusage`, `gettid`
 

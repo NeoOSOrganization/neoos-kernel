@@ -352,6 +352,10 @@ static int pipe_poll(struct file_descriptor *f, int events) {
     return pipe_poll_ep((struct pipe *)f->priv, f->readable, f->writable, events);
 }
 
+uint64_t pipe_ready_seq_ep(struct pipe *p) {
+    return p ? poll_head_seq(&p->poll) : 0;
+}
+
 // CS5.2. Every fd on a pipe -- both ends -- reports the same head, so a
 // poller waiting on the read end is registered on the object the writer
 // will notify.

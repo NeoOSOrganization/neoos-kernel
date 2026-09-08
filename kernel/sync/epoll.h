@@ -16,15 +16,47 @@ struct fd_table;
 // core scan-and-sleep loop (kernel/syscall/sys_poll.c's poll_core).
 // Found missing chasing a dotnet NativeAOT TCP socket example: .NET's
 // SocketAsyncEngine uses epoll_create1/epoll_ctl/epoll_wait even for a
-// single synchronous connect+send+recv. No edge-triggered (EPOLLET)
-// support -- every registration is treated as level-triggered, which
-// is a strict subset of Linux's semantics (a caller that only uses
-// level-triggered mode, the default and by far the common case, sees
-// no difference).
+// single synchronous connect+send+recv.
+//
+// EPOLLET is honoured (see below). It was not, at first, on the theory
+// that level-triggered is a strict superset -- more notifications,
+// never fewer -- and therefore safe for any caller. That is wrong for a
+// caller WRITTEN against edge-triggered. SocketAsyncEngine's loop is
+// "epoll_wait -> hand the fd to the thread pool -> straight back to
+// epoll_wait", and it is correct only because ET does not report the
+// same readiness twice: under LT the work item has not run yet, the fd
+// is still ready, and the engine dispatches it again and again until
+// the pool is full of duplicates and nothing is served. That was the
+// ASP.NET Core concurrency hang.
+#define EPOLLET       0x80000000u
+// The bits of an events mask that ARE poll(2)'s, one for one (EPOLLIN
+// == POLLIN, and so on up through EPOLLRDHUP). Everything above is an
+// epoll-only mode flag and must be stripped before the mask reaches
+// poll_core, which reads it as a 16-bit short.
+#define EPOLL_POLL_BITS 0x0000ffffu
+
 struct epoll_entry {
     int fd;
     uint32_t events;      // EPOLLIN/EPOLLOUT/... requested
     uint64_t data;         // epoll_data_t, opaque, returned unchanged
+
+    // Edge-triggered bookkeeping, meaningless unless events has EPOLLET.
+    // last_ready is the readiness already reported to userland and not
+    // yet re-armed; last_seq is the object's readiness counter
+    // (file_ready_seq) as of that report, which is what distinguishes
+    // "still ready, already told you" from "went away and came back".
+    // have_seq is 0 until the first scan, and stays 0 for an object that
+    // offers no counter at all (then the registration degrades to
+    // level-triggered rather than risking a missed edge).
+    uint32_t last_ready;
+    uint64_t last_seq;
+    int      have_seq;
+    // Bumped on ADD and on MOD. An epoll_wait that started before a
+    // re-registration must not write its stale edge state back onto the
+    // new one -- and a reused fd number would otherwise inherit a
+    // consumed edge and never be reported again.
+    uint32_t gen;
+
     struct epoll_entry *next;
 };
 
@@ -33,6 +65,7 @@ struct epoll_obj {
     struct epoll_entry *list;
     int nfds;
     int refs;
+    uint32_t gen_ctr;          // source of epoll_entry.gen
     struct fd_table *owner;    // the process fd table this epoll belongs to
     struct epoll_obj *g_next;  // global chain, for epoll_forget_fd()
 };

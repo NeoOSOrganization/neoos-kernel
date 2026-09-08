@@ -95,6 +95,18 @@ static struct poll_head *spair_poll_head(struct file_descriptor *f) {
     return 0;
 }
 
+// Having no head of its own, an end still owes edge-triggered epoll a
+// readiness counter, or every EPOLLET registration on a socketpair
+// silently degrades to level-triggered. The sum of the two pipes' own
+// counters is one: it changes exactly when either direction's readiness
+// changes, which is what a re-arm is asking about. It cannot say WHICH
+// direction changed -- see docs/stdlib.md on object-wide re-arming.
+static uint64_t spair_ready_seq(struct file_descriptor *f) {
+    struct spair_end *e = (struct spair_end *)f->priv;
+    if (!e) { return 0; }
+    return pipe_ready_seq_ep(e->rd) + pipe_ready_seq_ep(e->wr);
+}
+
 static const struct file_ops spair_ops = {
     .name      = "socketpair",
     .read      = spair_read,
@@ -104,6 +116,7 @@ static const struct file_ops spair_ops = {
     .ioctl     = spair_ioctl,
     .poll      = spair_poll,
     .poll_head = spair_poll_head,
+    .ready_seq = spair_ready_seq,
     .dup       = spair_dup,
     .close     = spair_close,
 };

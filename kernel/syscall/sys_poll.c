@@ -33,7 +33,25 @@ struct pollfd { int fd; short events; short revents; };
 #define FD_SETSIZE 1024
 #define FD_WORDS   (FD_SETSIZE / 64)
 
-static int64_t poll_core(struct pollfd *pfd, unsigned n, int64_t deadline) {
+// Per-fd edge-triggered state, threaded through poll_core by epoll_wait
+// and NULL for poll()/select()/ppoll(), which have no edge mode.
+//
+// poll_core reads `et` and maintains `last`/`seq`/`have_seq`; `gen` is
+// epoll's own and is only carried here so one array covers the whole
+// call. See kernel/sync/epoll.h for what each field means -- these are
+// the same values, on this frame for the length of the wait, because
+// the epoll entry they came from may be freed by a close() while
+// poll_core sleeps.
+struct poll_edge {
+    uint32_t et;
+    uint32_t last;
+    uint64_t seq;
+    int      have_seq;
+    uint32_t gen;
+};
+
+static int64_t poll_core(struct pollfd *pfd, unsigned n, int64_t deadline,
+                         struct poll_edge *edge) {
     struct process *p = current_proc();
     struct thread  *self = current_thread();
 
@@ -76,9 +94,43 @@ static int64_t poll_core(struct pollfd *pfd, unsigned n, int64_t deadline) {
         for (unsigned i = 0; i < n; i++) {
             if (pfd[i].fd < 0) { pfd[i].revents = 0; continue; }
             struct file_descriptor *f = fd_get(p, pfd[i].fd);
+
+            // Edge mode: sample the object's readiness counter BEFORE
+            // polling it. An event that lands between this read and the
+            // poll then shows up as a change on the NEXT scan, which
+            // costs a duplicate report; reading it after would let that
+            // event be folded into the same number and lost.
+            int      et = edge && edge[i].et;
+            int      armed = 0;
+            uint64_t seq = 0;
+            int      has_seq = 0;
+            if (et) {
+                has_seq = f ? file_ready_seq(f, &seq) : 0;
+                // No counter to compare against -- an object nothing has
+                // converted, or the very first scan of this
+                // registration. Arm rather than assume: a spurious
+                // report is a wasted wakeup, a missed one is a hang.
+                armed = !has_seq || !edge[i].have_seq || seq != edge[i].seq;
+            }
+
             short want = pfd[i].events | POLLERR | POLLHUP;
             short got  = f ? (short)file_poll(f, want) : POLLNVAL;
-            pfd[i].revents = got & (pfd[i].events | POLLERR | POLLHUP | POLLNVAL);
+            short rev  = got & (pfd[i].events | POLLERR | POLLHUP | POLLNVAL);
+
+            if (et) {
+                // A readiness change on the object re-arms every bit:
+                // whatever it is ready for now is news again.
+                if (armed) { edge[i].last = 0; }
+                edge[i].seq = seq;
+                edge[i].have_seq = has_seq;
+                short newly = (short)(rev & ~(short)edge[i].last);
+                // Bits that went away are dropped here, not just the new
+                // ones added -- that is what lets the next rise report.
+                edge[i].last = (uint32_t)(unsigned short)rev;
+                rev = newly;
+            }
+
+            pfd[i].revents = rev;
             if (pfd[i].revents) { ready++; }
         }
         if (woken) {
@@ -147,7 +199,7 @@ int64_t sys_poll(struct syscall_args *a) {
     if (missed > 0) { if (pfd != small) { kfree(pfd); } return -EFAULT; }
     for (unsigned i = 0; i < n; i++) { pfd[i].revents = 0; }
 
-    int64_t r = poll_core(pfd, n, deadline_from_ms(tmo));
+    int64_t r = poll_core(pfd, n, deadline_from_ms(tmo), 0);
     if (r >= 0) {
         missed = copy_to_user((void *)(uintptr_t)uptr, pfd, (uint64_t)n * sizeof(struct pollfd));
         if (missed > 0) { r = -EFAULT; }
@@ -243,7 +295,7 @@ int64_t sys_ppoll(struct syscall_args *a) {
         have_mask = 1;
     }
 
-    int64_t r = poll_core(pfd, n, deadline);
+    int64_t r = poll_core(pfd, n, deadline, 0);
 
     if (have_mask && r != -EINTR) {
         t->blocked = t->saved_blocked;
@@ -314,7 +366,7 @@ int64_t sys_select(struct syscall_args *a) {
         if (timeout_ms < 0) { timeout_ms = 0; }
     }
 
-    int64_t r = poll_core(pfd, n, deadline_from_ms(timeout_ms));
+    int64_t r = poll_core(pfd, n, deadline_from_ms(timeout_ms), 0);
     if (r < 0) { kfree(pfd); return r; }
 
     // Rebuild the sets from revents.
@@ -387,6 +439,28 @@ int64_t sys_epoll_ctl(struct syscall_args *a) {
 // to cut the latency to ~0 for the common case; this only bounds it.
 #define EPOLL_REEVAL_TICKS 5
 
+// Copy the edge state poll_core just maintained back onto the
+// registrations it came from, so the NEXT epoll_wait picks up where
+// this one left off. Matched by (fd, gen): an entry that was closed,
+// deleted, re-added or MODded while this call slept is a different
+// registration, and inheriting a consumed edge would leave it silent
+// forever.
+static void epoll_edges_writeback(struct epoll_obj *o, const struct pollfd *pfd,
+                                  const struct poll_edge *edge, int n) {
+    uint64_t flags = spin_lock_irqsave(&o->lock);
+    for (int i = 0; i < n; i++) {
+        if (!edge[i].et) { continue; }
+        for (struct epoll_entry *e = o->list; e; e = e->next) {
+            if (e->fd != pfd[i].fd || e->gen != edge[i].gen) { continue; }
+            e->last_ready = edge[i].last;
+            e->last_seq   = edge[i].seq;
+            e->have_seq   = edge[i].have_seq;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&o->lock, flags);
+}
+
 static int64_t epoll_wait_core(struct syscall_args *a) {
     int epfd      = (int)a->a1;
     uint64_t uev  = a->a2;
@@ -412,21 +486,34 @@ static int64_t epoll_wait_core(struct syscall_args *a) {
         if (n > maxevents) { n = maxevents; }
         struct pollfd *pfd = 0;
         uint64_t *edata = 0;
+        struct poll_edge *edge = 0;
         if (n > 0) {
             pfd = kmalloc((uint64_t)n * sizeof(*pfd));
             edata = kmalloc((uint64_t)n * sizeof(*edata));
-            if (!pfd || !edata) {
+            edge = kmalloc((uint64_t)n * sizeof(*edge));
+            if (!pfd || !edata || !edge) {
                 spin_unlock_irqrestore(&o->lock, flags);
                 if (pfd) { kfree(pfd); }
                 if (edata) { kfree(edata); }
+                if (edge) { kfree(edge); }
                 return -ENOMEM;
             }
             int i = 0;
             for (struct epoll_entry *e = o->list; e && i < n; e = e->next, i++) {
                 pfd[i].fd = e->fd;
-                pfd[i].events = (short)e->events;
+                // Only the bits poll(2) shares. EPOLLET and the other
+                // mode flags live above bit 15 and would be truncated
+                // into nothing by this short -- which is exactly how
+                // EPOLLET used to disappear before anything could
+                // honour it.
+                pfd[i].events = (short)(e->events & EPOLL_POLL_BITS);
                 pfd[i].revents = 0;
                 edata[i] = e->data;
+                edge[i].et       = (e->events & EPOLLET) ? 1 : 0;
+                edge[i].last     = e->last_ready;
+                edge[i].seq      = e->last_seq;
+                edge[i].have_seq = e->have_seq;
+                edge[i].gen      = e->gen;
             }
             n = i;
         }
@@ -446,11 +533,16 @@ static int64_t epoll_wait_core(struct syscall_args *a) {
         // poll_core handles n == 0 (its scan loop is empty, it just
         // honours the deadline) and owns the whole enter/notify/
         // lost-wakeup dance -- do not reimplement it here.
-        int64_t ready = poll_core(pfd, (unsigned)n, d);
+        int64_t ready = poll_core(pfd, (unsigned)n, d, edge);
+
+        // Before anything else, and on EVERY path including -EINTR: the
+        // scan may have cleared a bit that the registration still has
+        // set, and losing that clear is a missed edge, i.e. a hang.
+        if (n > 0) { epoll_edges_writeback(o, pfd, edge, n); }
 
         if (ready > 0) {
             struct epoll_event_abi *out = kmalloc((uint64_t)ready * sizeof(*out));
-            if (!out) { kfree(pfd); kfree(edata); return -ENOMEM; }
+            if (!out) { kfree(pfd); kfree(edata); kfree(edge); return -ENOMEM; }
             int64_t j = 0;
             for (int i = 0; i < n && j < ready; i++) {
                 if (!pfd[i].revents) { continue; }
@@ -460,7 +552,7 @@ static int64_t epoll_wait_core(struct syscall_args *a) {
                 out[j].data = edata[i];
                 j++;
             }
-            kfree(pfd); kfree(edata);
+            kfree(pfd); kfree(edata); kfree(edge);
             if (j > 0) {
                 uint64_t missed = copy_to_user((void *)(uintptr_t)uev, out,
                                                (uint64_t)j * sizeof(*out));
@@ -471,6 +563,7 @@ static int64_t epoll_wait_core(struct syscall_args *a) {
         } else {
             kfree(pfd);
             kfree(edata);
+            kfree(edge);
             if (ready < 0) { return ready; }   // -EINTR / -ENOMEM
         }
 

@@ -1,7 +1,7 @@
 // kernel/sync/epoll.c -- epoll(7), built on poll_core (kernel/syscall/
 // sys_poll.c) rather than as a second readiness mechanism. See
-// epoll.h's own comment for why, and for the level-triggered-only
-// scope.
+// epoll.h's own comment for why, and for how EPOLLET rides on top of a
+// core that is otherwise level-triggered.
 
 #include "sync/epoll.h"
 #include "sync/lock.h"
@@ -148,6 +148,7 @@ int epoll_create(int flags) {
     o->list = 0;
     o->nfds = 0;
     o->refs = 1;
+    o->gen_ctr = 0;
     o->owner = p->fd_table;
     o->g_next = 0;
 
@@ -188,6 +189,10 @@ int epoll_ctl_do(struct file_descriptor *epf, int op, int fd, uint32_t events, u
             struct epoll_entry *e = kmalloc(sizeof(*e));
             if (!e) { rc = -ENOMEM; break; }
             e->fd = fd; e->events = events; e->data = data; e->next = 0;
+            // A fresh registration is fully armed: whatever the fd is
+            // ready for right now is an edge it has not been told about.
+            e->last_ready = 0; e->last_seq = 0; e->have_seq = 0;
+            e->gen = ++o->gen_ctr;
             *pp = e;
             o->nfds++;
         }
@@ -196,6 +201,12 @@ int epoll_ctl_do(struct file_descriptor *epf, int op, int fd, uint32_t events, u
         if (!found) { rc = -ENOENT; break; }
         found->events = events;
         found->data = data;
+        // MOD re-arms, which epoll(7) is explicit about and which is how
+        // an edge-triggered caller that lost track recovers. The new gen
+        // also fences off any epoll_wait already in flight against the
+        // old registration.
+        found->last_ready = 0; found->last_seq = 0; found->have_seq = 0;
+        found->gen = ++o->gen_ctr;
         break;
     case EPOLL_CTL_DEL:
         if (!found) { rc = -ENOENT; break; }
