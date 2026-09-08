@@ -36,10 +36,34 @@
 
 enum { U_UNBOUND = 0, U_BOUND, U_LISTENING, U_CONNECTED, U_DEAD };
 
-// One end of a connected pair: the ring it reads and the ring it
-// writes. Same shape as socketpair's spair_end, for the same reason.
+#define SCM_MAX_FDS 8
+
+// One batch of descriptors handed over by a single sendmsg. The
+// descriptors are COPIES with their own references taken (file_dup), so
+// the sender may close its originals immediately -- which is the whole
+// point of passing one.
+struct scm_batch {
+    struct scm_batch *next;
+    int n;
+    struct file_descriptor fds[SCM_MAX_FDS];
+};
+
+// One DIRECTION of a connected pair: the ring, plus the descriptors in
+// flight toward whoever reads it.
+//
+// The fds have to live here rather than on either socket because that
+// is what they belong to -- the channel. A sender that closes its
+// socket immediately after sendmsg must not take the descriptors back,
+// and a receiver that has not called recvmsg yet must still get them.
+struct unix_dir {
+    struct pipe *ring;
+    struct spinlock lock;
+    struct scm_batch *head, *tail;
+    int refs;                      // endpoints referencing this direction
+};
+
 struct unix_conn {
-    struct pipe *rd, *wr;
+    struct unix_dir *rd, *wr;
 };
 
 struct unix_sock {
@@ -118,9 +142,57 @@ static void unix_drop_name(struct unix_sock *s) {
     spin_unlock_irqrestore(&unix_table_lock, f);
 }
 
+static struct unix_dir *unix_dir_alloc(void) {
+    struct unix_dir *d = kmalloc(sizeof(struct unix_dir));
+    if (!d) { return 0; }
+    d->ring = pipe_alloc();
+    if (!d->ring) { kfree(d); return 0; }
+    pipe_init_ends(d->ring);
+    spin_init(&d->lock, LOCK_RANK_SOCKET, "unix-dir");
+    d->head = d->tail = 0;
+    d->refs = 2;                   // one endpoint at each end
+    return d;
+}
+
+static void unix_dir_free_pipe_only(struct unix_dir *d) {
+    if (!d) { return; }
+    pipe_free(d->ring);
+    kfree(d);
+}
+
+static void unix_dir_get(struct unix_dir *d, int as_reader, int as_writer) {
+    if (!d) { return; }
+    __atomic_add_fetch(&d->refs, 1, __ATOMIC_SEQ_CST);
+    pipe_dup_ep(d->ring, as_reader, as_writer);
+}
+
+static void unix_dir_put(struct unix_dir *d, int as_reader, int as_writer) {
+    if (!d) { return; }
+    pipe_close_ep(d->ring, as_reader, as_writer);
+    if (__atomic_sub_fetch(&d->refs, 1, __ATOMIC_SEQ_CST) != 0) { return; }
+
+    // Last reference. Anything still in flight was never delivered, and
+    // its references are ours to drop -- this is the leak the whole
+    // design has to get right: a socket closed with queued SCM_RIGHTS
+    // messages must not strand the objects they name.
+    struct scm_batch *b = d->head;
+    d->head = d->tail = 0;
+    while (b) {
+        struct scm_batch *next = b->next;
+        for (int i = 0; i < b->n; i++) { file_close(&b->fds[i]); }
+        kfree(b);
+        b = next;
+    }
+    // NOT pipe_free: pipe_close_ep above owns the ring's lifetime and
+    // has already freed it if that was the last endpoint. Freeing it
+    // here too was a double free, and it presented as a hang inside the
+    // next allocation rather than as a fault at the second free.
+    kfree(d);
+}
+
 static void unix_conn_close(struct unix_conn *c) {
-    if (c->rd) { pipe_close_ep(c->rd, 1, 0); c->rd = 0; }
-    if (c->wr) { pipe_close_ep(c->wr, 0, 1); c->wr = 0; }
+    if (c->rd) { unix_dir_put(c->rd, 1, 0); c->rd = 0; }
+    if (c->wr) { unix_dir_put(c->wr, 0, 1); c->wr = 0; }
 }
 
 static void unix_put(struct unix_sock *s) {
@@ -143,13 +215,13 @@ static void unix_put(struct unix_sock *s) {
 static int64_t usock_read(struct file_descriptor *f, void *buf, uint64_t len) {
     struct unix_sock *s = f->priv;
     if (!s || s->state != U_CONNECTED) { return -ENOTCONN; }
-    return pipe_read_ep(s->conn.rd, f->nonblock, buf, len);
+    return pipe_read_ep(s->conn.rd->ring, f->nonblock, buf, len);
 }
 
 static int64_t usock_write(struct file_descriptor *f, const void *buf, uint64_t len) {
     struct unix_sock *s = f->priv;
     if (!s || s->state != U_CONNECTED) { return -ENOTCONN; }
-    return pipe_write_ep(s->conn.wr, f->nonblock, buf, len);
+    return pipe_write_ep(s->conn.wr->ring, f->nonblock, buf, len);
 }
 
 static int64_t usock_lseek(struct file_descriptor *f, int64_t off, int whence) {
@@ -174,8 +246,8 @@ static int usock_poll(struct file_descriptor *f, int events) {
         return ready ? (events & POLLIN) : 0;
     }
     if (s->state != U_CONNECTED) { return 0; }
-    int mask = pipe_poll_ep(s->conn.rd, 1, 0, events | POLLIN | POLLHUP);
-    mask    |= pipe_poll_ep(s->conn.wr, 0, 1, events | POLLOUT);
+    int mask = pipe_poll_ep(s->conn.rd->ring, 1, 0, events | POLLIN | POLLHUP);
+    mask    |= pipe_poll_ep(s->conn.wr->ring, 0, 1, events | POLLOUT);
     return mask & events;
 }
 
@@ -191,7 +263,7 @@ static struct poll_head *usock_poll_head(struct file_descriptor *f) {
 static uint64_t usock_ready_seq(struct file_descriptor *f) {
     struct unix_sock *s = f->priv;
     if (!s || s->state != U_CONNECTED) { return 0; }
-    return pipe_ready_seq_ep(s->conn.rd) + pipe_ready_seq_ep(s->conn.wr);
+    return pipe_ready_seq_ep(s->conn.rd->ring) + pipe_ready_seq_ep(s->conn.wr->ring);
 }
 
 static void usock_dup(struct file_descriptor *f) {
@@ -199,8 +271,8 @@ static void usock_dup(struct file_descriptor *f) {
     if (!s) { return; }
     unix_get(s);
     if (s->state == U_CONNECTED) {
-        pipe_dup_ep(s->conn.rd, 1, 0);
-        pipe_dup_ep(s->conn.wr, 0, 1);
+        unix_dir_get(s->conn.rd, 1, 0);
+        unix_dir_get(s->conn.wr, 0, 1);
     }
 }
 
@@ -335,22 +407,21 @@ int64_t unix_connect(struct file_descriptor *f, const struct k_sockaddr *addr, u
     spin_unlock_irqrestore(&unix_table_lock, fl);
     if (!srv) { return -ECONNREFUSED; }
 
-    // Two rings, cross-wired. Allocated outside every socket lock: pipe
-    // ranks below both of them.
-    struct pipe *a = pipe_alloc();
-    struct pipe *b = a ? pipe_alloc() : 0;
+    // Two directions, cross-wired. Allocated outside every socket lock:
+    // pipe ranks below both of them.
+    struct unix_dir *a = unix_dir_alloc();
+    struct unix_dir *b = a ? unix_dir_alloc() : 0;
     if (!a || !b) {
-        if (a) { pipe_free(a); }
+        unix_dir_free_pipe_only(a);
         unix_put(srv);
         return -ENOMEM;
     }
-    pipe_init_ends(a);
-    pipe_init_ends(b);
 
     fl = spin_lock_irqsave(&srv->lock);
     if (srv->state != U_LISTENING || srv->bl_count >= srv->bl_max) {
         spin_unlock_irqrestore(&srv->lock, fl);
-        pipe_free(a); pipe_free(b);
+        unix_dir_free_pipe_only(a);
+        unix_dir_free_pipe_only(b);
         unix_put(srv);
         return -ECONNREFUSED;
     }
@@ -403,4 +474,195 @@ int64_t unix_accept4(struct file_descriptor *f, struct k_sockaddr *addr,
     // An accepted AF_UNIX socket has no address of its own to report.
     if (addr && len) { *len = 0; }
     return fd;
+}
+
+// ---- SCM_RIGHTS -------------------------------------------------------
+//
+// Linux associates passed descriptors with a byte position in the
+// stream. NeoOS keeps a FIFO of batches per direction instead: the Nth
+// recvmsg that returns data collects the Nth batch. For a protocol that
+// sends one control message with one buffer -- which is what a
+// compositor's attach_buffer is -- the two are indistinguishable.
+// Recorded as a divergence in docs/stdlib.md.
+
+#include "mm/uaccess.h"
+
+#define SOL_SOCKET_K   1
+#define SCM_RIGHTS_K   1
+#define MSG_CMSG_CLOEXEC_K 0x40000000
+
+// Linux's cmsghdr, x86-64: a size_t length then two ints, and the data
+// follows aligned to 8.
+struct k_cmsghdr {
+    uint64_t cmsg_len;
+    int      cmsg_level;
+    int      cmsg_type;
+};
+
+static uint64_t cmsg_align(uint64_t n) { return (n + 7u) & ~7ull; }
+
+// Take a reference per descriptor named in the control buffer and queue
+// them toward the peer. The COPIES carry their own references, so the
+// sender closing its originals immediately -- the normal thing to do --
+// cannot take them back.
+int64_t unix_scm_send(struct file_descriptor *f, uint64_t control, uint64_t controllen) {
+    struct unix_sock *s = f->priv;
+    if (!s || s->state != U_CONNECTED) { return -ENOTCONN; }
+    if (!control || controllen < sizeof(struct k_cmsghdr)) { return 0; }
+    if (controllen > 1024) { return -EINVAL; }
+
+    uint8_t buf[1024];
+    if (copy_from_user(buf, (const void *)(uintptr_t)control, controllen) > 0) {
+        return -EFAULT;
+    }
+
+    struct k_cmsghdr *c = (struct k_cmsghdr *)buf;
+    if (c->cmsg_len < sizeof(*c) || c->cmsg_len > controllen) { return -EINVAL; }
+    if (c->cmsg_level != SOL_SOCKET_K || c->cmsg_type != SCM_RIGHTS_K) { return -EINVAL; }
+
+    uint64_t payload = c->cmsg_len - sizeof(*c);
+    int n = (int)(payload / sizeof(int));
+    if (n <= 0) { return 0; }
+    if (n > SCM_MAX_FDS) { return -EINVAL; }
+
+    const int *nums = (const int *)(buf + sizeof(*c));
+    struct scm_batch *b = kmalloc(sizeof(struct scm_batch));
+    if (!b) { return -ENOMEM; }
+    b->next = 0;
+    b->n = 0;
+
+    struct process *p = current_proc();
+    for (int i = 0; i < n; i++) {
+        struct file_descriptor *src = fd_table_get(p->fd_table, nums[i]);
+        if (!src || !src->in_use) {
+            for (int k = 0; k < b->n; k++) { file_close(&b->fds[k]); }
+            kfree(b);
+            return -EBADF;
+        }
+        b->fds[b->n] = *src;          // value copy...
+        file_dup(&b->fds[b->n]);      // ...with its own reference
+        b->n++;
+    }
+
+    struct unix_dir *d = s->conn.wr;
+    uint64_t fl = spin_lock_irqsave(&d->lock);
+    if (d->tail) { d->tail->next = b; } else { d->head = b; }
+    d->tail = b;
+    spin_unlock_irqrestore(&d->lock, fl);
+    return 0;
+}
+
+// Install the oldest queued batch into this process's fd table and write
+// the cmsghdr back. The references move; nothing is duplicated again.
+int64_t unix_scm_recv(struct file_descriptor *f, uint64_t control,
+                      uint64_t controllen, uint64_t *out_len, int flags) {
+    (void)flags;                        // MSG_CMSG_CLOEXEC: nothing to set
+    *out_len = 0;
+    struct unix_sock *s = f->priv;
+    if (!s || s->state != U_CONNECTED) { return 0; }
+    if (!control || controllen < sizeof(struct k_cmsghdr)) { return 0; }
+
+    struct unix_dir *d = s->conn.rd;
+    uint64_t fl = spin_lock_irqsave(&d->lock);
+    struct scm_batch *b = d->head;
+    if (b) {
+        d->head = b->next;
+        if (!d->head) { d->tail = 0; }
+    }
+    spin_unlock_irqrestore(&d->lock, fl);
+    if (!b) { return 0; }
+
+    uint64_t need = cmsg_align(sizeof(struct k_cmsghdr)) + (uint64_t)b->n * sizeof(int);
+    if (need > controllen) {
+        // No room to report them. Dropping is the honest outcome -- the
+        // alternative is leaking them silently.
+        for (int i = 0; i < b->n; i++) { file_close(&b->fds[i]); }
+        kfree(b);
+        return -EMSGSIZE;
+    }
+
+    uint8_t out[sizeof(struct k_cmsghdr) + SCM_MAX_FDS * sizeof(int)];
+    struct k_cmsghdr *c = (struct k_cmsghdr *)out;
+    c->cmsg_len   = sizeof(struct k_cmsghdr) + (uint64_t)b->n * sizeof(int);
+    c->cmsg_level = SOL_SOCKET_K;
+    c->cmsg_type  = SCM_RIGHTS_K;
+    int *nums = (int *)(out + sizeof(struct k_cmsghdr));
+
+    struct process *p = current_proc();
+    int installed = 0;
+    for (int i = 0; i < b->n; i++) {
+        int fd = fd_table_alloc(p->fd_table);
+        if (fd < 0) { break; }
+        struct file_descriptor *dst = fd_table_get(p->fd_table, fd);
+        if (!dst) { fd_table_close(p->fd_table, fd); break; }
+        struct file_descriptor keep = *dst;      // in_use flag set by alloc
+        *dst = b->fds[i];
+        dst->in_use = keep.in_use;
+        nums[installed++] = fd;
+    }
+    // Any that did not fit keep their references; releasing them here is
+    // what stops an exhausted fd table from leaking the objects.
+    for (int i = installed; i < b->n; i++) { file_close(&b->fds[i]); }
+    c->cmsg_len = sizeof(struct k_cmsghdr) + (uint64_t)installed * sizeof(int);
+    kfree(b);
+
+    uint64_t bytes = sizeof(struct k_cmsghdr) + (uint64_t)installed * sizeof(int);
+    if (copy_to_user((void *)(uintptr_t)control, out, bytes) > 0) { return -EFAULT; }
+    *out_len = bytes;
+    return 0;
+}
+
+// The data half of sendmsg/recvmsg on a unix socket: gather the iovecs
+// into the ring, or scatter out of it. Kept here rather than reusing
+// socket.c's versions because those route to socket_sendto, which is
+// AF_INET's datagram path.
+#define UNIX_IOV_MAX 8
+
+int64_t unix_sendmsg_data(struct file_descriptor *f, const struct k_msghdr *m) {
+    struct unix_sock *s = f->priv;
+    if (!s || s->state != U_CONNECTED) { return -ENOTCONN; }
+    if (m->msg_iovlen > UNIX_IOV_MAX) { return -EINVAL; }
+    if (m->msg_iovlen == 0) { return 0; }
+
+    struct k_iovec iov[UNIX_IOV_MAX];
+    if (copy_from_user(iov, (const void *)(uintptr_t)m->msg_iov,
+                       m->msg_iovlen * sizeof(struct k_iovec)) > 0) {
+        return -EFAULT;
+    }
+
+    int64_t total = 0;
+    for (uint64_t i = 0; i < m->msg_iovlen; i++) {
+        if (iov[i].iov_len == 0) { continue; }
+        int64_t n = pipe_write_ep(s->conn.wr->ring, f->nonblock,
+                                  (const void *)(uintptr_t)iov[i].iov_base,
+                                  iov[i].iov_len);
+        if (n < 0) { return total ? total : n; }
+        total += n;
+        if ((uint64_t)n < iov[i].iov_len) { break; }
+    }
+    return total;
+}
+
+int64_t unix_recvmsg_data(struct file_descriptor *f, const struct k_msghdr *m) {
+    struct unix_sock *s = f->priv;
+    if (!s || s->state != U_CONNECTED) { return -ENOTCONN; }
+    if (m->msg_iovlen > UNIX_IOV_MAX) { return -EINVAL; }
+    if (m->msg_iovlen == 0) { return 0; }
+
+    struct k_iovec iov[UNIX_IOV_MAX];
+    if (copy_from_user(iov, (const void *)(uintptr_t)m->msg_iov,
+                       m->msg_iovlen * sizeof(struct k_iovec)) > 0) {
+        return -EFAULT;
+    }
+
+    int64_t total = 0;
+    for (uint64_t i = 0; i < m->msg_iovlen; i++) {
+        if (iov[i].iov_len == 0) { continue; }
+        int64_t n = pipe_read_ep(s->conn.rd->ring, f->nonblock,
+                                 (void *)(uintptr_t)iov[i].iov_base, iov[i].iov_len);
+        if (n < 0) { return total ? total : n; }
+        total += n;
+        if ((uint64_t)n < iov[i].iov_len) { break; }   // stream drained
+    }
+    return total;
 }

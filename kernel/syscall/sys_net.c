@@ -121,12 +121,50 @@ int64_t sys_recvfrom(struct syscall_args *a) {
                            (uint32_t *)(uintptr_t)a->frame->r9);
 }
 
+// AF_UNIX carries SCM_RIGHTS; AF_INET has no control-message support at
+// all, so the split happens before socket.c sees the call.
 int64_t sys_sendmsg(struct syscall_args *a) {
+    struct file_descriptor *uf = unix_fd((int)a->a1);
+    if (uf) {
+        struct k_msghdr m;
+        if (copy_from_user(&m, (const void *)(uintptr_t)a->a2, sizeof m) > 0) {
+            return -EFAULT;
+        }
+        // Descriptors go first: a caller that passes fds and no payload
+        // still expects them delivered, and the batch must be queued
+        // before the bytes that "carry" it.
+        if (m.msg_control && m.msg_controllen) {
+            int64_t rc = unix_scm_send(uf, m.msg_control, m.msg_controllen);
+            if (rc < 0) { return rc; }
+        }
+        return unix_sendmsg_data(uf, &m);
+    }
     return socket_sendmsg((int)a->a1, (const struct k_msghdr *)(uintptr_t)a->a2,
                           (int)a->a3);
 }
 
 int64_t sys_recvmsg(struct syscall_args *a) {
+    struct file_descriptor *uf = unix_fd((int)a->a1);
+    if (uf) {
+        struct k_msghdr m;
+        if (copy_from_user(&m, (const void *)(uintptr_t)a->a2, sizeof m) > 0) {
+            return -EFAULT;
+        }
+        int64_t n = unix_recvmsg_data(uf, &m);
+        if (n < 0) { return n; }
+        uint64_t clen = 0;
+        if (m.msg_control && m.msg_controllen) {
+            int64_t rc = unix_scm_recv(uf, m.msg_control, m.msg_controllen,
+                                       &clen, (int)a->a3);
+            if (rc < 0) { return rc; }
+        }
+        // Report how much control data was written, the way Linux does.
+        struct k_msghdr *user = (struct k_msghdr *)(uintptr_t)a->a2;
+        if (copy_to_user(&user->msg_controllen, &clen, sizeof clen) > 0) {
+            return -EFAULT;
+        }
+        return n;
+    }
     return socket_recvmsg((int)a->a1, (struct k_msghdr *)(uintptr_t)a->a2,
                           (int)a->a3);
 }

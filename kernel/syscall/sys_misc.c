@@ -5,6 +5,7 @@
 // user-copy helpers stayed behind in syscall.c.
 
 #include "syscall/syscall_internal.h"
+#include "ipc/memfd.h"
 #include "net/tcp.h"
 #include "mm/pmm.h"
 #include "sync/waitq.h"
@@ -207,6 +208,8 @@ int64_t sys_test_hook(struct syscall_args *a) {
     case TESTHOOK_TCP_FAULT:
         tcp_fault_inject((uint32_t)a->a2, (uint32_t)a->a3);
         return 0;
+    case TESTHOOK_MEMFD_LIVE:
+        return (int64_t)memfd_live_count();
     case TESTHOOK_TCP_RETRANS: {
         uint64_t rt = 0;
         tcp_stats(0, 0, &rt, 0, 0, 0);

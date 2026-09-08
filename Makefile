@@ -38,7 +38,10 @@ ifdef DEBUG_PMMFAIL
 CFLAGS += -DNEOOS_DEBUG_PMMFAIL=$(DEBUG_PMMFAIL)
 endif
 
-ifeq ($(MAKECMDGOALS),test)
+# uxtest joins `test` here because its SCM_RIGHTS leak check reads the
+# live-memfd count through the test hook; without it the check silently
+# compares -ENOSYS against -ENOSYS and proves nothing.
+ifneq ($(filter test uxtest,$(MAKECMDGOALS)),)
 CFLAGS += -DNEOOS_TEST_HOOKS
 endif
 

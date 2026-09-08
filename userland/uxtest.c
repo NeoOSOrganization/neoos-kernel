@@ -29,6 +29,11 @@
 #define SYS_LISTEN     83
 #define SYS_ACCEPT4    84
 
+#define SYS_SENDMSG    89
+#define SYS_RECVMSG    90
+#define SYS_TEST_HOOK  66
+#define TESTHOOK_MEMFD_LIVE 12
+
 #define AF_UNIX        1
 #define SOCK_STREAM    1
 
@@ -276,11 +281,138 @@ static void test_unix_socket(void) {
     printf("[uxtest] unix socket ok\n");
 }
 
+// ----------------------------------------------------------- SCM_RIGHTS
+
+struct iovec  { void *iov_base; uint64_t iov_len; };
+struct msghdr {
+    void    *msg_name;
+    uint32_t msg_namelen, _pad0;
+    struct iovec *msg_iov;
+    uint64_t msg_iovlen;
+    void    *msg_control;
+    uint64_t msg_controllen;
+    uint32_t msg_flags, _pad1;
+};
+struct cmsghdr { uint64_t cmsg_len; int cmsg_level, cmsg_type; };
+
+#define SOL_SOCKET_U 1
+#define SCM_RIGHTS_U 1
+
+static long memfd_live(void) {
+    return neo2(SYS_TEST_HOOK, TESTHOOK_MEMFD_LIVE, 0);
+}
+
+// Connect a pair through the abstract namespace and return both ends.
+static int connected_pair(const char *name, long *cli, long *acc) {
+    struct sockaddr_un a;
+    uint32_t alen = abstract_addr(&a, name);
+    long srv = neo3(SYS_SOCKET, AF_UNIX, SOCK_STREAM, 0);
+    if (srv < 0) { return 0; }
+    if (neo3(SYS_BIND, srv, &a, alen) != 0) { return 0; }
+    if (neo2(SYS_LISTEN, srv, 4) != 0) { return 0; }
+    *cli = neo3(SYS_SOCKET, AF_UNIX, SOCK_STREAM, 0);
+    if (*cli < 0) { return 0; }
+    if (neo3(SYS_CONNECT, *cli, &a, alen) != 0) { return 0; }
+    *acc = neo6(SYS_ACCEPT4, srv, 0, 0, 0, 0, 0);
+    if (*acc < 0) { return 0; }
+    (void)neo1(SYS_CLOSE, srv);
+    return 1;
+}
+
+static void test_scm_rights(void) {
+    long baseline = memfd_live();
+
+    long cli = -1, acc = -1;
+    check(connected_pair("neoos-scm", &cli, &acc), "connected pair");
+    if (cli < 0 || acc < 0) { return; }
+
+    const char *nm = "passed";
+    long mfd = neo3(SYS_MEMFD_CREATE, nm, slen(nm), 0);
+    check(mfd >= 0, "memfd to pass");
+    check(neo3(SYS_FTRUNCATE, mfd, 4096, 0) == 0, "size it");
+    long mine = mfd_map(mfd, 4096, PROT_READ | PROT_WRITE, MAP_SHARED);
+    check(mine > 0, "map it");
+    if (mine <= 0) { return; }
+    ((volatile uint32_t *)mine)[0] = 0x00C0FFEE;
+
+    static char cbuf[sizeof(struct cmsghdr) + 4 * sizeof(int)];
+    struct cmsghdr *c = (struct cmsghdr *)cbuf;
+    c->cmsg_level = SOL_SOCKET_U;
+    c->cmsg_type  = SCM_RIGHTS_U;
+    c->cmsg_len   = sizeof(struct cmsghdr) + sizeof(int);
+    *(int *)(cbuf + sizeof(struct cmsghdr)) = (int)mfd;
+
+    static char payload[1] = { 'x' };
+    struct iovec iov = { payload, 1 };
+    struct msghdr m;
+    for (unsigned i = 0; i < sizeof m; i++) { ((char *)&m)[i] = 0; }
+    m.msg_iov = &iov; m.msg_iovlen = 1;
+    m.msg_control = cbuf; m.msg_controllen = sizeof(struct cmsghdr) + sizeof(int);
+    check(neo3(SYS_SENDMSG, cli, &m, 0) == 1, "sendmsg with SCM_RIGHTS");
+
+    static char rbuf[8];
+    static char rcbuf[sizeof(struct cmsghdr) + 4 * sizeof(int)];
+    struct iovec riov = { rbuf, sizeof(rbuf) };
+    struct msghdr rm;
+    for (unsigned i = 0; i < sizeof rm; i++) { ((char *)&rm)[i] = 0; }
+    rm.msg_iov = &riov; rm.msg_iovlen = 1;
+    rm.msg_control = rcbuf; rm.msg_controllen = sizeof(rcbuf);
+    check(neo3(SYS_RECVMSG, acc, &rm, 0) == 1, "recvmsg");
+
+    struct cmsghdr *rc = (struct cmsghdr *)rcbuf;
+    check(rc->cmsg_level == SOL_SOCKET_U && rc->cmsg_type == SCM_RIGHTS_U,
+          "the cmsg came back");
+    int got = *(int *)(rcbuf + sizeof(struct cmsghdr));
+    check(got >= 0 && got != (int)mfd, "a NEW descriptor, not the same number");
+
+    // It must name the same OBJECT, not a copy.
+    long theirs = mfd_map(got, 4096, PROT_READ | PROT_WRITE, MAP_SHARED);
+    check(theirs > 0, "map the received fd");
+    if (theirs > 0) {
+        check(((volatile uint32_t *)theirs)[0] == 0x00C0FFEE, "same object, not a copy");
+        ((volatile uint32_t *)theirs)[1] = 0x0000BEEF;
+        check(((volatile uint32_t *)mine)[1] == 0x0000BEEF, "writes go both ways");
+    }
+
+    // Closing the sender's descriptor must not invalidate the receiver's.
+    (void)neo1(SYS_CLOSE, mfd);
+    if (theirs > 0) {
+        check(((volatile uint32_t *)theirs)[0] == 0x00C0FFEE, "survives the sender's close");
+    }
+
+    (void)neo2(SYS_MUNMAP, mine, 4096);
+    if (theirs > 0) { (void)neo2(SYS_MUNMAP, theirs, 4096); }
+    (void)neo1(SYS_CLOSE, got);
+    (void)neo1(SYS_CLOSE, cli);
+    (void)neo1(SYS_CLOSE, acc);
+
+    // THE LEAK CASE: a socket closed with an undelivered message. If the
+    // in-flight reference is not released, the object never goes away.
+    long c2 = -1, a2 = -1;
+    check(connected_pair("neoos-scm2", &c2, &a2), "second pair");
+    const char *ln = "leak";
+    long leak = neo3(SYS_MEMFD_CREATE, ln, slen(ln), 0);
+    check(leak >= 0, "memfd to strand");
+    *(int *)(cbuf + sizeof(struct cmsghdr)) = (int)leak;
+    check(neo3(SYS_SENDMSG, c2, &m, 0) == 1, "sendmsg that is never received");
+    (void)neo1(SYS_CLOSE, c2);
+    (void)neo1(SYS_CLOSE, a2);        // never recvmsg'd
+    (void)neo1(SYS_CLOSE, leak);
+
+    long after = memfd_live();
+    check(after == baseline, "no memfd leaked by an undelivered SCM_RIGHTS");
+    if (after != baseline) {
+        printf("[uxtest]   baseline=%d after=%d\n", (int)baseline, (int)after);
+    }
+    printf("[uxtest] scm_rights ok\n");
+}
+
 int main(void) {
     printf("[uxtest] start\n");
     test_ftruncate();
     test_memfd();
     test_unix_socket();
+    test_scm_rights();
     if (failures) {
         printf("[uxtest] %d FAILURES\n", failures);
         return 1;

@@ -958,6 +958,40 @@ cases. A listening socket reports `POLLIN` when a connection is waiting.
 - **No `SO_PEERCRED`**, no credential passing, and `getpeername` on an
   `AF_UNIX` socket is not routed.
 
+## `SCM_RIGHTS` — passing descriptors over AF_UNIX (GUI stack G3)
+
+`sendmsg`/`recvmsg` on an `AF_UNIX` socket carry file descriptors in
+`msg_control`, using Linux's `cmsghdr` layout (a `size_t` length then
+two `int`s, data 8-byte aligned), `SOL_SOCKET` = 1, `SCM_RIGHTS` = 1.
+
+This is how a compositor client hands over a surface: it creates a
+`memfd`, draws into it, and passes the **descriptor**. The receiver gets
+a new descriptor number naming the *same object* — not a copy — and the
+sender may close its original immediately.
+
+**DIVERGENCES:**
+
+- **Descriptors are queued per direction, not tied to a byte position.**
+  Linux associates a control message with a place in the stream; NeoOS
+  keeps a FIFO of batches, and the Nth `recvmsg` that supplies a control
+  buffer collects the Nth batch. For a protocol that sends one control
+  message per logical message — which is what surface attachment is —
+  the two are indistinguishable. A protocol that interleaves them with
+  byte offsets would notice.
+- **8 descriptors per `sendmsg`**, and one `SCM_RIGHTS` control message
+  per call. More is `-EINVAL`. `msg_controllen` above 1024 is `-EINVAL`.
+- **A control buffer too small to hold the batch loses it**: `recvmsg`
+  returns `-EMSGSIZE` and the descriptors are closed. Dropping them is
+  deliberate — the alternative is leaking objects no one can name.
+- **`MSG_CMSG_CLOEXEC` is accepted and inert**, like every other
+  close-on-exec flag on NeoOS.
+- **No garbage collector for reference cycles.** Linux runs one, because
+  unix sockets that hold descriptors for each other can form a cycle no
+  refcount will ever break. NeoOS does not: a deliberately constructed
+  cycle leaks. Ordinary use — including a socket closed with messages
+  still undelivered — does not, and `uxtest` checks that case explicitly
+  against the live-memfd count.
+
 ## socketpair
 
 ```c

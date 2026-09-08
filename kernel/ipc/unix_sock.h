@@ -33,6 +33,17 @@ int64_t unix_accept4(struct file_descriptor *f, struct k_sockaddr *addr,
                      uint32_t *len, int flags);
 int64_t unix_connect(struct file_descriptor *f, const struct k_sockaddr *addr, uint32_t len);
 
+// SCM_RIGHTS. send takes a reference per descriptor and queues the
+// batch toward the peer; recv installs the oldest batch and writes the
+// cmsghdr back, moving the references rather than duplicating them.
+int64_t unix_scm_send(struct file_descriptor *f, uint64_t control, uint64_t controllen);
+int64_t unix_scm_recv(struct file_descriptor *f, uint64_t control,
+                      uint64_t controllen, uint64_t *out_len, int flags);
+
+struct k_msghdr;
+int64_t unix_sendmsg_data(struct file_descriptor *f, const struct k_msghdr *m);
+int64_t unix_recvmsg_data(struct file_descriptor *f, const struct k_msghdr *m);
+
 void unix_sock_init(void);
 void unix_sock_selftest(void);
 
