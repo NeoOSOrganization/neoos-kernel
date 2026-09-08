@@ -569,6 +569,7 @@ CORE_REQUIRED_MARKERS := \
 	"[banner]" \
 	"[rtc] selftest passed" \
 	"[keyboard] decode selftest passed" \
+	"[mouse] decode selftest passed" \
 	"[input] selftest passed" \
 	"[input] blocking-read selftest passed" \
 	"[ac97] selftest passed" \

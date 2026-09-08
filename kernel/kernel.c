@@ -21,6 +21,7 @@
 #include "drivers/char/rtc.h"
 #include "tty/tty.h"
 #include "drivers/input/keyboard.h"
+#include "drivers/input/mouse.h"
 #include "drivers/input/input.h"
 #include "mm/pmm.h"
 #include "mm/paging.h"
@@ -174,6 +175,7 @@ void kmain(void *multiboot_info) {
     vt_selftest();
     pty_init();
     keyboard_decode_selftest();
+    mouse_decode_selftest();
     rtc_init();
     rtc_selftest();
 
