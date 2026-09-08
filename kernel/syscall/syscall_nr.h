@@ -348,7 +348,11 @@
 // ever had. 135 is reserved for memfd_create in the next commit.
 #define SYS_FTRUNCATE       134
 
+// Anonymous shared memory, addressed only by a descriptor. The surface
+// buffers a compositor client hands to the window manager.
+#define SYS_MEMFD_CREATE    135
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX              135
+#define SYS_MAX              136
 
 #endif

@@ -25,6 +25,7 @@
 #include "arch/msr.h"
 #include "smp/smp.h"
 #include "net/socket.h"
+#include "ipc/memfd.h"
 
 int64_t sys_mmap(struct syscall_args *a) {
     // mmap takes SIX arguments. A handler receives only a1-a4, but
@@ -209,4 +210,12 @@ int64_t sys_getrandom(struct syscall_args *a) {
         done += chunk;
     }
     return (int64_t)len;
+}
+
+// memfd_create(name, name_len, flags). The name is diagnostic only --
+// nothing is created in any filesystem -- but it carries a length like
+// every other path-ish argument NeoOS takes, so the kernel never walks
+// a user pointer looking for a NUL.
+int64_t sys_memfd_create(struct syscall_args *a) {
+    return memfd_create_fd((const char *)(uintptr_t)a->a1, a->a2, (unsigned)a->a3);
 }

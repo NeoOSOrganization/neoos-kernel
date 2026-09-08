@@ -69,6 +69,12 @@ int64_t vma_mremap(struct process *p, uint64_t old_addr, uint64_t old_size,
 // (every page mapped now), backed by device-owned physical frames.
 // prot must not include PROT_EXEC (W^X). Returns the user address, or a
 // negative errno.
+// Map a list of individually-allocated frames into p, shared and
+// PAGE_NOFREE (the frames belong to the object, not the process). Used
+// by memfd, whose pages are never contiguous.
+int64_t vma_map_frames(struct process *p, const uint64_t *frames,
+                       uint64_t n, uint32_t prot);
+
 int64_t vma_map_phys(struct process *p, uint64_t phys, uint64_t len, uint32_t prot);
 
 // Populates one page for a not-present fault at `addr`. Returns 1 if a

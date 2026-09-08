@@ -358,6 +358,49 @@ int vma_register_image_segment(struct process *p, uint64_t start, uint64_t end,
     return rc;
 }
 
+// Map a LIST of frames, which is what a memfd needs: its pages are
+// allocated one at a time and are not contiguous, so vma_map_phys's
+// single base address cannot describe them.
+//
+// The frames belong to the object, not to this process -- PAGE_NOFREE,
+// so unmapping or exiting drops the mapping without freeing anything.
+// That is what lets two processes map the same memfd and both go away
+// without the pages disappearing under the survivor.
+static int64_t vma_map_frames_locked(struct process *p, const uint64_t *frames,
+                                     uint64_t n, uint32_t prot) {
+    if (n == 0) { return -EINVAL; }
+    if (prot & PROT_EXEC) { return -EINVAL; }          // W^X
+    uint64_t len = n * PMM_FRAME_SIZE;
+    uint64_t addr = p->mmap_next;
+    if (addr + len > MMAP_LIMIT || addr + len < addr) { return -ENOMEM; }
+    if (!vma_insert(p, addr, addr + len, prot, MAP_SHARED | VMA_PHYS)) { return -ENOMEM; }
+    p->mmap_next = addr + len;
+
+    uint64_t pf = PAGE_USER | PAGE_NO_EXECUTE | PAGE_NOFREE;
+    if (prot & PROT_WRITE) { pf |= PAGE_WRITABLE; }
+    uint64_t *pml4 = (uint64_t *)phys_to_virt(p->pml4_phys);
+    for (uint64_t i = 0; i < n; i++) {
+        if (!frames[i] ||
+            paging_map_into(pml4, addr + i * PMM_FRAME_SIZE, frames[i], pf) != 0) {
+            for (uint64_t b = 0; b < i; b++) {
+                paging_unmap_from(pml4, addr + b * PMM_FRAME_SIZE, 0);
+            }
+            vma_munmap_locked(p, addr, len);
+            return -ENOMEM;
+        }
+    }
+    return (int64_t)addr;
+}
+
+int64_t vma_map_frames(struct process *p, const uint64_t *frames,
+                       uint64_t n, uint32_t prot) {
+    uint64_t f = spin_lock_irqsave(&p->mm_lock);
+    int64_t rc = vma_map_frames_locked(p, frames, n, prot);
+    spin_unlock_irqrestore(&p->mm_lock, f);
+    if (rc < 0) { vma_tlb_settle(p); }
+    return rc;
+}
+
 int64_t vma_map_phys(struct process *p, uint64_t phys, uint64_t len, uint32_t prot) {
     uint64_t f = spin_lock_irqsave(&p->mm_lock);
     int64_t rc = vma_map_phys_locked(p, phys, len, prot);

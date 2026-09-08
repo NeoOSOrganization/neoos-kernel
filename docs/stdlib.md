@@ -847,6 +847,45 @@ sparse file look truncated at its first unwritten page. Holes now read
 as zeros, which is what POSIX requires and what a file grown by
 `ftruncate` is made entirely of.
 
+## `memfd_create` (GUI stack G3)
+
+```c
+#include <sys/mman.h>
+int memfd_create(const char *name, unsigned int flags);
+```
+
+An anonymous shared memory object addressed only by a file descriptor.
+Nothing is created in any filesystem, so a crash leaves no stale entry
+and an unrelated process cannot open another application's buffer.
+
+This is the compositor's surface primitive: a client creates one, sizes
+it with `ftruncate`, maps it `MAP_SHARED`, draws into it, and passes the
+**descriptor** to the window manager, which maps the same object and
+composites from it.
+
+`MFD_CLOEXEC` (1) and `MFD_ALLOW_SEALING` (2) are Linux's values.
+
+**DIVERGENCES:**
+
+- **`MAP_SHARED` only.** `mmap` of a memfd with `MAP_PRIVATE` returns
+  `-EINVAL` rather than silently sharing. Copy-on-write would need a
+  fault path these pages do not have, and a private view of a surface
+  is not a thing any caller wants.
+- **Memory is committed by `ftruncate`, not on first touch.** There is
+  no demand paging for a shared object — the whole frame list is mapped
+  at `mmap` time — so sizing a memfd is the moment its pages are
+  allocated and zeroed. Sizing one to 32 MiB costs 32 MiB immediately.
+  The ceiling is 32 MiB per object.
+- **Shrinking a shared object is refused** with `-EBUSY` once more than
+  one reference exists. The frames are mapped `PAGE_NOFREE`, so freeing
+  them under a live mapping would hand pages back to the allocator
+  while another process still writes to them.
+- **`MFD_ALLOW_SEALING` is stored but `F_ADD_SEALS` is not
+  implemented.** The flag is accepted so callers that always pass it
+  work; there is no way to actually seal.
+- **`MFD_CLOEXEC` is accepted and inert**, like `pipe2`'s `O_CLOEXEC` —
+  NeoOS has no close-on-exec machinery.
+
 ## `statx`, `fsync`/`fdatasync`, `fallocate`, `access`/`faccessat` (MSC-3)
 
 - **`statx`** fills `STATX_BASIC_STATS` from the same vnode data as

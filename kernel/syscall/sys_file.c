@@ -761,6 +761,11 @@ int64_t sys_ftruncate(struct syscall_args *a) {
     int64_t len = (int64_t)a->a2;
     if (len < 0) { return -EINVAL; }
 
+    // An object with a length of its own (memfd) answers first; only a
+    // vnode-backed file falls through to its filesystem.
+    int64_t orc = file_truncate(f, (uint64_t)len);
+    if (orc != -EINVAL) { return orc; }
+
     if (!f->vn) { return -EINVAL; }          // pipe, socket, tty: no size
     if (f->vn->type == VNODE_DIR) { return -EISDIR; }
     if (!f->vn->mount || !f->vn->mount->ops->truncate_to) { return -EINVAL; }

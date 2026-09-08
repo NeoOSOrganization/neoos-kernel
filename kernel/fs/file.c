@@ -251,6 +251,12 @@ int64_t file_mmap(struct file_descriptor *f, struct mmap_req *req) {
     return o->mmap(f, req);
 }
 
+int64_t file_truncate(struct file_descriptor *f, uint64_t len) {
+    if (!f) { return -EBADF; }
+    if (!f->ops || !f->ops->truncate) { return -EINVAL; }
+    return f->ops->truncate(f, len);
+}
+
 void file_dup(struct file_descriptor *f) {
     const struct file_ops *o = ops_of(f);
     if (o) { o->dup(f); }

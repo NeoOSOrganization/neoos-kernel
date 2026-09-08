@@ -19,7 +19,16 @@
 #define SYS_UNLINK    10
 #define SYS_LSEEK     11
 #define SYS_FSTAT     57
+#define SYS_MMAP       37
+#define SYS_MUNMAP     38
 #define SYS_FTRUNCATE 134
+#define SYS_MEMFD_CREATE 135
+
+#define PROT_READ    1
+#define PROT_WRITE   2
+#define MAP_SHARED   0x01
+#define MAP_PRIVATE  0x02
+#define MAP_FAILED_MIN (-4095L)
 
 static long neo6(long n, long a, long b, long c, long d, long e, long f) {
     long r;
@@ -118,9 +127,75 @@ static void test_ftruncate(void) {
     printf("[uxtest] ftruncate ok\n");
 }
 
+// ------------------------------------------------------- memfd_create
+
+static long mfd_map(long fd, long len, long prot, long flags) {
+    return neo6(SYS_MMAP, 0, len, prot, flags, fd, 0);
+}
+
+static void test_memfd(void) {
+    const char *nm = "surface";
+    long fd = neo3(SYS_MEMFD_CREATE, nm, slen(nm), 0);
+    check(fd >= 0, "memfd_create");
+    if (fd < 0) { return; }
+
+    check(neo3(SYS_FTRUNCATE, fd, 4096 * 4, 0) == 0, "size the memfd");
+
+    long a = mfd_map(fd, 4096 * 4, PROT_READ | PROT_WRITE, MAP_SHARED);
+    check(a > 0, "first mapping");
+    long b = mfd_map(fd, 4096 * 4, PROT_READ | PROT_WRITE, MAP_SHARED);
+    check(b > 0, "second mapping");
+    check(a != b, "distinct addresses");
+    if (a <= 0 || b <= 0) { (void)neo1(SYS_CLOSE, fd); return; }
+
+    volatile uint32_t *pa = (volatile uint32_t *)a;
+    volatile uint32_t *pb = (volatile uint32_t *)b;
+
+    // The whole point: two mappings of one object share frames.
+    pa[0] = 0xDEADBEEF;
+    pa[4095] = 0x12345678;          // page 3, so it is not only page 0
+    check(pb[0] == 0xDEADBEEF, "write visible through the other mapping");
+    check(pb[4095] == 0x12345678, "and not only on the first page");
+    pb[1] = 0xFEEDFACE;
+    check(pa[1] == 0xFEEDFACE, "and in the other direction");
+
+    // A fresh object is zeroed, never a recycled page's contents.
+    const char *n2 = "fresh";
+    long fd2 = neo3(SYS_MEMFD_CREATE, n2, slen(n2), 0);
+    check(fd2 >= 0, "second memfd");
+    check(neo3(SYS_FTRUNCATE, fd2, 4096, 0) == 0, "size it");
+    long c = mfd_map(fd2, 4096, PROT_READ | PROT_WRITE, MAP_SHARED);
+    check(c > 0, "map the fresh one");
+    int zeroed = 1;
+    if (c > 0) {
+        volatile uint32_t *pc = (volatile uint32_t *)c;
+        for (int i = 0; i < 1024; i++) { if (pc[i] != 0) { zeroed = 0; break; } }
+    }
+    check(zeroed, "a fresh memfd is zeroed");
+
+    // MAP_PRIVATE is refused rather than silently shared: there is no
+    // copy-on-write path for these pages. Documented divergence.
+    long pv = mfd_map(fd, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE);
+    check(pv == -22, "MAP_PRIVATE is -EINVAL");
+
+    // read()/write() see the same bytes as the mapping.
+    static uint32_t word;
+    check(neo3(SYS_LSEEK, fd, 0, 0) == 0, "rewind the memfd");
+    check(neo3(SYS_READ, fd, &word, 4) == 4, "read the memfd");
+    check(word == 0xDEADBEEF, "read agrees with the mapping");
+
+    (void)neo2(SYS_MUNMAP, a, 4096 * 4);
+    (void)neo2(SYS_MUNMAP, b, 4096 * 4);
+    if (c > 0) { (void)neo2(SYS_MUNMAP, c, 4096); }
+    (void)neo1(SYS_CLOSE, fd);
+    (void)neo1(SYS_CLOSE, fd2);
+    printf("[uxtest] memfd ok\n");
+}
+
 int main(void) {
     printf("[uxtest] start\n");
     test_ftruncate();
+    test_memfd();
     if (failures) {
         printf("[uxtest] %d FAILURES\n", failures);
         return 1;

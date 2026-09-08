@@ -80,6 +80,11 @@ struct file_ops {
     // /dev/fb0 in M1a. file_mmap() returns -ENODEV when it is null.
     int64_t (*mmap)(struct file_descriptor *f, struct mmap_req *req);
 
+    // Optional (nullable). An object that has a length of its own,
+    // settable without a vnode -- memfd is the only one. When it is
+    // null, ftruncate falls back to the vnode's filesystem.
+    int64_t (*truncate)(struct file_descriptor *f, uint64_t len);
+
     // Reference counting, called by the fd table rather than by the
     // syscall layer. `dup` is called once per new fd that comes to
     // share the object (fork); `close` once per fd that stops. The
@@ -107,6 +112,9 @@ int     file_poll(struct file_descriptor *f, int events);
 // returns 0 if this object has no counter to offer. See file_ops.
 int     file_ready_seq(struct file_descriptor *f, uint64_t *out);
 int64_t file_mmap(struct file_descriptor *f, struct mmap_req *req);
+// Returns -EINVAL when this object has no length of its own; the
+// caller then tries the vnode path.
+int64_t file_truncate(struct file_descriptor *f, uint64_t len);
 void    file_dup(struct file_descriptor *f);
 void    file_close(struct file_descriptor *f);
 
