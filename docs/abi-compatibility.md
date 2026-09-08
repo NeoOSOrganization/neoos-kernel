@@ -1251,3 +1251,39 @@ EPOLLTCP_CONC=8` (the level-triggered oracle, unchanged), and the
   advanced-scheduler roadmap (SCH-1 EEVDF `cfs_rq`, SCH-4 `dl_rq`) and
   a future timer wheel build on it -- see
   `docs/superpowers/specs/2026-09-07-advanced-scheduler-design.md`.
+
+## GUI stack (G1-G6, 2026-09-09)
+
+### Newly implemented
+
+| Linux facility | state on NeoOS |
+|---|---|
+| `ftruncate` | ramfs only; every other filesystem `-EINVAL`. No `truncate(path,...)`. |
+| `memfd_create` | `MAP_SHARED` mappings only; memory committed by `ftruncate`, not on fault; `MFD_ALLOW_SEALING` stored but `F_ADD_SEALS` absent. |
+| `AF_UNIX` `socket`/`bind`/`listen`/`accept4`/`connect` | abstract namespace only; `SOCK_STREAM` only; no `SO_PEERCRED`. |
+| `SCM_RIGHTS` | per-direction FIFO rather than tied to a stream position; 8 fds per message; no cycle GC. |
+| `KDSETMODE`/`KDGETMODE` | per VT, restored by the kernel when the claiming fd is released. |
+| `/dev/input/event1` | PS/2 mouse: `EV_REL` (X, Y, wheel) and `EV_KEY` (left, right, middle). |
+| Blocking `read` on evdev | now actually blocks; previously `-EAGAIN` for a blocking fd. |
+
+### What a ported application would still hit
+
+- **No pathname `AF_UNIX` sockets.** Most Linux software binds a path,
+  not an abstract name. This is the largest single gap in the new work.
+- **No dynamic linker.** `PT_INTERP` and `ET_DYN` are unimplemented, so
+  every binary is static and `dlopen` does not exist. This is why the
+  C# application links LVGL through NativeAOT's `DirectPInvoke` rather
+  than a runtime-resolved `DllImport`.
+- **Three syscalls the .NET runtime probes at startup and tolerates**:
+  `getrlimit` (97), `prctl` (157) and `prlimit64` (302) report
+  `[shim] ENOSYS`. The hello-world application runs correctly with all
+  three failing; `prctl` in particular is mapped in the shim source and
+  still reports, which is unexplained and worth a look if anything ever
+  depends on it.
+- **No `VT_SETMODE` process-mode handshake.** An application is never
+  signalled that it lost the screen; the kernel simply refuses its
+  framebuffer writes with `-EBUSY`.
+- **No `EVIOCGBIT(EV_KEY)` capability set.** It reports the keys
+  currently held down rather than the keys the device can report, so a
+  program using it to classify a device sees an empty bitmap from an
+  idle keyboard.

@@ -39,9 +39,11 @@ becomes a C# program. No new language runtime, no engine build.
 ## What is deliberately not being done
 
 - **No Flutter, no Dart, no Skia.** The engine build is off the plan.
-- **No Nim.** An earlier draft made the compositor Nim and Nim a
-  first-class NeoOS language. .NET is already first-class; Nim would
-  have been a second runtime port for no gain here.
+- **No Nim, and no C# in the compositor.** An earlier draft made the
+  compositor Nim, then C#. It is C: the process that owns the screen
+  for the whole machine should not carry a garbage collector, and C
+  keeps a managed runtime off the display path entirely. C# is the
+  application language, which is where the original request put it.
 - **No Wayland.** Its protocol is enormous and none of its ecosystem is
   reachable from NeoOS anyway. The compositor protocol is NeoOS's own,
   small, and documented in `docs/stdlib.md` as an extension.
@@ -192,41 +194,36 @@ cmsg_level; int cmsg_type;` then data, 8-byte aligned), `SOL_SOCKET` =
   of unix sockets holding references to each other. NeoOS will not. A
   deliberately constructed cycle leaks; ordinary use does not.
 
-### G4 -- `neoos-wm`, the compositor
+### G4 -- `neoos-wm`, the compositor -- IN C
 
-A C# NativeAOT program. Owns the screen, composites client surfaces,
-routes input.
+**Revised 2026-09-09, at the user's direction: the compositor is
+written in C, not C#.** The reasoning is sound and worth keeping: this
+is the process that holds the screen for the whole machine and must not
+stall, so it should not carry a garbage collector or a managed runtime.
+C# stays where it belongs, on the application side. It also removes
+NativeAOT from the compositor's critical path entirely.
 
-- Claims the framebuffer via G1, maps `/dev/fb0`, reads `event0` and
-  `event1` via G2, listens on an abstract AF_UNIX address via G3.
-- Maintains a window stack, draws simple decorations and a cursor, and
-  blits only damaged regions -- damage tracking is not an optimisation
-  here, it is what makes software compositing viable at 1280x800.
-- No LVGL. A compositor needs no widget set, and keeping LVGL out of it
-  keeps LVGL purely the *application* toolkit.
+- Claims the framebuffer with `KDSETMODE`/`KD_GRAPHICS` (G1), maps
+  `/dev/fb0`, reads `event0` and `event1` (G2), listens on an abstract
+  AF_UNIX address (G3).
+- Maintains a window stack, draws a title bar, border and cursor, and
+  composites client content straight out of the clients' own memfd
+  pages.
+- No widget toolkit and no text renderer. Anything inside a window is
+  the application's business.
 
-**Protocol.** Small, fixed-size, little-endian binary messages over the
-unix socket. Buffers travel as memfds over `SCM_RIGHTS`.
+**Protocol.** Fixed-size little-endian messages over the unix socket,
+buffers passed as memfds over `SCM_RIGHTS`. Defined once in
+`shared/wmproto.h` and shared verbatim by the compositor, the C client
+library, and the C# bindings.
 
-- Client to server: `Hello(version)`, `CreateSurface(id, w, h)`,
-  `AttachBuffer(id, fd, stride, format)`, `Damage(id, x, y, w, h)`,
-  `Commit(id)`, `SetTitle(id, utf8)`, `DestroySurface(id)`.
-- Server to client: `Configure(id, w, h)`, `PointerMotion(x, y)`,
-  `PointerButton(button, state)`, `Key(keycode, state)`,
-  `Focus(id, bool)`, `Close(id)`.
-- Pixel format is 32bpp `XRGB8888`, matching `/dev/fb0`: opaque
-  surfaces, no alpha channel, no blending in the compositor. If
-  translucency is wanted later it arrives as a second format,
-  `ARGB8888` premultiplied, negotiated in `AttachBuffer`.
+Per CLAUDE.md this is a NeoOS-native feature with no POSIX analogue, so
+it needs a client library (`userland/wmclient.c`) and a
+`docs/stdlib.md` entry.
 
-**Per CLAUDE.md**, this is a NeoOS-native feature with no POSIX
-analogue, so it needs a `lib/` wrapper -- a C client library for
-non-C# clients alongside the C# one -- and a `docs/stdlib.md` entry.
-
-First client is a trivial C# program that fills a rectangle. It proves
+The first client is a C program that fills a rectangle: it proves
 ownership, the protocol, buffer sharing and input routing with zero
-UI-toolkit risk, and it stays in the tree as the compositor's smoke
-test.
+UI-toolkit risk, and stays in the tree as the compositor's smoke test.
 
 ### G5 -- `neoos-lvgl` and its C# bindings
 

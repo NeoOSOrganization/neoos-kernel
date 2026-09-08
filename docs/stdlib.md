@@ -939,6 +939,11 @@ The byte stream is two of the kernel's pipe rings cross-wired, so
 `poll`, `epoll` and edge-triggered re-arming all work with no special
 cases. A listening socket reports `POLLIN` when a connection is waiting.
 
+**Library note.** `libneoos`'s `<sys/socket.h>` does not export
+`AF_UNIX` yet; in-tree users define it themselves (its value is 1, as on
+Linux). musl exports it normally, which is what the C# application
+uses.
+
 **DIVERGENCES:**
 
 - **Abstract namespace only.** An address whose `sun_path[0]` is `'\0'`
@@ -991,6 +996,57 @@ sender may close its original immediately.
   cycle leaks. Ordinary use — including a socket closed with messages
   still undelivered — does not, and `uxtest` checks that case explicitly
   against the live-memfd count.
+
+## The window system: `neoos-wm` and `wmclient` (GUI stack G4-G6)
+
+A NeoOS extension with no POSIX analogue, so it gets a real library
+rather than leaving callers to hand-roll a wire protocol:
+`userland/wmclient.h`.
+
+```c
+struct wm_conn *c = wm_connect();
+int32_t id = wm_create_window(c, 480, 240, "Hello");
+uint32_t *px = wm_pixels(c);          /* XRGB8888, wm_stride_px() wide */
+/* ...draw... */
+wm_damage(c, 0, 0, 480, 240);
+wm_commit(c);
+```
+
+`wm_create_window` creates a `memfd`, sizes it, maps it, and passes the
+**descriptor** to the compositor over `SCM_RIGHTS`, so the compositor
+maps the same physical pages the application draws into. A commit costs
+a copy of the damaged region; no pixel data crosses the socket.
+
+Events arrive through `wm_poll_event`, which never blocks: pointer
+motion (surface-relative), pointer buttons, keys, focus changes, and
+configure. Keycodes and button codes are Linux's evdev values, because
+they come straight from `/dev/input/event*`.
+
+The protocol itself is in `shared/wmproto.h`: an 8-byte header
+(`type`, `length`, `surface_id`) and a fixed body per type, all
+little-endian. Fixed sizes are deliberate — a reader never parses a
+length it has not validated.
+
+**Rules an application must follow:**
+
+- **Do not open `/dev/fb0`.** The compositor owns the screen; the
+  kernel refuses framebuffer writes from a process that does not own
+  the display anyway (`-EBUSY`, see the `/dev/fb0` section above).
+- **Do not read `/dev/input/*`.** The compositor owns input and routes
+  it by focus; a client reading the devices directly would receive
+  events meant for whatever window is actually focused.
+
+**Limits and divergences:**
+
+- 8 clients, one surface each. `wm_create_window` twice on one
+  connection replaces the first surface's geometry.
+- Windows are placed by the compositor in a cascade. There is no move,
+  resize, minimise, or close button, and no keyboard focus cycling —
+  focus follows a click.
+- `WM_DAMAGE` is recorded but not yet used to bound the repaint: the
+  compositor redraws whole windows. The protocol already carries the
+  rectangle, so this is an optimisation, not a protocol change.
+- `XRGB8888` only: opaque surfaces, no alpha, no blending.
 
 ## socketpair
 
