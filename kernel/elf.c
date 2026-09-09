@@ -32,6 +32,7 @@ struct elf64_phdr {
 } __attribute__((packed));
 
 #define ELF_PT_LOAD 1
+#define ELF_PT_INTERP 3
 #define ELF_PT_TLS  7
 #define ELF_PF_X    1
 #define ELF_PF_W    2
@@ -68,6 +69,14 @@ static int is_valid_image(const struct elf64_header *hdr, int *is_nox) {
 
 int elf_load(const uint8_t *data, uint32_t size, uint64_t *pml4,
              struct elf_info *out) {
+    return elf_load_at(data, size, pml4, 0, out);
+}
+
+// `base` is added to every p_vaddr. An ET_EXEC image is loaded where it
+// asks (base 0); an ET_DYN image -- the dynamic linker, a PIE -- is
+// position-independent and goes wherever the caller decides.
+int elf_load_at(const uint8_t *data, uint32_t size, uint64_t *pml4,
+                uint64_t base, struct elf_info *out) {
     for (unsigned i = 0; i < sizeof(*out); i++) { ((uint8_t *)out)[i] = 0; }
     if (size < sizeof(struct elf64_header)) {
         serial_write_string("[elf] load FAILED: image too small\n");
@@ -89,13 +98,33 @@ int elf_load(const uint8_t *data, uint32_t size, uint64_t *pml4,
     for (uint16_t i = 0; i < hdr->e_phnum; i++) {
         const struct elf64_phdr *ph =
             (const struct elf64_phdr *)(data + hdr->e_phoff + (uint64_t)i * hdr->e_phentsize);
+        if (ph->p_type == ELF_PT_INTERP) {
+            // The dynamic linker this image wants. A path that does not
+            // fit must fail loudly: truncating it would name a
+            // different file, and loading the wrong interpreter is far
+            // worse than refusing to load at all.
+            if (ph->p_filesz == 0 || ph->p_filesz > sizeof(out->interp)) {
+                serial_write_string("[elf] load FAILED: PT_INTERP path length\n");
+                return 0;
+            }
+            if (ph->p_offset + ph->p_filesz > size) {
+                serial_write_string("[elf] load FAILED: PT_INTERP outside the image\n");
+                return 0;
+            }
+            for (uint64_t k = 0; k < ph->p_filesz; k++) {
+                out->interp[k] = (char)data[ph->p_offset + k];
+            }
+            out->interp[ph->p_filesz - 1] = 0;   // it is NUL-terminated in-file
+            out->has_interp = 1;
+            continue;
+        }
         if (ph->p_type == ELF_PT_TLS) {
             // Recorded, never mapped. A PT_TLS segment is a TEMPLATE:
             // its bytes live inside some PT_LOAD segment, and each
             // thread gets its own copy. Mapping it as if it were data
             // would give every thread the same storage, which is the
             // opposite of what it is for.
-            out->tls_vaddr  = ph->p_vaddr;
+            out->tls_vaddr  = ph->p_vaddr + base;
             out->tls_filesz = ph->p_filesz;
             out->tls_memsz  = ph->p_memsz;
             out->tls_align  = ph->p_align ? ph->p_align : 1;
@@ -113,7 +142,7 @@ int elf_load(const uint8_t *data, uint32_t size, uint64_t *pml4,
         // omits AT_PHDR rather than pointing at nothing.
         if (hdr->e_phoff >= ph->p_offset &&
             hdr->e_phoff <  ph->p_offset + ph->p_filesz) {
-            out->phdr = ph->p_vaddr + (hdr->e_phoff - ph->p_offset);
+            out->phdr = ph->p_vaddr + base + (hdr->e_phoff - ph->p_offset);
         }
 
         // W^X: a segment that is both writable and executable in the
@@ -149,8 +178,8 @@ int elf_load(const uint8_t *data, uint32_t size, uint64_t *pml4,
         if (ph->p_flags & ELF_PF_W)    { flags |= PAGE_WRITABLE; }
         if (!(ph->p_flags & ELF_PF_X)) { flags |= PAGE_NO_EXECUTE; }
 
-        uint64_t seg_start = ph->p_vaddr & ~(uint64_t)0xFFF;
-        uint64_t seg_end = (ph->p_vaddr + ph->p_memsz + 0xFFF) & ~(uint64_t)0xFFF;
+        uint64_t seg_start = (ph->p_vaddr + base) & ~(uint64_t)0xFFF;
+        uint64_t seg_end = (ph->p_vaddr + base + ph->p_memsz + 0xFFF) & ~(uint64_t)0xFFF;
 
         for (uint64_t page_addr = seg_start; page_addr < seg_end; page_addr += 4096) {
             uint64_t frame_phys = pmm_alloc(0);
@@ -168,11 +197,12 @@ int elf_load(const uint8_t *data, uint32_t size, uint64_t *pml4,
             // [p_vaddr, p_vaddr+p_filesz) -- the rest (pure .bss, or
             // the tail of a page beyond filesz) stays zeroed above.
             uint64_t page_end = page_addr + 4096;
-            uint64_t copy_start = ph->p_vaddr > page_addr ? ph->p_vaddr : page_addr;
-            uint64_t file_end = ph->p_vaddr + ph->p_filesz;
+            uint64_t vaddr = ph->p_vaddr + base;
+            uint64_t copy_start = vaddr > page_addr ? vaddr : page_addr;
+            uint64_t file_end = vaddr + ph->p_filesz;
             uint64_t copy_end = file_end < page_end ? file_end : page_end;
             if (copy_end > copy_start) {
-                uint64_t src_offset = ph->p_offset + (copy_start - ph->p_vaddr);
+                uint64_t src_offset = ph->p_offset + (copy_start - vaddr);
                 uint64_t dst_offset = copy_start - page_addr;
                 for (uint64_t b = 0; b < copy_end - copy_start; b++) {
                     frame_virt[dst_offset + b] = data[src_offset + b];
@@ -197,7 +227,8 @@ int elf_load(const uint8_t *data, uint32_t size, uint64_t *pml4,
         }
     }
 
-    out->entry     = hdr->e_entry;
+    out->entry     = hdr->e_entry + base;
+    out->load_base = base;
     out->phentsize = hdr->e_phentsize;
     out->phnum     = hdr->e_phnum;
     return 1;

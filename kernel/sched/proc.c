@@ -256,6 +256,60 @@ static int build_user_address_space(const char *path, uint64_t *out_pml4_phys,
     }
     kfree(image);
 
+    // A dynamic executable names its interpreter in PT_INTERP. Load
+    // that too, at a base of our choosing, into the SAME address space.
+    //
+    // The kernel does no relocation: it describes both objects in the
+    // auxiliary vector and enters through the interpreter, which
+    // relocates itself using AT_BASE and then relocates and starts the
+    // executable using AT_PHDR / AT_ENTRY.
+    if (out_info->has_interp) {
+        int ierr = 0;
+        struct vnode *ivn = vfs_resolve(out_info->interp, &ierr);
+        if (!ivn) {
+            serial_write_string("[elf] interpreter not found: ");
+            serial_write_string(out_info->interp);
+            serial_write_string("\n");
+            free_address_space(pml4_phys);
+            return 0;
+        }
+        uint32_t isize = ivn->size;
+        uint8_t *iimage = (uint8_t *)kmalloc(isize);
+        if (!iimage) {
+            vnode_put(ivn);
+            free_address_space(pml4_phys);
+            return 0;
+        }
+        ivn->mount->ops->read(ivn, 0, iimage, isize);
+        vnode_put(ivn);
+
+        struct elf_info iinfo;
+        int ok = elf_load_at(iimage, isize, pml4, INTERP_LOAD_BASE, &iinfo);
+        kfree(iimage);
+        if (!ok) {
+            serial_write_string("[elf] interpreter load FAILED: ");
+            serial_write_string(out_info->interp);
+            serial_write_string("\n");
+            free_address_space(pml4_phys);
+            return 0;
+        }
+
+        // Enter through the INTERPRETER. out_info->entry keeps the
+        // executable's own entry, because that is what AT_ENTRY must
+        // carry -- it is how ld.so knows where to hand control once
+        // linking is done.
+        out_info->interp_entry = iinfo.entry;
+        out_info->interp_base  = INTERP_LOAD_BASE;
+
+        // The interpreter's segments need VMAs too, or an mprotect
+        // against ld.so's own image silently does nothing -- the same
+        // bug the executable's segments were registered to avoid.
+        for (int si = 0; si < iinfo.num_segments &&
+                         out_info->num_segments < ELF_MAX_LOAD_SEGMENTS; si++) {
+            out_info->segments[out_info->num_segments++] = iinfo.segments[si];
+        }
+    }
+
     // The user stack is NOT mapped here: spawn() and exec_task() call
     // thread_stack_alloc() once the process exists, so slot 0 gets its
     // stack -- and its guard page -- from the same path every other
@@ -425,6 +479,11 @@ static uint64_t build_initial_stack(uint64_t pml4_phys, uint64_t stack_top,
     PUSH(AT_PHNUM);  PUSH(info->phnum);
     PUSH(AT_PAGESZ); PUSH(PMM_FRAME_SIZE);
     PUSH(AT_ENTRY);  PUSH(info->entry);
+    // AT_BASE tells ld.so where it was placed, which it needs before it
+    // can relocate itself -- and so before it can do anything at all.
+    // Omitted entirely for a static image, which is what its absence
+    // means to a C runtime.
+    if (info->interp_base) { PUSH(AT_BASE); PUSH(info->interp_base); }
     PUSH(AT_RANDOM); PUSH(at_random);
     PUSH(AT_NULL);   PUSH(0);
     #undef PUSH
@@ -572,7 +631,9 @@ struct process *spawn_argv(const char *path, const struct spawn_args *args) {
     uint64_t *sp = (uint64_t *)kstack_top;
     *(--sp) = 0;                                  // arg (unused for a main thread)
     *(--sp) = entry_sp;                           // user_rsp, popped by kernel_thread_trampoline
-    *(--sp) = info.entry;                         // entry_rip, popped by kernel_thread_trampoline
+    // Enter through the interpreter when the image has one: ld.so
+    // relocates itself and the executable, then jumps to AT_ENTRY.
+    *(--sp) = info.interp_entry ? info.interp_entry : info.entry;
     *(--sp) = (uint64_t)kernel_thread_trampoline; // context_switch's `ret` lands here
     *(--sp) = 0; // rbp
     *(--sp) = 0; // rbx
@@ -768,7 +829,8 @@ int exec_task(const char *path, struct syscall_frame *frame,
     // whatever now occupies that physical page.
     current_thread()->fs_base = 0;
 
-    frame->rcx = info.entry;      // user RIP the ordinary sysret epilogue will return to
+    // Same as spawn: a dynamic image starts inside its interpreter.
+    frame->rcx = info.interp_entry ? info.interp_entry : info.entry;
     frame->user_rsp = entry_sp;
 
     return 1;
