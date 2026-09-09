@@ -41,9 +41,24 @@ int64_t sys_mmap(struct syscall_args *a) {
     if (fd >= 0) {
         struct file_descriptor *f = fd_get(current_proc(), (int)fd);
         if (!f) { return -EBADF; }
-        struct mmap_req req = { addr, len, prot, flags, (uint64_t)a->frame->r9, 0 };
-        int64_t rc = file_mmap(f, &req);
-        return rc < 0 ? rc : (int64_t)req.out_addr;
+        uint64_t off = (uint64_t)a->frame->r9;
+
+        // A device with its own mmap (/dev/fb0, memfd) places and backs
+        // itself.
+        if (f->ops && f->ops->mmap) {
+            struct mmap_req req = { addr, len, prot, flags, off, 0 };
+            int64_t rc = file_mmap(f, &req);
+            return rc < 0 ? rc : (int64_t)req.out_addr;
+        }
+
+        // An ordinary file. MAP_PRIVATE is what a dynamic linker uses
+        // and what this supports; MAP_SHARED needs a page cache that
+        // does not exist, and answering -ENOSYS is better than
+        // pretending a shared mapping is shared when it is not.
+        if (!f->vn) { return -ENODEV; }
+        if (flags & MAP_SHARED) { return -ENOSYS; }
+        if (off & (PMM_FRAME_SIZE - 1)) { return -EINVAL; }
+        return vma_mmap_file(current_proc(), addr, len, prot, flags, f->vn, off);
     }
 
     // Anonymous only otherwise; the dynamic linker adds file-backed

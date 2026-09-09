@@ -18,16 +18,26 @@
 // framebuffer). Its pages are mapped eagerly at creation and must NEVER
 // be pmm_free()d on unmap or teardown.
 #define VMA_PHYS      0x40
+// A private mapping of a file. Unlike VMA_PHYS the frames belong to
+// this process and are freed on unmap; `vn` holds a reference for the
+// VMA's whole life so the file cannot go away underneath it.
+#define VMA_FILE      0x1000
 
 // The gap between the ELF image (0x200000000000, see userland/user.ld)
 // and the thread stacks (0x700000000000). Grows up.
 #define MMAP_BASE  0x0000500000000000ULL
 #define MMAP_LIMIT 0x0000600000000000ULL
 
+struct vnode;
+
 struct vma {
     uint64_t    start, end;   // [start, end), page-aligned
     uint32_t    prot;
     uint32_t    flags;
+    // VMA_FILE only, otherwise null/0. `vn` carries a reference;
+    // `file_off` is the file offset corresponding to `start`.
+    struct vnode *vn;
+    uint64_t      file_off;
     struct vma *next;         // list is sorted by start, non-overlapping
 };
 
@@ -74,6 +84,13 @@ int64_t vma_mremap(struct process *p, uint64_t old_addr, uint64_t old_size,
 // by memfd, whose pages are never contiguous.
 int64_t vma_map_frames(struct process *p, const uint64_t *frames,
                        uint64_t n, uint32_t prot);
+
+// Map [addr, addr+len) as a private view of `vn` starting at `off`.
+// Takes its own reference on `vn`; the caller keeps theirs. Pages
+// arrive on fault, not here.
+int64_t vma_mmap_file(struct process *p, uint64_t addr, uint64_t len,
+                      uint32_t prot, uint32_t flags,
+                      struct vnode *vn, uint64_t off);
 
 int64_t vma_map_phys(struct process *p, uint64_t phys, uint64_t len, uint32_t prot);
 

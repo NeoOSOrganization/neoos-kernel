@@ -139,6 +139,8 @@ int vfs_umount(const char *target);
 // the pool is exhausted or the driver's read_inode failed.
 struct vnode *vnode_get(struct vfs_mount *m, uint64_t inode_id);
 void vnode_put(struct vnode *vn);
+// Take another reference on a vnode already held; returns vn.
+struct vnode *vnode_ref(struct vnode *vn);
 
 // Resolves an absolute path to a vnode whose refcount is already
 // taken -- caller must vnode_put it. On failure returns 0 and sets

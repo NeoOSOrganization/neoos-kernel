@@ -1,4 +1,5 @@
 #include "mm/vma.h"
+#include "fs/vfs.h"
 #include "mm/pmm.h"
 #include "mm/paging.h"
 #include "mm/heap.h"
@@ -30,10 +31,17 @@ static int vma_insert(struct process *p, uint64_t start, uint64_t end,
     struct vma **pp = &p->vmas;
     while (*pp && (*pp)->end <= start) { pp = &(*pp)->next; }
 
+    // A file-backed VMA must NEVER merge. Two adjacent mappings can
+    // share prot and flags while naming different files, or the same
+    // file at unrelated offsets, and merging them silently makes
+    // file_off wrong for everything past the join.
+    int mergeable = !(flags & VMA_FILE);
+
     // Merge backwards.
     struct vma *prev = 0;
     for (struct vma *v = p->vmas; v && v != *pp; v = v->next) { prev = v; }
-    if (prev && prev->end == start && prev->prot == prot && prev->flags == flags) {
+    if (mergeable && prev && prev->end == start && prev->prot == prot &&
+        prev->flags == flags) {
         prev->end = end;
         struct vma *nx = prev->next;
         if (nx && nx->start == end && nx->prot == prot && nx->flags == flags) {
@@ -44,7 +52,8 @@ static int vma_insert(struct process *p, uint64_t start, uint64_t end,
         return 1;
     }
     // Merge forwards.
-    if (*pp && (*pp)->start == end && (*pp)->prot == prot && (*pp)->flags == flags) {
+    if (mergeable && *pp && (*pp)->start == end && (*pp)->prot == prot &&
+        (*pp)->flags == flags) {
         (*pp)->start = start;
         return 1;
     }
@@ -52,6 +61,7 @@ static int vma_insert(struct process *p, uint64_t start, uint64_t end,
     struct vma *v = (struct vma *)kmalloc(sizeof(struct vma));
     if (!v) { return 0; }
     v->start = start; v->end = end; v->prot = prot; v->flags = flags;
+    v->vn = 0; v->file_off = 0;      // vma_mmap_file fills these in
     v->next = *pp;
     *pp = v;
     return 1;
@@ -90,18 +100,31 @@ static int vma_munmap_locked(struct process *p, uint64_t addr, uint64_t len) {
             if (!tail) { return -ENOMEM; }
             tail->start = end; tail->end = v->end;
             tail->prot = v->prot; tail->flags = v->flags;
+            // The tail is a SECOND mapping of the same file and needs a
+            // reference of its own, at the offset its new start
+            // corresponds to -- not the original one.
+            tail->vn = 0;
+            tail->file_off = 0;
+            if ((v->flags & VMA_FILE) && v->vn) {
+                tail->vn = vnode_ref(v->vn);
+                tail->file_off = v->file_off + (end - v->start);
+            }
             tail->next = v->next;
             v->end = start;
             v->next = tail;
             return 0;
         }
         if (v->start < start) {           // trim the tail
-            v->end = start;
+            v->end = start;               // file_off still describes start
             pp = &v->next;
         } else if (v->end > end) {        // trim the head
+            // The offset must follow the start, or every page in what
+            // remains reads from the wrong part of the file.
+            if (v->flags & VMA_FILE) { v->file_off += end - v->start; }
             v->start = end;
             break;
         } else {                          // consumed entirely
+            if ((v->flags & VMA_FILE) && v->vn) { vnode_put(v->vn); v->vn = 0; }
             *pp = v->next;
             kfree(v);
         }
@@ -284,6 +307,10 @@ static void vma_destroy_all_locked(struct process *p) {
     while (v) {
         struct vma *next = v->next;
         unmap_range(p, v->start, v->end, !(v->flags & VMA_PHYS));
+        // A file-backed VMA holds a reference for its whole life; this
+        // is where the last one goes for a process that exits with
+        // mappings still open, which is the normal case.
+        if ((v->flags & VMA_FILE) && v->vn) { vnode_put(v->vn); v->vn = 0; }
         kfree(v);
         v = next;
     }
@@ -398,6 +425,94 @@ int64_t vma_map_frames(struct process *p, const uint64_t *frames,
     int64_t rc = vma_map_frames_locked(p, frames, n, prot);
     spin_unlock_irqrestore(&p->mm_lock, f);
     if (rc < 0) { vma_tlb_settle(p); }
+    return rc;
+}
+
+// Read one page of `vn` at `off` into `frame`, zero-filling whatever
+// lies past the end of the file. POSIX requires the tail of a mapping
+// beyond EOF to read as zeros, and the .bss at the end of a data
+// segment depends on precisely that -- a dynamic executable will not
+// start without it.
+//
+// MUST NOT be called with p->mm_lock held: the VFS takes a mutex.
+int vma_fill_page_from_file(struct vnode *vn, uint64_t off, uint64_t frame) {
+    uint8_t *dst = (uint8_t *)phys_to_virt(frame);
+    for (unsigned i = 0; i < PMM_FRAME_SIZE; i++) { dst[i] = 0; }
+    if (!vn || !vn->mount || !vn->mount->ops->read) { return -EIO; }
+    int64_t n = vn->mount->ops->read(vn, (uint32_t)off, dst, PMM_FRAME_SIZE);
+    return n < 0 ? (int)n : 0;
+}
+
+static int64_t vma_mmap_file_locked(struct process *p, uint64_t addr, uint64_t len,
+                                    uint32_t prot, uint32_t flags,
+                                    struct vnode *vn, uint64_t off) {
+    if (len == 0) { return -EINVAL; }
+    len = page_up(len);
+
+    if (flags & MAP_FIXED) {
+        if (addr & 0xFFF) { return -EINVAL; }
+        vma_munmap_locked(p, addr, len);
+    } else {
+        addr = p->mmap_next;
+        if (addr + len > MMAP_LIMIT || addr + len < addr) { return -ENOMEM; }
+        p->mmap_next = addr + len;
+    }
+
+    if (!vma_insert(p, addr, addr + len, prot, MAP_PRIVATE | VMA_FILE)) {
+        return -ENOMEM;
+    }
+    struct vma *v = vma_find(p, addr);
+    if (!v) { return -ENOMEM; }
+    v->vn = vn;
+    v->file_off = off;
+    return (int64_t)addr;
+}
+
+int64_t vma_mmap_file(struct process *p, uint64_t addr, uint64_t len,
+                      uint32_t prot, uint32_t flags,
+                      struct vnode *vn, uint64_t off) {
+    if (!vn) { return -EBADF; }
+    if (prot & PROT_EXEC) {
+        // Text segments are mapped PROT_EXEC and that has to work; W^X
+        // is what forbids EXEC together with WRITE, not EXEC itself.
+        if (prot & PROT_WRITE) { return -EINVAL; }
+    }
+
+    // The VMA's own reference, taken before the mapping exists so there
+    // is never a window where a VMA names a vnode it does not hold.
+    vnode_ref(vn);
+
+    uint64_t f = spin_lock_irqsave(&p->mm_lock);
+    int64_t rc = vma_mmap_file_locked(p, addr, len, prot, flags, vn, off);
+    spin_unlock_irqrestore(&p->mm_lock, f);
+
+    if (rc < 0) { vnode_put(vn); return rc; }
+    if (flags & MAP_FIXED) { vma_tlb_settle(p); }
+
+    // TASK 2 ONLY: populate every page here. The fault path cannot
+    // reach the filesystem yet -- it runs under mm_lock, a spinlock
+    // with interrupts off, and vfs_lock is a mutex. The next commit
+    // restructures the fault path and deletes this loop; the tests do
+    // not change when it does.
+    uint64_t base = (uint64_t)rc;
+    uint64_t pages = page_up(len) / PMM_FRAME_SIZE;
+    uint64_t pf = PAGE_USER;
+    if (prot & PROT_WRITE) { pf |= PAGE_WRITABLE; }
+    if (!(prot & PROT_EXEC)) { pf |= PAGE_NO_EXECUTE; }
+
+    uint64_t *pml4 = (uint64_t *)phys_to_virt(p->pml4_phys);
+    for (uint64_t i = 0; i < pages; i++) {
+        uint64_t frame = pmm_alloc(0);
+        if (!frame) { break; }
+        if (vma_fill_page_from_file(vn, off + i * PMM_FRAME_SIZE, frame) != 0) {
+            pmm_free(frame, 0);
+            break;
+        }
+        uint64_t f2 = spin_lock_irqsave(&p->mm_lock);
+        int mapped = paging_map_into(pml4, base + i * PMM_FRAME_SIZE, frame, pf) == 0;
+        spin_unlock_irqrestore(&p->mm_lock, f2);
+        if (!mapped) { pmm_free(frame, 0); break; }
+    }
     return rc;
 }
 
@@ -521,6 +636,12 @@ int vma_copy_all(struct process *dst, struct process *src) {
         }
         c->start = v->start; c->end = v->end;
         c->prot  = v->prot;  c->flags = v->flags;
+        // The child's mapping is its own reference on the same file.
+        // Copying the pointer without the reference would let the
+        // parent's exit free a vnode the child still maps.
+        c->vn = 0;
+        c->file_off = v->file_off;
+        if ((v->flags & VMA_FILE) && v->vn) { c->vn = vnode_ref(v->vn); }
         c->next  = 0;
         if (tail) { tail->next = c; } else { head = c; }
         tail = c;

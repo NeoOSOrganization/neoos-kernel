@@ -99,6 +99,16 @@ void vfs_init(void) {
 // VNODEHASH (5). Holding it also closes the race where two CPUs both
 // miss on the same inode and each install a vnode for it, with one
 // silently losing its fds.
+// Take an additional reference on a vnode already held. vnode_get with
+// the vnode's own mount and inode finds it in the hash and bumps the
+// count, but writing that at call sites reads as a lookup rather than
+// as "hold this one" -- and a VMA that outlives the fd it was created
+// from needs exactly the latter.
+struct vnode *vnode_ref(struct vnode *vn) {
+    if (!vn) { return 0; }
+    return vnode_get(vn->mount, vn->inode_id);
+}
+
 struct vnode *vnode_get(struct vfs_mount *m, uint64_t inode_id) {
     unsigned b = bucket_of(m, inode_id);
     uint64_t f = spin_lock_irqsave(&vnode_hash_locks[b]);
