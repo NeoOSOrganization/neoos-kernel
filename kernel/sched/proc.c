@@ -245,9 +245,21 @@ static int build_user_address_space(const char *path, uint64_t *out_pml4_phys,
 
     uint64_t pml4_phys = paging_alloc_pml4();
     uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
-    pml4[0] = p4_table[0];     // low identity map -- pmm.c/paging.c internals rely on it
-    pml4[256] = p4_table[256]; // physmap
-    pml4[511] = p4_table[511]; // kernel higher-half alias
+    // PML4[0] is NOT copied from the kernel. It used to be, so that pmm
+    // could reach free-block links through the low identity map -- but
+    // that entry has no PAGE_USER bit, and PML4-level permissions gate
+    // everything beneath, so carrying it made the whole first 512GiB
+    // unreachable from ring 3. A stock dynamically linked executable
+    // links at 0x400000 and could never run.
+    //
+    // pmm uses the physmap now (see pmm.c's blk()), so nothing kernel
+    // -side needs this entry, and the process owns it like any other
+    // user range.
+    // Through the physmap: p4_table is linked low, and this runs on the
+    // CALLING process's CR3, which no longer maps the identity range.
+    uint64_t *kpml4 = paging_kernel_pml4();
+    pml4[256] = kpml4[256]; // physmap
+    pml4[511] = kpml4[511]; // kernel higher-half alias
 
     if (!elf_load(image, size, pml4, out_info)) {
         kfree(image);
@@ -847,7 +859,7 @@ int exec_task(const char *path, struct syscall_frame *frame,
 // refcount-1, no-copy-needed) COW fault path.
 static int fork_duplicate_user_pages(uint64_t *parent_pml4, uint64_t *child_pml4) {
     for (unsigned i4 = 0; i4 < 512; i4++) {
-        if (i4 == 0 || i4 == 256 || i4 == 511) {
+        if (i4 == 256 || i4 == 511) {
             continue; // shared kernel entries, already copied by the caller
         }
         if (!(parent_pml4[i4] & PAGE_PRESENT)) {
@@ -957,7 +969,9 @@ struct thread *fork_task(struct syscall_frame *frame) {
     uint64_t child_pml4_phys = paging_alloc_pml4();
     uint64_t *child_pml4 = (uint64_t *)phys_to_virt(child_pml4_phys);
     uint64_t *parent_pml4 = (uint64_t *)phys_to_virt(parent->pml4_phys);
-    child_pml4[0] = parent_pml4[0];
+    // PML4[0] is the child's own user memory now and goes through the
+    // COW duplication below with every other user range; aliasing it
+    // would silently share the low 512GiB between parent and child.
     child_pml4[256] = parent_pml4[256];
     child_pml4[511] = parent_pml4[511];
 

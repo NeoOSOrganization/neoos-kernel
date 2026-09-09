@@ -1032,17 +1032,21 @@ mmapfile: iso disk-image $(USERLAND_BUILD)/MMAPFILE.ELF
 # bare-metal and cannot produce or consume shared objects at all
 # (-shared silently yields an ET_EXEC with no dynamic section).
 #
-# -Wl,-Ttext-segment moves it above 0x200000000000. A stock dynamic
-# executable links at 0x400000, which on NeoOS is inside PML4 entry 0 --
-# a copy of the kernel's low identity map with no PAGE_USER bit, so the
-# whole first 512 GiB is unreachable from ring 3. See userland/user.ld.
+# It links at 0x400000, exactly where a stock Linux toolchain puts an
+# executable. That used to be impossible: PML4[0] was a copy of the
+# kernel's low identity map with no PAGE_USER bit, making the whole
+# first 512 GiB unreachable from ring 3. pmm reaches free-block links
+# through the physmap now, so a process owns PML4[0] like any other
+# user range.
 NEOOS_HOSTED := $(HOME)/opt/cross-x86_64-neoos/bin/x86_64-neoos-linux-musl-
 NEOOS_SYSROOT := $(HOME)/opt/cross-x86_64-neoos/x86_64-neoos-linux-musl
 
 $(BUILD_DIR)/dyntest.elf: $(USERLAND_DIR)/dyntest.c
 	@mkdir -p $(BUILD_DIR)
-	$(NEOOS_HOSTED)gcc -O2 -mcmodel=large -Wl,-Ttext-segment=0x200000000000 \
-		-o $@ $(USERLAND_DIR)/dyntest.c
+	@# NO -Ttext-segment and NO -mcmodel=large: this links exactly where
+	@# a stock Linux toolchain puts an executable, 0x400000, which is the
+	@# whole point -- see the PML4[0] note above.
+	$(NEOOS_HOSTED)gcc -O2 -o $@ $(USERLAND_DIR)/dyntest.c
 
 .PHONY: dyntest
 dyntest: iso disk-image $(BUILD_DIR)/dyntest.elf

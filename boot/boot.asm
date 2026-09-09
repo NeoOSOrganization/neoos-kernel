@@ -198,6 +198,26 @@ long_mode_start:
     mov fs, ax
     mov gs, ax
 
+    ; Move the stack onto the kernel's HIGHER-HALF alias before calling
+    ; kmain.
+    ;
+    ; stack_bottom lives in .boot.bss at a low physical address, so the
+    ; stack set up above is reachable only through the identity map in
+    ; PML4[0]. That was fine while every process address space carried a
+    ; copy of PML4[0] -- and it no longer does, because carrying it made
+    ; the whole first 512GiB unreachable from ring 3 and so made a
+    ; stock dynamically linked executable (which links at 0x400000)
+    ; impossible to run.
+    ;
+    ; schedule() switches CR3 to a process's address space while running
+    ; on this stack. With no identity map there, the stack vanished
+    ; mid-call: a fault whose handler could not push its own frame, i.e.
+    ; a double fault. The same physical memory is aliased at
+    ; KERNEL_VIRT_BASE through PML4[511], which every address space DOES
+    ; carry, so rebasing RSP keeps it valid under any CR3.
+    mov rax, 0xFFFFFFFF80000000
+    add rsp, rax
+
     ; kmain is linked in the higher half (KERNEL_VIRT_BASE, see
     ; linker.ld). A plain `call kmain` would assemble as a rel32 near
     ; call, which cannot reach across a gap this large -- load the

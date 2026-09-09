@@ -19,6 +19,11 @@
 // milestone does not need).
 #define PMM_MAX_ORDER  14
 
+// Called by paging_init once the physmap is live: the allocator stops
+// reaching free-block links through the low identity map and uses the
+// physmap instead, which is what lets a process own PML4[0].
+void pmm_set_physmap_live(void);
+
 void pmm_init(void *multiboot_info);
 void pmm_selftest(void);
 

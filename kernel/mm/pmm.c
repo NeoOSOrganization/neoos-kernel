@@ -1,4 +1,5 @@
 #include "mm/pmm.h"
+#include "mm/paging.h"
 #include "drivers/char/serial.h"
 #include "sync/lock.h"
 
@@ -44,24 +45,55 @@ static inline uint64_t phys_to_frame(uint64_t phys) {
     return phys / PMM_FRAME_SIZE;
 }
 
+// A free block's list links live inside the block itself, so the
+// allocator has to be able to READ the memory it is handing out.
+//
+// It used to do that by treating the physical address as a virtual one,
+// which worked only because PML4[0] identity-maps the first 4GiB -- and
+// that entry has no PAGE_USER bit, so every process carrying it had the
+// whole first 512GiB of its address space made unreachable from ring 3.
+// A stock dynamically linked executable links at 0x400000 and could
+// therefore never run.
+//
+// So the links are reached through the PHYSMAP instead, which covers
+// the same 4GiB and is a kernel mapping processes do not need to
+// duplicate. The POINTER VALUES STORED IN THE LISTS ARE STILL PHYSICAL
+// ADDRESSES -- frame_order, the buddy arithmetic and pmm_alloc's return
+// value all derive from them -- and only the dereference is translated.
+// Storing physmap pointers instead would leave the lists holding two
+// different representations across the moment the physmap goes live.
+static int pmm_physmap_live = 0;
+
+void pmm_set_physmap_live(void) { pmm_physmap_live = 1; }
+
+// Physical address -> something dereferenceable. Before paging_init
+// installs the physmap the identity map is all there is, which is the
+// same conditional alloc_table_frame already uses.
+static inline struct free_block *blk(struct free_block *b) {
+    if (!b || !pmm_physmap_live) { return b; }
+    return (struct free_block *)phys_to_virt((uint64_t)(uintptr_t)b);
+}
+
 static void list_push(unsigned order, struct free_block *block) {
-    block->prev = 0;
-    block->next = free_lists[order];
+    struct free_block *b = blk(block);
+    b->prev = 0;
+    b->next = free_lists[order];
     if (free_lists[order]) {
-        free_lists[order]->prev = block;
+        blk(free_lists[order])->prev = block;
     }
     free_lists[order] = block;
     frame_order[phys_to_frame((uint64_t)(uintptr_t)block)] = (uint8_t)order;
 }
 
 static void list_remove(unsigned order, struct free_block *block) {
-    if (block->prev) {
-        block->prev->next = block->next;
+    struct free_block *b = blk(block);
+    if (b->prev) {
+        blk(b->prev)->next = b->next;
     } else {
-        free_lists[order] = block->next;
+        free_lists[order] = b->next;
     }
-    if (block->next) {
-        block->next->prev = block->prev;
+    if (b->next) {
+        blk(b->next)->prev = b->prev;
     }
     frame_order[phys_to_frame((uint64_t)(uintptr_t)block)] = ORDER_NONE;
 }

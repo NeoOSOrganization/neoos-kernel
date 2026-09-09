@@ -87,6 +87,12 @@ uint64_t paging_translate(uint64_t virt); // returns the mapped physical address
 // unmapped.
 uint64_t paging_translate_in(uint64_t pml4_phys, uint64_t virt);
 
+// The kernel's own PML4, reached through the physmap. boot.asm links
+// p4_table low, so dereferencing the symbol directly needs the identity
+// map -- which processes no longer carry. Use this to READ or WRITE
+// entries; use p4_table itself only for its address (CR3).
+uint64_t *paging_kernel_pml4(void);
+
 // The same, through whatever is in CR3 now -- so it works for USER
 // pointers, which paging_translate cannot see at all.
 uint64_t paging_translate_current(uint64_t virt);

@@ -25,6 +25,20 @@ extern uint64_t p4_table[512]; // boot.asm's live PML4 -- see boot/boot.asm
 // process page tables are being built.
 static int physmap_installed = 0;
 
+// boot.asm links p4_table into .boot.bss at a LOW address (0x103000),
+// so writing `p4_table[i]` dereferences the low identity map. That was
+// fine while every process carried PML4[0], and is not now: kernel code
+// runs on whatever CR3 the calling process has, and a process no longer
+// maps the first 512GiB for the kernel's benefit. Reached through the
+// physmap instead -- the identity map only before that exists.
+//
+// Taking p4_table's ADDRESS is still correct everywhere it happens (it
+// is the value loaded into CR3); only dereferences move.
+uint64_t *paging_kernel_pml4(void) {
+    if (!physmap_installed) { return p4_table; }
+    return (uint64_t *)phys_to_virt((uint64_t)(uintptr_t)p4_table);
+}
+
 // Returns 0 if no frame was available. Checking that is not optional:
 // with pmm_alloc's result unchecked, phys was 0 and phys_to_virt(0) is
 // the PHYSMAP BASE, so this zeroed 512 entries at the start of physical
@@ -83,20 +97,20 @@ int paging_map_into(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags
 }
 
 int paging_map(uint64_t virt, uint64_t phys, uint64_t flags) {
-    return paging_map_into(p4_table, virt, phys, flags);
+    return paging_map_into(paging_kernel_pml4(), virt, phys, flags);
 }
 
 int paging_map_range(uint64_t virt, uint64_t phys, uint64_t len, uint64_t flags) {
     uint64_t pages = (len + 0xFFF) >> 12;
     for (uint64_t i = 0; i < pages; i++) {
-        int rc = paging_map_into(p4_table, virt + i * 4096, phys + i * 4096, flags);
+        int rc = paging_map_into(paging_kernel_pml4(), virt + i * 4096, phys + i * 4096, flags);
         if (rc != 0) { return rc; }
     }
     return 0;
 }
 
 void paging_unmap(uint64_t virt) {
-    uint64_t *pdpt = table_entry(p4_table, PML4_INDEX(virt), 0, 0);
+    uint64_t *pdpt = table_entry(paging_kernel_pml4(), PML4_INDEX(virt), 0, 0);
     uint64_t *pd   = pdpt ? table_entry(pdpt, PDPT_INDEX(virt), 0, 0) : 0;
     uint64_t *pt   = pd ? table_entry(pd, PD_INDEX(virt), 0, 0) : 0;
     if (pt) {
@@ -272,7 +286,7 @@ uint64_t paging_translate_current(uint64_t virt) {
 }
 
 uint64_t paging_translate(uint64_t virt) {
-    uint64_t *pdpt = table_entry(p4_table, PML4_INDEX(virt), 0, 0);
+    uint64_t *pdpt = table_entry(paging_kernel_pml4(), PML4_INDEX(virt), 0, 0);
     uint64_t *pd   = pdpt ? table_entry(pdpt, PDPT_INDEX(virt), 0, 0) : 0;
     uint64_t *pt   = pd ? table_entry(pd, PD_INDEX(virt), 0, 0) : 0;
     if (!pt || !(pt[PT_INDEX(virt)] & PAGE_PRESENT)) {
@@ -301,6 +315,7 @@ void paging_init(void) {
 
     p4_table[PHYSMAP_PML4_INDEX] = pdpt_phys | PAGE_PRESENT | PAGE_WRITABLE;
     physmap_installed = 1;
+    pmm_set_physmap_live();
 
     serial_write_string("[paging] physmap installed: base=");
     serial_write_hex64(PHYSMAP_BASE);
@@ -335,7 +350,7 @@ static void reload_cr3(void) {
 // `*out_idx` locate the 4 KiB PTE; returns 0 on success, <0 if `virt`
 // is unmapped or still covered by a huge page.
 static int leaf_pte(uint64_t virt, uint64_t **out_pt, unsigned *out_idx) {
-    uint64_t *pdpt = table_entry(p4_table, PML4_INDEX(virt), 0, 0);
+    uint64_t *pdpt = table_entry(paging_kernel_pml4(), PML4_INDEX(virt), 0, 0);
     if (!pdpt) { return -1; }
     uint64_t *pd = table_entry(pdpt, PDPT_INDEX(virt), 0, 0);
     if (!pd) { return -1; }
@@ -348,7 +363,7 @@ static int leaf_pte(uint64_t virt, uint64_t **out_pt, unsigned *out_idx) {
 }
 
 int paging_split_huge(uint64_t virt) {
-    uint64_t *pdpt = table_entry(p4_table, PML4_INDEX(virt), 0, 0);
+    uint64_t *pdpt = table_entry(paging_kernel_pml4(), PML4_INDEX(virt), 0, 0);
     if (!pdpt) { return 0; }
     uint64_t *pd = table_entry(pdpt, PDPT_INDEX(virt), 0, 0);
     if (!pd) { return 0; }
@@ -405,7 +420,7 @@ void paging_protect_kernel(void) {
 
     // The physmap is the kernel's data view of RAM -- never executed.
     // NX on its PML4 entry covers every page below it.
-    p4_table[PHYSMAP_PML4_INDEX] |= PAGE_NO_EXECUTE;
+    paging_kernel_pml4()[PHYSMAP_PML4_INDEX] |= PAGE_NO_EXECUTE;
 
     reload_cr3();
     serial_write_string("[paging] kernel W^X applied: .text RO+X, rest NX\n");
@@ -414,7 +429,7 @@ void paging_protect_kernel(void) {
 // Returns the leaf entry mapping `virt` (huge or 4 KiB), or 0 if not
 // mapped. Flags-only accessor for wxorx_selftest.
 uint64_t paging_leaf_entry(uint64_t virt) {
-    uint64_t *pdpt = table_entry(p4_table, PML4_INDEX(virt), 0, 0);
+    uint64_t *pdpt = table_entry(paging_kernel_pml4(), PML4_INDEX(virt), 0, 0);
     if (!pdpt) { return 0; }
     uint64_t *pd = table_entry(pdpt, PDPT_INDEX(virt), 0, 0);
     if (!pd) { return 0; }
@@ -455,7 +470,10 @@ void free_address_space(uint64_t pml4_phys) {
     uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
 
     for (unsigned i4 = 0; i4 < 512; i4++) {
-        if (i4 == 0 || i4 == PHYSMAP_PML4_INDEX || i4 == 511) {
+        // Index 0 is NOT skipped any more: it is the process's own low
+        // user memory, not the kernel's identity map. Skipping it would
+        // leak every page table under the first 512GiB.
+        if (i4 == PHYSMAP_PML4_INDEX || i4 == 511) {
             continue; // shared kernel entries -- not owned by this address space
         }
         if (!(pml4[i4] & PAGE_PRESENT)) {
