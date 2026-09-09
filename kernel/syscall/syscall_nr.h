@@ -352,7 +352,12 @@
 // buffers a compositor client hands to the window manager.
 #define SYS_MEMFD_CREATE    135
 
+// Dynamic linking (DL-1). musl's ldso/dynlink.c reads ELF headers at
+// absolute offsets without disturbing the file position, which read
+// cannot do.
+#define SYS_PREAD           136
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX              136
+#define SYS_MAX              137
 
 #endif

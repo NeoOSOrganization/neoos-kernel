@@ -226,6 +226,7 @@ int64_t sys_statx(struct syscall_args *a);
 int64_t sys_fsync(struct syscall_args *a);
 int64_t sys_fallocate(struct syscall_args *a);
 int64_t sys_ftruncate(struct syscall_args *a);
+int64_t sys_pread(struct syscall_args *a);
 int64_t sys_memfd_create(struct syscall_args *a);
 int64_t sys_access(struct syscall_args *a);
 int64_t sys_faccessat(struct syscall_args *a);

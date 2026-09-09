@@ -777,6 +777,24 @@ int64_t sys_ftruncate(struct syscall_args *a) {
     return rc;
 }
 
+// pread(fd, buf, count, offset). Differs from read in exactly one way
+// that matters: the file position is untouched, so a caller can read
+// headers from anywhere in a file without disturbing whoever else holds
+// the descriptor. musl's dynamic linker depends on that.
+int64_t sys_pread(struct syscall_args *a) {
+    struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
+    if (!f) { return -EBADF; }
+    if ((int64_t)a->a4 < 0) { return -EINVAL; }
+    if (!f->vn) { return -ESPIPE; }          // pipe, socket, tty: no position
+    if (f->vn->type == VNODE_DIR) { return -EISDIR; }
+
+    uint32_t saved = f->position;
+    f->position = (uint32_t)a->a4;
+    int64_t rc = file_read(f, (void *)(uintptr_t)a->a2, a->a3);
+    f->position = saved;
+    return rc;
+}
+
 int64_t sys_fsync(struct syscall_args *a) {
     struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
     if (!f) { return -EBADF; }

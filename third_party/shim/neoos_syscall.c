@@ -143,6 +143,7 @@
 #define NEO_FALLOCATE          131
 #define NEO_FTRUNCATE          134
 #define NEO_MEMFD_CREATE       135
+#define NEO_PREAD              136
 #define NEO_ACCESS             132
 #define NEO_FACCESSAT          133
 
@@ -269,6 +270,7 @@
 #define LX_FALLOCATE       285
 #define LX_FTRUNCATE        77
 #define LX_MEMFD_CREATE    319
+#define LX_PREAD64          17
 #define LX_ACCESS           21
 #define LX_FACCESSAT       269
 #define LX_FACCESSAT2      439
@@ -522,6 +524,7 @@ long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a
     case LX_FDATASYNC:        return neo(NEO_FDATASYNC, a1, 0, 0, 0, 0, 0);
     case LX_FALLOCATE:        return neo(NEO_FALLOCATE, a1, a2, a3, a4, 0, 0);
     case LX_FTRUNCATE:        return neo(NEO_FTRUNCATE, a1, a2, 0, 0, 0, 0);
+    case LX_PREAD64:          return neo(NEO_PREAD, a1, a2, a3, a4, 0, 0);
     // memfd_create takes a NAME -> measure it and shift, the same
     // systematic path reshape statx and access use.
     case LX_MEMFD_CREATE:

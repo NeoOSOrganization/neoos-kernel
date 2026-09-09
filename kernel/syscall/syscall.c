@@ -293,6 +293,7 @@ static const struct syscall_desc syscall_table[SYS_MAX] = {
     [SYS_FDATASYNC]      = { sys_fsync,           "fdatasync" },
     [SYS_FALLOCATE]      = { sys_fallocate,       "fallocate" },
     [SYS_FTRUNCATE]      = { sys_ftruncate,       "ftruncate" },
+    [SYS_PREAD]          = { sys_pread,           "pread" },
     [SYS_MEMFD_CREATE]   = { sys_memfd_create,    "memfd_create" },
     [SYS_ACCESS]         = { sys_access,          "access" },
     [SYS_FACCESSAT]      = { sys_faccessat,       "faccessat" },
