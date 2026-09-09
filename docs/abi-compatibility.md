@@ -1287,3 +1287,30 @@ EPOLLTCP_CONC=8` (the level-triggered oracle, unchanged), and the
   currently held down rather than the keys the device can report, so a
   program using it to classify a device sees an empty bitmap from an
   idle keyboard.
+
+## Dynamic linking (DL-1, 2026-09-09)
+
+### Implemented
+
+| Linux facility | state on NeoOS |
+|---|---|
+| `PT_INTERP` | loaded; the interpreter is entered, not the executable |
+| `ET_DYN` | loadable at a caller-chosen base (`elf_load_at`) |
+| `AT_BASE` | supplied when an interpreter was loaded |
+| `pread` | full, on any object with a file position |
+| `mmap` of a file | `MAP_PRIVATE` only, demand-paged |
+| `dlopen`/`dlsym`/`dlclose` | work, including C++ with exceptions, RTTI and TLS |
+| Executables at `0x400000` | run; the low 512 GiB is user-accessible |
+
+### What a ported application would still hit
+
+- **`MAP_SHARED` of a file is `-ENOSYS`.** Anything that memory-maps a
+  file for writing, or expects two processes to share file pages, fails
+  here. This is the largest remaining gap in the mmap surface.
+- **No page cache**, so no cross-process sharing of library text and a
+  polled disk read on every page fault.
+- **A foreign distribution binary is untested.** The loader handles the
+  ELF shape; the syscall surface has not been surveyed, and that is
+  where the remaining work would be.
+- **No `RTLD_LAZY` distinction** — musl resolves eagerly regardless,
+  which is musl's behaviour rather than NeoOS's.

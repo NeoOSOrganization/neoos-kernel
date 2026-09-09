@@ -1048,6 +1048,76 @@ length it has not validated.
   rectangle, so this is an optimisation, not a protocol change.
 - `XRGB8888` only: opaque surfaces, no alpha, no blending.
 
+## Dynamic linking (DL-1)
+
+NeoOS runs dynamically linked executables. The kernel loads the
+interpreter named in `PT_INTERP`, describes both objects in the
+auxiliary vector, and enters through the interpreter; **all relocation
+is musl's**, in `ldso/dynlink.c`.
+
+```sh
+x86_64-neoos-linux-musl-gcc -o prog prog.c        # no -static needed
+```
+
+`/lib/ld-musl-x86_64.so.1` must be on the image — it is musl's
+`libc.so`, which in musl *is* the dynamic linker.
+
+`dlopen`, `dlsym` and `dlclose` work. A C++ shared object with
+exceptions, RTTI, thread-local storage, STL and static constructors
+loads and runs correctly, including a three-deep `NEEDED` chain
+(`libstdc++.so.6` -> `libgcc_s.so.1` -> `libc.so`).
+
+### `pread`
+
+```c
+ssize_t pread(int fd, void *buf, size_t count, off_t offset);
+```
+
+Reads at an absolute offset **without moving the file position**. An
+object with no position (pipe, socket, tty) returns `-ESPIPE`; a
+negative offset is `-EINVAL`.
+
+### `mmap` of a file
+
+`MAP_PRIVATE` mappings of a regular file, demand-paged: a page is read
+from the file when first touched.
+
+**DIVERGENCES:**
+
+- **`MAP_SHARED` of a file returns `-ENOSYS`.** It needs a page cache
+  NeoOS does not have, and reporting success for a mapping that is not
+  actually shared would be worse than refusing.
+- **No cross-process text sharing.** Two processes mapping the same
+  library get separate copies of its pages. Demand paging changes
+  *when* a page is allocated, not *whether* it is shared, so a
+  dynamically linked system currently costs more memory than a static
+  one, not less. A page cache is what fixes this.
+- **The offset must be page-aligned** (`-EINVAL` otherwise), as on
+  Linux.
+- **Faulting a page is a synchronous, polled PIO disk read.** Correct,
+  and slow.
+- The tail of a mapping past EOF reads as zeros, which POSIX requires
+  and which a `.bss` at the end of a data segment depends on.
+
+### Address space
+
+The low 512 GiB is usable by userland, so an executable linked at the
+customary `0x400000` runs. This was not true before DL-1: every
+process carried a copy of the kernel's low identity map in `PML4[0]`,
+and that entry has no `PAGE_USER` bit.
+
+**Not yet verified:** running a binary built for another Linux
+distribution. The loader handles the shape; the syscall surface such a
+binary needs has not been surveyed.
+
+### Testing
+
+`make dyntest` (dynamic executable + `dlopen`) and `make mmapfile`
+(`pread`, file mappings, concurrent faulting) are standalone boots with
+their own INITTAB, like `make uxtest` and `make epollet`. They are not
+part of `CORE_REQUIRED_MARKERS`, which gates the ordinary boot
+workload.
+
 ## socketpair
 
 ```c
