@@ -972,8 +972,11 @@ hello-run: iso disk-image $(USERLAND_BUILD)/WM.ELF
 	  'spawn /hello.nex' \
 	  > $(BUILD_DIR)/disk-src/INITTAB.solo
 	mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/disk-src/INITTAB.solo ::etc/inittab
-	qemu-system-x86_64 $(QEMU_COMMON) -device usb-ehci -device usb-mouse \
-		-serial stdio
+	@# NO -device usb-mouse: NeoOS has no USB stack, and QEMU routes the
+	@# host pointer to the USB device, so the PS/2 port the compositor
+	@# reads receives nothing and the cursor never moves. The `pc`
+	@# machine's built-in i8042 mouse is the one that works.
+	qemu-system-x86_64 $(QEMU_COMMON) -serial stdio
 
 # `make wm-run` -- the compositor and the C demo client, no dotnet
 # needed. Useful when you want to see the window system without
@@ -990,5 +993,8 @@ wm-run: iso disk-image $(USERLAND_BUILD)/WM.ELF $(USERLAND_BUILD)/WMDEMO.ELF
 	  'spawn /wmdemo.nex 1000000' \
 	  > $(BUILD_DIR)/disk-src/INITTAB.solo
 	mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/disk-src/INITTAB.solo ::etc/inittab
-	qemu-system-x86_64 $(QEMU_COMMON) -device usb-ehci -device usb-mouse \
-		-serial stdio
+	@# NO -device usb-mouse: NeoOS has no USB stack, and QEMU routes the
+	@# host pointer to the USB device, so the PS/2 port the compositor
+	@# reads receives nothing and the cursor never moves. The `pc`
+	@# machine's built-in i8042 mouse is the one that works.
+	qemu-system-x86_64 $(QEMU_COMMON) -serial stdio

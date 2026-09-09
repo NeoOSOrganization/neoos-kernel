@@ -17,7 +17,6 @@ qemu-system-x86_64 -cpu Nehalem -smp 4 -boot order=d \
   -drive file=build/disk2.img,format=raw -vga std \
   -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
   -audiodev none,id=a0 -device AC97,audiodev=a0,addr=0x6 \
-  -device usb-ehci -device usb-mouse \
   -no-reboot -display none -serial file:build/screenshot.log \
   -monitor "unix:$SOCK,server,nowait" &
 QPID=$!

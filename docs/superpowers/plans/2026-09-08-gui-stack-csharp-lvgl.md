@@ -63,7 +63,6 @@ serial capture for all verification.
     -drive file=build/disk2.img,format=raw -vga std \
     -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
     -audiodev none,id=a0 -device AC97,audiodev=a0,addr=0x6 \
-    -device usb-ehci -device usb-mouse \
     -no-reboot -display none -serial file:build/serial.gui.log > /dev/null 2>&1 ; \
   grep -nE "\[vt\]|\[fb\]|\[input\]|\[mouse\]|\[memfd\]|\[unix\]|\[scm\]|PANIC|\[exception\]" build/serial.gui.log
   ```
@@ -962,7 +961,9 @@ In `evdev.c`, add `EVIOCGBIT(EV_REL)` — ioctl nr `0x22` — returning
 
 - [ ] **Step 5: Run and confirm it passes**
 
-Run the verification one-liner (it already passes `-device usb-mouse`).
+Run the verification one-liner. Note it passes NO usb-mouse: NeoOS
+has no USB stack, and adding one makes QEMU route the host pointer
+there instead of to the i8042, so the PS/2 driver sees nothing.
 Expected: `[mouse] decode selftest passed`, `[input] isolation selftest
 passed`, and `[input] selftest passed`.
 
