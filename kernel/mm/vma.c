@@ -264,7 +264,22 @@ static int vma_mprotect_locked(struct process *p, uint64_t addr, uint64_t len, u
     return 0;
 }
 
-static int vma_fault_locked(struct process *p, uint64_t addr, int write) {
+// What a fault needs done with NO lock held. The filesystem cannot be
+// reached from vma_fault_locked: mm_lock is a spinlock taken with
+// interrupts off, and vfs_lock is a mutex that sleeps.
+struct vma_fault_io {
+    struct vnode *vn;        // reference held; released by the caller
+    uint64_t      file_off;
+    uint64_t      page_va;
+    uint32_t      prot;
+};
+
+#define VMA_FAULT_SIGSEGV   0
+#define VMA_FAULT_HANDLED   1
+#define VMA_FAULT_NEEDS_IO  2
+
+static int vma_fault_locked(struct process *p, uint64_t addr, int write,
+                            struct vma_fault_io *io) {
     struct vma *v = vma_find(p, addr);
     if (!v) { return 0; }                                  // -> SIGSEGV
     if (v->prot == PROT_NONE) { return 0; }
@@ -272,6 +287,21 @@ static int vma_fault_locked(struct process *p, uint64_t addr, int write) {
     // A device mapping is populated eagerly at creation; a not-present
     // fault inside one means the page was unmapped under it -> SIGSEGV.
     if (v->flags & VMA_PHYS) { return 0; }
+
+    // A file-backed page cannot be produced here -- reading it means
+    // taking a mutex, and this runs under a spinlock with interrupts
+    // off. Describe the work and let vma_fault do it with nothing held.
+    //
+    // The reference is taken HERE, under the lock, so the vnode cannot
+    // be freed in the window where the lock is down.
+    if (v->flags & VMA_FILE) {
+        if (!v->vn) { return VMA_FAULT_SIGSEGV; }
+        io->vn       = vnode_ref(v->vn);
+        io->file_off = v->file_off + (page_down(addr) - v->start);
+        io->page_va  = page_down(addr);
+        io->prot     = v->prot;
+        return VMA_FAULT_NEEDS_IO;
+    }
 
     uint64_t frame = pmm_alloc(0);
     if (!frame) { return 0; }
@@ -489,30 +519,6 @@ int64_t vma_mmap_file(struct process *p, uint64_t addr, uint64_t len,
     if (rc < 0) { vnode_put(vn); return rc; }
     if (flags & MAP_FIXED) { vma_tlb_settle(p); }
 
-    // TASK 2 ONLY: populate every page here. The fault path cannot
-    // reach the filesystem yet -- it runs under mm_lock, a spinlock
-    // with interrupts off, and vfs_lock is a mutex. The next commit
-    // restructures the fault path and deletes this loop; the tests do
-    // not change when it does.
-    uint64_t base = (uint64_t)rc;
-    uint64_t pages = page_up(len) / PMM_FRAME_SIZE;
-    uint64_t pf = PAGE_USER;
-    if (prot & PROT_WRITE) { pf |= PAGE_WRITABLE; }
-    if (!(prot & PROT_EXEC)) { pf |= PAGE_NO_EXECUTE; }
-
-    uint64_t *pml4 = (uint64_t *)phys_to_virt(p->pml4_phys);
-    for (uint64_t i = 0; i < pages; i++) {
-        uint64_t frame = pmm_alloc(0);
-        if (!frame) { break; }
-        if (vma_fill_page_from_file(vn, off + i * PMM_FRAME_SIZE, frame) != 0) {
-            pmm_free(frame, 0);
-            break;
-        }
-        uint64_t f2 = spin_lock_irqsave(&p->mm_lock);
-        int mapped = paging_map_into(pml4, base + i * PMM_FRAME_SIZE, frame, pf) == 0;
-        spin_unlock_irqrestore(&p->mm_lock, f2);
-        if (!mapped) { pmm_free(frame, 0); break; }
-    }
     return rc;
 }
 
@@ -592,11 +598,57 @@ int vma_range_mapped(struct process *p, uint64_t addr, uint64_t len) {
     return ok;
 }
 
+// Install a page read while the lock was down -- but only if the world
+// still looks the way it did.
+//
+// Returns 1 if this frame was installed, 0 if it was not and the caller
+// must free it. Losing the race is NOT an error: another thread faulted
+// the same page and its frame is just as good, so the fault is handled
+// either way. Failing to NOTICE is the bug, and it is either a leaked
+// frame or a mapping installed over a live one.
+static int vma_install_faulted_page_locked(struct process *p,
+                                           const struct vma_fault_io *io,
+                                           uint64_t frame) {
+    struct vma *v = vma_find(p, io->page_va);
+    if (!v || !(v->flags & VMA_FILE) || v->vn != io->vn) { return 0; }
+    // The VMA may have been trimmed and re-created over the same
+    // address with a different offset; that is a different page.
+    if (v->file_off + (io->page_va - v->start) != io->file_off) { return 0; }
+    // Somebody already put a page here.
+    if (paging_translate_in(p->pml4_phys, io->page_va)) { return 0; }
+
+    uint64_t pf = PAGE_USER;
+    if (io->prot & PROT_WRITE) { pf |= PAGE_WRITABLE; }
+    if (!(io->prot & PROT_EXEC)) { pf |= PAGE_NO_EXECUTE; }
+
+    uint64_t *pml4 = (uint64_t *)phys_to_virt(p->pml4_phys);
+    return paging_map_into(pml4, io->page_va, frame, pf) == 0;
+}
+
 int vma_fault(struct process *p, uint64_t addr, int write) {
+    struct vma_fault_io io = { 0, 0, 0, 0 };
+
     uint64_t f = spin_lock_irqsave(&p->mm_lock);
-    int rc = vma_fault_locked(p, addr, write);
+    int rc = vma_fault_locked(p, addr, write, &io);
     spin_unlock_irqrestore(&p->mm_lock, f);
-    return rc;
+    if (rc != VMA_FAULT_NEEDS_IO) { return rc; }
+
+    // Nothing held from here to the re-acquire below.
+    uint64_t frame = pmm_alloc(0);
+    if (!frame) { vnode_put(io.vn); return VMA_FAULT_SIGSEGV; }
+    int frc = vma_fill_page_from_file(io.vn, io.file_off, frame);
+    if (frc != 0) { pmm_free(frame, 0); vnode_put(io.vn); return VMA_FAULT_SIGSEGV; }
+
+    f = spin_lock_irqsave(&p->mm_lock);
+    int installed = vma_install_faulted_page_locked(p, &io, frame);
+    spin_unlock_irqrestore(&p->mm_lock, f);
+
+    // Released only after the re-validation, which compares against it.
+    vnode_put(io.vn);
+    if (!installed) { pmm_free(frame, 0); }
+
+    // Handled either way: if another thread won, the page is present.
+    return VMA_FAULT_HANDLED;
 }
 
 void vma_destroy_all(struct process *p) {

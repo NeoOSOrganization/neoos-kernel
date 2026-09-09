@@ -11,6 +11,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <pthread.h>
 
 #define SYS_WRITE      1
 #define SYS_READ       6
@@ -24,7 +25,7 @@
 #define SYS_TEST_HOOK 66
 #define SYS_PREAD    136
 
-#define TESTHOOK_PMM_FREE 3
+#define TESTHOOK_PMM_FREE 4
 
 #define O_RDWR   0x0002
 #define O_CREAT  0x0040
@@ -165,10 +166,79 @@ static void test_map_file(void) {
     printf("[dyn] map file ok\n");
 }
 
+// ------------------------------------------------- concurrent faulting
+
+// Two threads touch the same page of one mapping at the same moment.
+// Exactly one frame must end up installed, and the free-frame count
+// must return to its baseline after the unmaps. A missed
+// re-validation in the fault path shows up here as a leak and
+// essentially nowhere else -- the mapping still reads correctly, so
+// only the frame count gives it away.
+static volatile int race_go, race_done;
+static volatile long race_addr;
+
+static void *race_thread(void *arg) {
+    (void)arg;
+    while (!race_go) { __asm__ volatile("pause"); }
+    volatile unsigned char v = *(const volatile unsigned char *)race_addr;
+    (void)v;
+    __atomic_fetch_add((int *)&race_done, 1, __ATOMIC_SEQ_CST);
+    return 0;
+}
+
+static long pmm_free_now(void) {
+    return neo2(SYS_TEST_HOOK, TESTHOOK_PMM_FREE, 0);
+}
+
+static void test_concurrent_fault(void) {
+    const char *path = "/tmp/dl-race";
+    (void)neo_unlink(path);
+    long fd = neo_open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    check(fd >= 0, "open /tmp/dl-race");
+    if (fd < 0) { return; }
+    static char src[4096];
+    for (int i = 0; i < 4096; i++) { src[i] = (char)(i & 0xFF); }
+    check(neo3(SYS_WRITE, fd, src, sizeof src) == sizeof src, "seed write");
+
+    long before = pmm_free_now();
+    check(before > 0, "pmm free hook works");
+
+    for (int round = 0; round < 8; round++) {
+        race_addr = neo6(SYS_MMAP, 0, 4096, PROT_READ, MAP_PRIVATE, fd, 0);
+        if (race_addr <= 0) { check(0, "race mapping"); break; }
+
+        race_go = 0; race_done = 0;
+        pthread_t t1, t2;
+        int c1 = pthread_create(&t1, 0, race_thread, 0);
+        int c2 = pthread_create(&t2, 0, race_thread, 0);
+        if (c1 != 0 || c2 != 0) { check(0, "pthread_create"); break; }
+        race_go = 1;
+        pthread_join(t1, 0);
+        pthread_join(t2, 0);
+
+        check(race_done == 2, "both threads finished");
+        check(((const volatile unsigned char *)race_addr)[7] == 7, "page content correct");
+        (void)neo2(SYS_MUNMAP, race_addr, 4096);
+    }
+
+    long after = pmm_free_now();
+    // Slack covers thread stacks the allocator has not handed back; a
+    // per-round leak would be eight frames or more, well outside it.
+    check(after >= before - 8, "no frames leaked by concurrent faults");
+    if (after < before - 8) {
+        printf("[dyn]   free before=%d after=%d\n", (int)before, (int)after);
+    }
+
+    (void)neo1(SYS_CLOSE, fd);
+    (void)neo_unlink(path);
+    printf("[dyn] concurrent fault ok\n");
+}
+
 int main(void) {
     printf("[dyn] start\n");
     test_pread();
     test_map_file();
+    test_concurrent_fault();
     if (failures) {
         printf("[dyn] %d FAILURES\n", failures);
         return 1;
