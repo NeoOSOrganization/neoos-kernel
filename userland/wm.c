@@ -80,8 +80,34 @@ struct fb_fix_screeninfo {
 };
 
 static int       fb_fd = -1, tty_fd = -1;
-static uint32_t *fb;
+static uint32_t *fb;                 // the scanned-out framebuffer
+static uint32_t *back;               // where compositing actually happens
 static uint32_t  fb_w, fb_h, fb_stride_px, fb_bytes;
+
+// The accumulated damage rectangle, in screen coordinates, as a
+// bounding box. Compositing happens in RAM and only this region is
+// copied out to the framebuffer -- writes to the real framebuffer are
+// by far the expensive part, and copying 4 MB to move a cursor is what
+// makes a software compositor feel slow.
+static int dmg_x0, dmg_y0, dmg_x1, dmg_y1;   // x1/y1 exclusive
+static int dmg_any;
+
+static void damage(int x, int y, int w, int h) {
+    if (w <= 0 || h <= 0) { return; }
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > (int)fb_w) { w = (int)fb_w - x; }
+    if (y + h > (int)fb_h) { h = (int)fb_h - y; }
+    if (w <= 0 || h <= 0) { return; }
+
+    if (!dmg_any) { dmg_x0 = x; dmg_y0 = y; dmg_x1 = x + w; dmg_y1 = y + h; dmg_any = 1; return; }
+    if (x < dmg_x0) { dmg_x0 = x; }
+    if (y < dmg_y0) { dmg_y0 = y; }
+    if (x + w > dmg_x1) { dmg_x1 = x + w; }
+    if (y + h > dmg_y1) { dmg_y1 = y + h; }
+}
+
+static void damage_all(void) { damage(0, 0, (int)fb_w, (int)fb_h); }
 
 // ---- input ------------------------------------------------------------
 
@@ -126,13 +152,17 @@ static int screen_dirty = 1;
 
 // ---- painting ---------------------------------------------------------
 
+// Everything below composites into `back`, never into `fb`. Drawing
+// straight into the scanned-out framebuffer is what made the screen
+// flicker: repaint clears to the desktop colour first, so every cursor
+// move showed a blank frame before the windows came back.
 static void fill(int x, int y, int w, int h, uint32_t colour) {
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
     if (x + w > (int)fb_w) { w = (int)fb_w - x; }
     if (y + h > (int)fb_h) { h = (int)fb_h - y; }
     for (int row = 0; row < h; row++) {
-        uint32_t *dst = fb + (uint64_t)(y + row) * fb_stride_px + x;
+        uint32_t *dst = back + (uint64_t)(y + row) * fb_w + x;
         for (int col = 0; col < w; col++) { dst[col] = colour; }
     }
 }
@@ -148,7 +178,7 @@ static void draw_cursor(void) {
     for (int row = 0; row < CURSOR_H; row++) {
         int y = cur_y + row;
         if (y < 0 || y >= (int)fb_h) { continue; }
-        uint32_t *dst = fb + (uint64_t)y * fb_stride_px;
+        uint32_t *dst = back + (uint64_t)y * fb_w;
         for (int col = 0; col < CURSOR_W; col++) {
             int x = cur_x + col;
             if (x < 0 || x >= (int)fb_w) { continue; }
@@ -171,7 +201,7 @@ static void draw_window(struct client *c, int focused) {
     for (uint32_t row = 0; row < c->h; row++) {
         int y = c->y + (int)row;
         if (y < 0 || y >= (int)fb_h) { continue; }
-        uint32_t *dst = fb + (uint64_t)y * fb_stride_px + c->x;
+        uint32_t *dst = back + (uint64_t)y * fb_w + c->x;
         const uint32_t *src = c->px + (uint64_t)row * c->stride_px;
         int w = (int)c->w;
         if (c->x + w > (int)fb_w) { w = (int)fb_w - c->x; }
@@ -179,12 +209,32 @@ static void draw_window(struct client *c, int focused) {
     }
 }
 
+// A window's full extent including its decoration.
+static void damage_window(struct client *c) {
+    if (!c->mapped) { return; }
+    damage(c->x - BORDER, c->y - TITLE_H - BORDER,
+           (int)c->w + 2 * BORDER, (int)c->h + TITLE_H + 2 * BORDER);
+}
+
 static void repaint(void) {
+    if (!dmg_any) { screen_dirty = 0; return; }
+
+    // Compose the whole scene in RAM. This is cheap next to touching the
+    // framebuffer, and it means the visible screen never shows a
+    // partially drawn frame.
     fill(0, 0, (int)fb_w, (int)fb_h, 0x00202830);      // desktop
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (clients[i].fd >= 0) { draw_window(&clients[i], i == focus_slot); }
     }
     draw_cursor();
+
+    // Copy out only what changed.
+    for (int y = dmg_y0; y < dmg_y1; y++) {
+        const uint32_t *src = back + (uint64_t)y * fb_w + dmg_x0;
+        uint32_t *dst = fb + (uint64_t)y * fb_stride_px + dmg_x0;
+        for (int x = 0; x < dmg_x1 - dmg_x0; x++) { dst[x] = src[x]; }
+    }
+    dmg_any = 0;
     screen_dirty = 0;
 }
 
@@ -201,6 +251,7 @@ static void send_to(struct client *c, int type, const void *body, int blen) {
 static void drop_client(struct client *c) {
     if (c->fd < 0) { return; }
     printf("[wm] client gone\n");
+    damage_window(c);                      // the hole it leaves behind
     if (c->px) { munmap(c->px, c->bytes); c->px = 0; }
     close(c->fd);
     c->fd = -1;
@@ -318,17 +369,24 @@ static void handle_message(struct client *c, struct wm_header *h,
         break;
     }
 
-    case WM_DAMAGE:
-        // Recorded only as "something changed": this compositor repaints
-        // whole windows. Per-rectangle repaint is the obvious next step,
-        // and the protocol already carries what it needs.
-        screen_dirty = 1;
+    case WM_DAMAGE: {
+        // The client's rectangle is surface-relative; the compositor
+        // works in screen coordinates.
+        struct wm_damage *d = (struct wm_damage *)body;
+        if (c->mapped) {
+            damage(c->x + d->x, c->y + d->y, (int)d->w, (int)d->h);
+            screen_dirty = 1;
+        }
         break;
+    }
 
     case WM_COMMIT:
         if (c->px) {
-            if (!c->mapped) { printf("[wm] surface mapped\n"); }
-            c->mapped = 1;
+            if (!c->mapped) {
+                printf("[wm] surface mapped\n");
+                c->mapped = 1;
+                damage_window(c);          // decoration included, once
+            }
             screen_dirty = 1;
         }
         break;
@@ -367,6 +425,7 @@ static void pump_mouse(void) {
     struct input_event_u ev[16];
     long n = read(mouse_fd, ev, sizeof ev);
     if (n <= 0) { return; }
+    int old_x = cur_x, old_y = cur_y;
     int count = (int)(n / (long)sizeof(struct input_event_u));
 
     for (int i = 0; i < count; i++) {
@@ -374,7 +433,13 @@ static void pump_mouse(void) {
         else if (ev[i].type == EV_REL && ev[i].code == REL_Y) { cur_y += ev[i].value; }
         else if (ev[i].type == EV_KEY && ev[i].code == BTN_LEFT) {
             int hit = slot_at(cur_x, cur_y);
-            if (ev[i].value == 1 && hit >= 0) { focus_slot = hit; }
+            if (ev[i].value == 1 && hit >= 0 && hit != focus_slot) {
+                // The old and new focus both change colour.
+                if (focus_slot >= 0) { damage_window(&clients[focus_slot]); }
+                focus_slot = hit;
+                damage_window(&clients[hit]);
+                screen_dirty = 1;
+            }
             if (hit >= 0) {
                 struct wm_pointer_button pb = { (uint16_t)ev[i].code,
                                                 (uint16_t)ev[i].value };
@@ -392,7 +457,15 @@ static void pump_mouse(void) {
         struct wm_pointer_motion pm = { cur_x - clients[hit].x, cur_y - clients[hit].y };
         send_to(&clients[hit], WM_POINTER_MOTION, &pm, sizeof pm);
     }
-    screen_dirty = 1;
+
+    // Only the two cursor positions changed, so only they need copying
+    // out. Repainting the whole screen for a mouse move is what made
+    // this expensive as well as ugly.
+    if (cur_x != old_x || cur_y != old_y) {
+        damage(old_x, old_y, CURSOR_W, CURSOR_H);
+        damage(cur_x, cur_y, CURSOR_W, CURSOR_H);
+        screen_dirty = 1;
+    }
 }
 
 static void pump_keyboard(void) {
@@ -435,6 +508,14 @@ static int screen_open(void) {
 
     fb = mmap(0, fb_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fb_fd, 0);
     if (!fb || (long)fb < 0) { printf("[wm] mmap(/dev/fb0) failed\n"); return -1; }
+
+    // The compositing buffer. Anonymous memory, tightly packed at fb_w
+    // stride -- the framebuffer's own stride may be wider, and that
+    // padding is not something the compositor should carry around.
+    uint64_t back_bytes = (uint64_t)fb_w * fb_h * 4;
+    back = mmap(0, back_bytes, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (!back || (long)back < 0) { printf("[wm] back buffer alloc failed\n"); return -1; }
+    damage_all();
 
     cur_x = (int)fb_w / 2; cur_y = (int)fb_h / 2;
     printf("[wm] screen %ux%u\n", fb_w, fb_h);
