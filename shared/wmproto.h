@@ -48,7 +48,14 @@ struct wm_header {
 };
 
 struct wm_hello          { uint32_t version; };
-struct wm_create_surface { uint32_t width, height; };
+// WM_SURFACE_SHELL marks the desktop shell: no decoration, positioned
+// at the origin, and kept at the BOTTOM of the stack so ordinary
+// windows float above it. There is exactly one; a second request for
+// it is treated as an ordinary window.
+#define WM_SURFACE_NORMAL 0
+#define WM_SURFACE_SHELL  1
+
+struct wm_create_surface { uint32_t width, height, flags; };
 struct wm_attach_buffer  { uint32_t stride, format; };
 struct wm_damage         { int32_t x, y; uint32_t w, h; };
 struct wm_set_title      { uint16_t len; char text[62]; };

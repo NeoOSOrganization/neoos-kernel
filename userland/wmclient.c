@@ -46,6 +46,7 @@ struct wm_conn {
     int       memfd;
     uint32_t  id;
     uint32_t  w, h;
+    uint32_t  screen_w, screen_h;
     uint32_t *px;
     int       alive;
 };
@@ -85,16 +86,34 @@ struct wm_conn *wm_connect(void) {
     if (send_msg(c, WM_HELLO, 0, &hello, sizeof hello) != 0) {
         close(c->fd); c->fd = -1; return 0;
     }
+
+    // The compositor answers a hello with the screen geometry, on
+    // surface 0. A shell needs it before it can size itself, and every
+    // client benefits from knowing it up front rather than guessing.
+    struct wm_header h;
+    struct wm_configure cfg = { 0, 0 };
+    if (read(c->fd, &h, sizeof h) == (long)sizeof h &&
+        h.type == WM_CONFIGURE && h.length == sizeof cfg) {
+        if (read(c->fd, &cfg, sizeof cfg) == (long)sizeof cfg) {
+            c->screen_w = cfg.width;
+            c->screen_h = cfg.height;
+        }
+    }
+
     c->alive = 1;
     return c;
 }
 
-int32_t wm_create_window(struct wm_conn *c, uint32_t w, uint32_t h, const char *title) {
+uint32_t wm_screen_width(struct wm_conn *c)  { return c ? c->screen_w : 0; }
+uint32_t wm_screen_height(struct wm_conn *c) { return c ? c->screen_h : 0; }
+
+static int32_t create_surface(struct wm_conn *c, uint32_t w, uint32_t h,
+                              const char *title, uint32_t flags) {
     if (!c || !c->alive) { return -1; }
     c->w = w; c->h = h;
     c->id = 1;
 
-    struct wm_create_surface cs = { w, h };
+    struct wm_create_surface cs = { w, h, flags };
     if (send_msg(c, WM_CREATE_SURFACE, c->id, &cs, sizeof cs) != 0) { return -1; }
 
     const char *nm = "wm-surface";
@@ -137,6 +156,17 @@ int32_t wm_create_window(struct wm_conn *c, uint32_t w, uint32_t h, const char *
         send_msg(c, WM_SET_TITLE, c->id, &st, sizeof st);
     }
     return (int32_t)c->id;
+}
+
+int32_t wm_create_window(struct wm_conn *c, uint32_t w, uint32_t h, const char *title) {
+    return create_surface(c, w, h, title, WM_SURFACE_NORMAL);
+}
+
+int32_t wm_create_shell(struct wm_conn *c, uint32_t w, uint32_t h) {
+    if (!c) { return -1; }
+    if (w == 0) { w = c->screen_w; }
+    if (h == 0) { h = c->screen_h; }
+    return create_surface(c, w, h, 0, WM_SURFACE_SHELL);
 }
 
 uint32_t *wm_pixels(struct wm_conn *c)   { return c ? c->px : 0; }

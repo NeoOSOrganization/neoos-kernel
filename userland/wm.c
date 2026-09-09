@@ -144,6 +144,7 @@ struct client {
     uint32_t  stride_px;
     char      title[64];
     int       mapped;         // committed at least once
+    int       is_shell;       // undecorated, at the origin, behind all
 };
 
 static struct client clients[MAX_CLIENTS];
@@ -189,13 +190,17 @@ static void draw_cursor(void) {
 
 static void draw_window(struct client *c, int focused) {
     if (!c->mapped || !c->px) { return; }
-    uint32_t frame = focused ? 0x003A6EA5 : 0x00505050;
 
-    fill(c->x - BORDER, c->y - TITLE_H - BORDER,
-         (int)c->w + 2 * BORDER, TITLE_H + BORDER, frame);
-    fill(c->x - BORDER, c->y, BORDER, (int)c->h, frame);
-    fill(c->x + (int)c->w, c->y, BORDER, (int)c->h, frame);
-    fill(c->x - BORDER, c->y + (int)c->h, (int)c->w + 2 * BORDER, BORDER, frame);
+    // The shell draws its own everything -- a title bar on the desktop
+    // would be absurd.
+    if (!c->is_shell) {
+        uint32_t frame = focused ? 0x003A6EA5 : 0x00505050;
+        fill(c->x - BORDER, c->y - TITLE_H - BORDER,
+             (int)c->w + 2 * BORDER, TITLE_H + BORDER, frame);
+        fill(c->x - BORDER, c->y, BORDER, (int)c->h, frame);
+        fill(c->x + (int)c->w, c->y, BORDER, (int)c->h, frame);
+        fill(c->x - BORDER, c->y + (int)c->h, (int)c->w + 2 * BORDER, BORDER, frame);
+    }
 
     // The content, straight out of the client's own pages.
     for (uint32_t row = 0; row < c->h; row++) {
@@ -212,6 +217,7 @@ static void draw_window(struct client *c, int focused) {
 // A window's full extent including its decoration.
 static void damage_window(struct client *c) {
     if (!c->mapped) { return; }
+    if (c->is_shell) { damage(c->x, c->y, (int)c->w, (int)c->h); return; }
     damage(c->x - BORDER, c->y - TITLE_H - BORDER,
            (int)c->w + 2 * BORDER, (int)c->h + TITLE_H + 2 * BORDER);
 }
@@ -223,8 +229,15 @@ static void repaint(void) {
     // framebuffer, and it means the visible screen never shows a
     // partially drawn frame.
     fill(0, 0, (int)fb_w, (int)fb_h, 0x00202830);      // desktop
+    // The shell is the backdrop: it goes down first and everything else
+    // floats above it, whatever order the clients happened to connect in.
     for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (clients[i].fd >= 0) { draw_window(&clients[i], i == focus_slot); }
+        if (clients[i].fd >= 0 && clients[i].is_shell) { draw_window(&clients[i], 0); }
+    }
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (clients[i].fd >= 0 && !clients[i].is_shell) {
+            draw_window(&clients[i], i == focus_slot);
+        }
     }
     draw_cursor();
 
@@ -336,9 +349,17 @@ static void place_window(struct client *c) {
 static void handle_message(struct client *c, struct wm_header *h,
                            uint8_t *body, int passed_fd) {
     switch (h->type) {
-    case WM_HELLO:
+    case WM_HELLO: {
         printf("[wm] client hello, version %u\n", ((struct wm_hello *)body)->version);
+        // Answer with the screen geometry on surface 0: a shell needs it
+        // before it can size itself.
+        struct wm_configure screen = { fb_w, fb_h };
+        uint32_t saved = c->id;
+        c->id = 0;
+        send_to(c, WM_CONFIGURE, &screen, sizeof screen);
+        c->id = saved;
         break;
+    }
 
     case WM_CREATE_SURFACE: {
         struct wm_create_surface *cs = (struct wm_create_surface *)body;
@@ -347,7 +368,12 @@ static void handle_message(struct client *c, struct wm_header *h,
         c->id = h->surface_id;
         c->w = cs->width; c->h = cs->height;
         c->has_surface = 1;
-        place_window(c);
+        c->is_shell = (cs->flags & WM_SURFACE_SHELL) != 0;
+        if (c->is_shell) {
+            c->x = 0; c->y = 0;         // the shell owns the whole screen
+        } else {
+            place_window(c);
+        }
         struct wm_configure cfg = { c->w, c->h };
         send_to(c, WM_CONFIGURE, &cfg, sizeof cfg);
         printf("[wm] surface %ux%u\n", c->w, c->h);
@@ -411,12 +437,18 @@ static void handle_message(struct client *c, struct wm_header *h,
 
 // ---- input routing ----------------------------------------------------
 
+// Topmost surface under the point. Ordinary windows are searched
+// first, in reverse connection order; the shell answers only where no
+// window covers, matching what is actually drawn.
 static int slot_at(int x, int y) {
-    for (int i = MAX_CLIENTS - 1; i >= 0; i--) {
-        struct client *c = &clients[i];
-        if (c->fd < 0 || !c->mapped) { continue; }
-        if (x >= c->x && x < c->x + (int)c->w &&
-            y >= c->y && y < c->y + (int)c->h) { return i; }
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = MAX_CLIENTS - 1; i >= 0; i--) {
+            struct client *c = &clients[i];
+            if (c->fd < 0 || !c->mapped) { continue; }
+            if ((pass == 0) == (c->is_shell != 0)) { continue; }
+            if (x >= c->x && x < c->x + (int)c->w &&
+                y >= c->y && y < c->y + (int)c->h) { return i; }
+        }
     }
     return -1;
 }

@@ -22,6 +22,7 @@
 
 #include "fs/vfs.h"
 #include "fs/procfs.h"
+#include "drivers/char/timer.h"
 #include "sched/proc.h"
 #include "sched/proc_table.h"
 #include "mm/heap.h"
@@ -32,6 +33,9 @@
 // files are derived from its pid so no table has to be kept in step
 // with the process table.
 #define PROC_INO_ROOT     0
+// System-wide /proc/stat. A fixed inode below PROC_INO_BASE, so it
+// cannot collide with a per-pid one.
+#define PROC_INO_SYSSTAT  1
 #define PROC_INO_BASE     16
 #define PROC_PER_PID      4
 #define PROC_KIND_DIR     0
@@ -159,6 +163,11 @@ static int procfs_read_inode(struct vfs_mount *m, uint64_t inode_id,
         out->size = 0;
         return 0;
     }
+    if (inode_id == PROC_INO_SYSSTAT) {
+        out->type = VNODE_FILE;
+        out->size = 0;
+        return 0;
+    }
     int kind = ino_kind(inode_id);
     if (kind == PROC_KIND_DIR) {
         out->type = VNODE_DIR;
@@ -193,6 +202,15 @@ static int name_to_pid(const char *name) {
 static int procfs_lookup(struct vnode *dir, const char *name,
                          uint64_t *out_inode_id) {
     if (dir->inode_id == PROC_INO_ROOT) {
+        // /proc/stat -- system-wide, distinct from /proc/<pid>/stat.
+        int is_stat = 1;
+        const char *st = "stat";
+        for (int i = 0; ; i++) {
+            if (name[i] != st[i]) { is_stat = 0; break; }
+            if (!st[i]) { break; }
+        }
+        if (is_stat) { *out_inode_id = PROC_INO_SYSSTAT; return 0; }
+
         int pid = name_to_pid(name);
         if (pid < 0) { return -ENOENT; }
         struct pid_list l = { .n = 0 };
@@ -215,8 +233,39 @@ static int procfs_lookup(struct vnode *dir, const char *name,
     return -ENOENT;
 }
 
+// /proc/stat, in Linux's shape:
+//
+//   cpu  <user> <nice> <system> <idle> <iowait> <irq> <softirq>
+//
+// NeoOS does not separate user from system time or account irq/iowait,
+// so all busy time is reported as `user` and the rest is zero. A
+// desktop reading this samples twice and takes the ratio of the
+// deltas, which is exactly what the fields support. The DIVERGENCE --
+// no user/system split -- is recorded in docs/stdlib.md.
+static int render_sysstat(char *out, int cap) {
+    uint64_t busy = 0, idle = 0;
+    cpu_usage_ticks(&busy, &idle);
+    int at = 0;
+    at = put_str(out, cap, at, "cpu  ");
+    at = put_int(out, cap, at, (long)busy);
+    at = put_str(out, cap, at, " 0 0 ");
+    at = put_int(out, cap, at, (long)idle);
+    at = put_str(out, cap, at, " 0 0 0 0 0 0\n");
+    out[at] = 0;
+    return at;
+}
+
 static int64_t procfs_read(struct vnode *vn, uint32_t pos, void *buf,
                            uint32_t len) {
+    if (vn->inode_id == PROC_INO_SYSSTAT) {
+        char tmp[128];
+        int n = render_sysstat(tmp, (int)sizeof tmp);
+        if (pos >= (uint32_t)n) { return 0; }
+        uint32_t k = (uint32_t)n - pos;
+        if (k > len) { k = len; }
+        for (uint32_t i = 0; i < k; i++) { ((char *)buf)[i] = tmp[pos + i]; }
+        return (int64_t)k;
+    }
     int kind = ino_kind(vn->inode_id);
     if (kind != PROC_KIND_STAT && kind != PROC_KIND_CMDLINE) { return -EISDIR; }
 
@@ -263,6 +312,14 @@ static void name_from_int(char *out, int v) {
 static int procfs_readdir(struct vnode *dir, uint32_t index,
                           struct vfs_dirent *out) {
     if (dir->inode_id == PROC_INO_ROOT) {
+        if (index == 0) {
+            out->name[0] = 's'; out->name[1] = 't'; out->name[2] = 'a';
+            out->name[3] = 't'; out->name[4] = '\0';
+            out->ino = PROC_INO_SYSSTAT;
+            out->type = VNODE_FILE;
+            return 0;
+        }
+        index--;
         struct pid_list l = { .n = 0 };
         proc_table_for_each_ref(collect_pid, &l);
         if (index >= (uint32_t)l.n) { return -ENOENT; }

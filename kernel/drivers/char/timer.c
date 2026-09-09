@@ -87,9 +87,32 @@ static void timer_arm_next(struct cpu *c) {
 // EVERY CPU takes this from its own LAPIC one-shot. Only the BSP owns
 // the shared wall clock: tick_count++ is a read-modify-write, so four
 // CPUs racing on it would lose updates and run time fast.
+// System-wide CPU accounting, in timer ticks, summed across CPUs.
+//
+// Sampled here because this is the one place that runs regardless of
+// what the CPU is doing: whatever thread the tick interrupted is what
+// that CPU was running for the interval just elapsed. The idle thread
+// is the marker -- a CPU running it had nothing else to do.
+static volatile uint64_t cpu_busy_ticks, cpu_idle_ticks;
+
+void cpu_usage_ticks(uint64_t *busy, uint64_t *idle) {
+    if (busy) { *busy = cpu_busy_ticks; }
+    if (idle) { *idle = cpu_idle_ticks; }
+}
+
 void timer_handler(void) {
     struct cpu *c = this_cpu();
     c->timer_ticks_local++;
+
+    // Before a CPU enters the scheduler it has no current thread and is
+    // neither busy nor idle in any meaningful sense; leave it out.
+    if (c->current) {
+        if (c->current == c->idle) {
+            __atomic_fetch_add(&cpu_idle_ticks, 1, __ATOMIC_RELAXED);
+        } else {
+            __atomic_fetch_add(&cpu_busy_ticks, 1, __ATOMIC_RELAXED);
+        }
+    }
 
     // The one-shot always runs to completion, so the interval we armed
     // last time is exactly the real time that has elapsed.

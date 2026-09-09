@@ -21,6 +21,15 @@ void            wm_disconnect(struct wm_conn *c);
 // by descriptor. Returns the surface id, or a negative errno.
 int32_t  wm_create_window(struct wm_conn *c, uint32_t w, uint32_t h, const char *title);
 
+// Like wm_create_window, but for the desktop shell: undecorated, at the
+// origin, behind everything else. Pass 0 for w/h to fill the screen.
+int32_t  wm_create_shell(struct wm_conn *c, uint32_t w, uint32_t h);
+
+// The screen size, valid after wm_connect. A shell uses it to lay
+// itself out.
+uint32_t wm_screen_width(struct wm_conn *c);
+uint32_t wm_screen_height(struct wm_conn *c);
+
 // The pixels. XRGB8888, w*4 bytes per row, valid until wm_disconnect.
 uint32_t *wm_pixels(struct wm_conn *c);
 uint32_t  wm_stride_px(struct wm_conn *c);
