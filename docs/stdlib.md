@@ -1000,8 +1000,12 @@ sender may close its original immediately.
 ## The window system: `neoos-wm` and `wmclient` (GUI stack G4-G6)
 
 A NeoOS extension with no POSIX analogue, so it gets a real library
-rather than leaving callers to hand-roll a wire protocol:
-`userland/wmclient.h`.
+rather than leaving callers to hand-roll a wire protocol. The
+compositor, `wmclient`, and the wire protocol all live in the sibling
+`neoos-wm` repo (extracted out of this monorepo so whether an image
+carries a desktop at all is a build-time choice -- see
+`neoos-os-builder`'s `desktop.enabled` config key); `wmclient.h` is
+`neoos-wm/wmclient.h`.
 
 ```c
 struct wm_conn *c = wm_connect();
@@ -1022,7 +1026,7 @@ motion (surface-relative), pointer buttons, keys, focus changes, and
 configure. Keycodes and button codes are Linux's evdev values, because
 they come straight from `/dev/input/event*`.
 
-The protocol itself is in `shared/wmproto.h`: an 8-byte header
+The protocol itself is in `neoos-wm/wmproto.h`: an 8-byte header
 (`type`, `length`, `surface_id`) and a fixed body per type, all
 little-endian. Fixed sizes are deliberate — a reader never parses a
 length it has not validated.

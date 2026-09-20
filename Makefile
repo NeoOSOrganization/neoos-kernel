@@ -259,7 +259,7 @@ $(USERLAND_BUILD)/TERMCHILD.ELF: $(USERLAND_DIR)/termchild.c $(USERLAND_DIR)/use
 	@mkdir -p $(USERLAND_BUILD)
 	$(CC) $(USER_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIBNEOOS_DIR)/lib/crt0.o $(USERLAND_DIR)/termchild.c -L$(LIBNEOOS_DIR)/lib -lneoos
 
-$(DISK_IMG): $(BUILD_DIR)/embedfs_table.c $(USERLAND_BUILD)/TERM.ELF $(USERLAND_BUILD)/INIT.ELF $(USERLAND_BUILD)/NSH.ELF $(USERLAND_BUILD)/LOGIN.ELF $(USERLAND_BUILD)/WM.ELF
+$(DISK_IMG): $(BUILD_DIR)/embedfs_table.c $(USERLAND_BUILD)/TERM.ELF $(USERLAND_BUILD)/INIT.ELF $(USERLAND_BUILD)/NSH.ELF $(USERLAND_BUILD)/LOGIN.ELF
 	mkdir -p $(DISK_SRC)/dir $(DISK_SRC)/nex
 	printf 'Hello from NeoOS FAT16!\n' > $(DISK_SRC)/hello.txt
 	head -c 8192 /dev/zero | tr '\0' 'N' > $(DISK_SRC)/bigfile.txt
@@ -305,13 +305,21 @@ $(DISK_IMG): $(BUILD_DIR)/embedfs_table.c $(USERLAND_BUILD)/TERM.ELF $(USERLAND_
 	@# nothing here) lands under /opt/<name>/, for the port's own code
 	@# to find by a fixed, known path. init.c's base_env puts
 	@# /usr/local/bin on $PATH for exactly this.
-	@# The compositor is a system component, not a port: every image
-	@# gets it, so an installed GUI application has something to connect
-	@# to. It is ~20 KB and does nothing unless a client appears.
-	mmd -i $(DISK_IMG) ::usr/local 2>/dev/null || true
-	mmd -i $(DISK_IMG) ::usr/local/bin 2>/dev/null || true
-	./tools/nexify.sh $(USERLAND_BUILD)/WM.ELF $(BUILD_DIR)/wm.nex
-	mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/wm.nex ::usr/local/bin/wm.nex
+	@# The compositor is OPT-IN, not a system component every image
+	@# carries: whether an image is a headless app-runner or a full
+	@# desktop is a build-time choice (neoos-os-builder's `desktop:`
+	@# config key). Its presence here is driven by whether neoos-wm has
+	@# actually been built at WM_DIR -- the same "you get what you
+	@# built" signal PORT_DIRS uses below -- not a separate flag.
+	@if [ -f "$(WM_DIR)/build/WM.ELF" ]; then \
+		mmd -i $(DISK_IMG) ::usr/local 2>/dev/null || true; \
+		mmd -i $(DISK_IMG) ::usr/local/bin 2>/dev/null || true; \
+		./tools/nexify.sh $(WM_DIR)/build/WM.ELF $(BUILD_DIR)/wm.nex; \
+		mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/wm.nex ::usr/local/bin/wm.nex; \
+		echo "disk: neoos-wm found at $(WM_DIR) -- wm.nex installed"; \
+	else \
+		echo "disk: no neoos-wm build at $(WM_DIR)/build/WM.ELF -- headless image, no compositor"; \
+	fi
 	@echo "disk: PORT_DIRS=$(PORT_DIRS)"
 	@for pair in $(PORT_DIRS); do \
 		name=$${pair%%=*}; path=$${pair#*=}; \
@@ -902,24 +910,26 @@ spvtest: iso disk-image
 
 # ---- neoos-wm: the compositor, its client library, and a smoke test ----
 #
-# `make wm` boots the compositor with a bounded frame count and the C
-# demo client, both from one INITTAB, and greps the serial log. The
-# bound is what keeps a headless run from hanging the build.
-WM_SRC     := $(USERLAND_DIR)/wm.c
-WMCLIENT   := $(USERLAND_DIR)/wmclient.c
-
-$(USERLAND_BUILD)/WM.ELF: $(WM_SRC) shared/wmproto.h $(USERLAND_DIR)/user.ld $(LIBNEOOS_DIR)/lib/crt0.o $(LIBNEOOS_DIR)/lib/libneoos.a
-	@mkdir -p $(USERLAND_BUILD)
-	$(CC) $(USER_CFLAGS) $(EXTRA_CFLAGS) -T $(USERLAND_DIR)/user.ld -o $@ $(LIBNEOOS_DIR)/lib/crt0.o $(WM_SRC) -L$(LIBNEOOS_DIR)/lib -lneoos
-
-$(USERLAND_BUILD)/WMDEMO.ELF: $(USERLAND_DIR)/wmdemo.c $(WMCLIENT) shared/wmproto.h $(USERLAND_DIR)/user.ld $(LIBNEOOS_DIR)/lib/crt0.o $(LIBNEOOS_DIR)/lib/libneoos.a
-	@mkdir -p $(USERLAND_BUILD)
-	$(CC) $(USER_CFLAGS) $(EXTRA_CFLAGS) -I$(USERLAND_DIR) -T $(USERLAND_DIR)/user.ld -o $@ $(LIBNEOOS_DIR)/lib/crt0.o $(USERLAND_DIR)/wmdemo.c $(WMCLIENT) -L$(LIBNEOOS_DIR)/lib -lneoos
+# neoos-wm is a sibling repo, built separately (`make` there produces
+# build/WM.ELF, build/libwmclient.a, build/WMDEMO.ELF) -- extracted out
+# of this monorepo so whether an image carries a desktop at all is a
+# build-time choice (see neoos-os-builder's `desktop:` config key).
+# This Makefile just mcopies its already-built .nex files onto the disk
+# and boots them, the same way `make spvtest TINYGL_DIR=...` consumes
+# neoos-tinygl. `make wm` boots the compositor with a bounded frame
+# count and the C demo client, both from one INITTAB, and greps the
+# serial log. The bound is what keeps a headless run from hanging the
+# build.
+WM_DIR ?= ../neoos-wm
+WM_ELF     := $(WM_DIR)/build/WM.ELF
+WMDEMO_ELF := $(WM_DIR)/build/WMDEMO.ELF
 
 .PHONY: wm
-wm: iso disk-image $(USERLAND_BUILD)/WM.ELF $(USERLAND_BUILD)/WMDEMO.ELF
-	./tools/nexify.sh $(USERLAND_BUILD)/WM.ELF $(BUILD_DIR)/wm.nex
-	./tools/nexify.sh $(USERLAND_BUILD)/WMDEMO.ELF $(BUILD_DIR)/wmdemo.nex
+wm: iso disk-image
+	@test -f $(WM_ELF) || { echo "wm: $(WM_ELF) missing -- build neoos-wm first (WM_DIR=$(WM_DIR))"; exit 1; }
+	@test -f $(WMDEMO_ELF) || { echo "wm: $(WMDEMO_ELF) missing -- build neoos-wm first (WM_DIR=$(WM_DIR))"; exit 1; }
+	./tools/nexify.sh $(WM_ELF) $(BUILD_DIR)/wm.nex
+	./tools/nexify.sh $(WMDEMO_ELF) $(BUILD_DIR)/wmdemo.nex
 	mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/wm.nex ::wm.nex
 	mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/wmdemo.nex ::wmdemo.nex
 	@printf '%s\n' \
@@ -941,9 +951,11 @@ wm: iso disk-image $(USERLAND_BUILD)/WM.ELF $(USERLAND_BUILD)/WMDEMO.ELF
 # cannot: it boots with the QEMU monitor attached, lets the compositor
 # and demo client run long, and screendumps the framebuffer.
 .PHONY: wm-shot
-wm-shot: iso disk-image $(USERLAND_BUILD)/WM.ELF $(USERLAND_BUILD)/WMDEMO.ELF
-	./tools/nexify.sh $(USERLAND_BUILD)/WM.ELF $(BUILD_DIR)/wm.nex
-	./tools/nexify.sh $(USERLAND_BUILD)/WMDEMO.ELF $(BUILD_DIR)/wmdemo.nex
+wm-shot: iso disk-image
+	@test -f $(WM_ELF) || { echo "wm-shot: $(WM_ELF) missing -- build neoos-wm first (WM_DIR=$(WM_DIR))"; exit 1; }
+	@test -f $(WMDEMO_ELF) || { echo "wm-shot: $(WMDEMO_ELF) missing -- build neoos-wm first (WM_DIR=$(WM_DIR))"; exit 1; }
+	./tools/nexify.sh $(WM_ELF) $(BUILD_DIR)/wm.nex
+	./tools/nexify.sh $(WMDEMO_ELF) $(BUILD_DIR)/wmdemo.nex
 	mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/wm.nex ::wm.nex
 	mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/wmdemo.nex ::wmdemo.nex
 	@printf '%s\n' \
@@ -964,9 +976,10 @@ NEOOS_LVGL_DIR ?= $(HOME)/projects/personal/neoos-lvgl
 HELLO_BIN := $(NEOOS_LVGL_DIR)/csharp/Hello/bin/Release/net10.0/linux-musl-x64/native/Hello
 
 .PHONY: hello
-hello: iso disk-image $(USERLAND_BUILD)/WM.ELF
+hello: iso disk-image
+	@test -f $(WM_ELF) || { echo "hello: $(WM_ELF) missing -- build neoos-wm first (WM_DIR=$(WM_DIR))"; exit 1; }
 	@test -f $(HELLO_BIN) || { echo "hello: $(HELLO_BIN) not built -- run neoos-lvgl/csharp/Hello/publish.sh"; exit 1; }
-	./tools/nexify.sh $(USERLAND_BUILD)/WM.ELF $(BUILD_DIR)/wm.nex
+	./tools/nexify.sh $(WM_ELF) $(BUILD_DIR)/wm.nex
 	./tools/nexify.sh $(HELLO_BIN) $(BUILD_DIR)/hello.nex
 	mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/wm.nex ::wm.nex
 	mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/hello.nex ::hello.nex
@@ -985,9 +998,10 @@ hello: iso disk-image $(USERLAND_BUILD)/WM.ELF
 # The mouse is grabbed by clicking into the window; ctrl+alt+g releases
 # it. Both the compositor and the app run until you close QEMU.
 .PHONY: hello-run
-hello-run: iso disk-image $(USERLAND_BUILD)/WM.ELF
+hello-run: iso disk-image
+	@test -f $(WM_ELF) || { echo "hello-run: $(WM_ELF) missing -- build neoos-wm first (WM_DIR=$(WM_DIR))"; exit 1; }
 	@test -f $(HELLO_BIN) || { echo "hello-run: $(HELLO_BIN) not built -- run neoos-lvgl/csharp/Hello/publish.sh"; exit 1; }
-	./tools/nexify.sh $(USERLAND_BUILD)/WM.ELF $(BUILD_DIR)/wm.nex
+	./tools/nexify.sh $(WM_ELF) $(BUILD_DIR)/wm.nex
 	./tools/nexify.sh $(HELLO_BIN) $(BUILD_DIR)/hello.nex
 	mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/wm.nex ::wm.nex
 	mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/hello.nex ::hello.nex
@@ -1007,9 +1021,11 @@ hello-run: iso disk-image $(USERLAND_BUILD)/WM.ELF
 # needed. Useful when you want to see the window system without
 # rebuilding the C# application.
 .PHONY: wm-run
-wm-run: iso disk-image $(USERLAND_BUILD)/WM.ELF $(USERLAND_BUILD)/WMDEMO.ELF
-	./tools/nexify.sh $(USERLAND_BUILD)/WM.ELF $(BUILD_DIR)/wm.nex
-	./tools/nexify.sh $(USERLAND_BUILD)/WMDEMO.ELF $(BUILD_DIR)/wmdemo.nex
+wm-run: iso disk-image
+	@test -f $(WM_ELF) || { echo "wm-run: $(WM_ELF) missing -- build neoos-wm first (WM_DIR=$(WM_DIR))"; exit 1; }
+	@test -f $(WMDEMO_ELF) || { echo "wm-run: $(WMDEMO_ELF) missing -- build neoos-wm first (WM_DIR=$(WM_DIR))"; exit 1; }
+	./tools/nexify.sh $(WM_ELF) $(BUILD_DIR)/wm.nex
+	./tools/nexify.sh $(WMDEMO_ELF) $(BUILD_DIR)/wmdemo.nex
 	mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/wm.nex ::wm.nex
 	mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/wmdemo.nex ::wmdemo.nex
 	@printf '%s\n' \
