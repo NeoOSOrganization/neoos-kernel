@@ -775,6 +775,17 @@ git commit -m "wm: load built-in glass refraction+tint shaders at startup"
 
 ## Task 7: Two-pass `repaint()` -- the actual glass compositing
 
+> **ACTUAL EXECUTION NOTE:** the steps below implement `draw_glass`
+> correctly, but a real bug only surfaced during Task 8's visual
+> check: `draw_window`'s flat-colour decoration fill runs right after
+> `draw_glass` in the same pass and unconditionally overpaints the
+> exact same border/title-bar ring `draw_glass` just shaded --
+> completely erasing the lensed output every frame. Fixed as part of
+> Task 8 (see its note) by skipping that flat fill for glass surfaces.
+> The shader itself was correct the whole time, proven independently
+> by Tasks 1-2's host-level VM tests; this was purely a compositing-
+> order bug in code this task wrote.
+
 **Files:**
 - Modify: `neoos-wm/wm.c`
 - Test: a new headless golden-checksum target in `NeoOS/Makefile` (`make wm-glass`)
@@ -938,6 +949,25 @@ git commit -m "wm: two-pass repaint -- composite glass surfaces through the shad
 ---
 
 ## Task 8: Glass demo client, end-to-end smoke test, final docs pass
+
+> **ACTUAL EXECUTION NOTE:** the manual screenshot step (Step 4) found
+> two real bugs, not just a subtle-shader-strength question as
+> anticipated. (1) `wm` was killed by `SIGPIPE` shortly after a client
+> disconnected -- musl delivers a real signal on a write to a closed
+> socket, with terminate as the default action, unlike whatever the
+> old libneoos boot path did; fixed with `signal(SIGPIPE, SIG_IGN)` in
+> `main()`. (2) The glass window's shaded ring was completely invisible
+> -- draw_window's decoration fill was overpainting it every frame (see
+> Task 7's note); fixed there. Re-screenshotted after both fixes:
+> confirmed the border/title-bar ring now shows real backdrop-derived,
+> tinted color instead of the flat decoration gray -- proof the shaded
+> output reaches the screen. The refraction *offset* specifically is
+> subtle against the demo's smooth gradient backdrop (a smooth gradient
+> is a weak test pattern for a small per-pixel displacement -- a sharp
+> edge or checkerboard would show it more clearly), so this counts as
+> confirmed-tint-and-pipeline, not a pixel-perfect confirmation of the
+> displacement math; the math itself was written to spec and the VM
+> that executes it passed its host-level tests in Tasks 1-2.
 
 **Files:**
 - Modify: `neoos-wm/wmdemo.c`
