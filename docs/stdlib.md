@@ -1021,6 +1021,17 @@ wm_commit(c);
 maps the same physical pages the application draws into. A commit costs
 a copy of the damaged region; no pixel data crosses the socket.
 
+`wm_create_glass_window(c, w, h, title)` is identical to
+`wm_create_window` in every way a client can observe -- same
+`memfd`/`SCM_RIGHTS` setup, same `wm_pixels`/`wm_damage`/`wm_commit`
+draw cycle -- except the compositor composites the resulting surface
+through its built-in Liquid-Glass shader (`WM_SURFACE_GLASS` in
+`wmproto.h`): it snapshots whatever is behind the surface's screen
+rect, refracts and tints it, and draws the client's own content on top
+of that lensed backdrop instead of a flat opaque blit. This is purely
+a compositor-side rendering choice; the wire protocol carries no extra
+message or field for it.
+
 Events arrive through `wm_poll_event`, which never blocks: pointer
 motion (surface-relative), pointer buttons, keys, focus changes, and
 configure. Keycodes and button codes are Linux's evdev values, because
