@@ -16,6 +16,10 @@
 // there. The LAPIC timer is a per-CPU device and was armed only on the
 // BSP until timer_init_this_cpu existed -- a gap invisible from the
 // serial log, since the BSP kept ticking exactly as before.
+// Since tickless idle there is no periodic tick to observe: each CPU's
+// timer_init_this_cpu arms one 1 ms "hello" hrtimer, and
+// timer_ticks_local counts every hrtimer interrupt, so the check still
+// proves each CPU's own timer interrupt arrives.
 // Polled from the idle loop rather than run inline in kmain: the BSP
 // reaches kmain's selftests with interrupts still disabled, so it could
 // not observe its own timer there, and enabling them would let the first

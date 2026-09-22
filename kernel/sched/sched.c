@@ -104,15 +104,20 @@ void sched_arm_slice_timer(void) {
 //     slice now that the task has company;
 //   - poke one idle CPU, which steals the thread if it is still waiting.
 // An idle CPU needs neither: its idle loop schedules on the way out of
-// the interrupt or syscall that did the waking.
+// the interrupt or syscall that did the waking. The BSP before the
+// scheduler starts (kmain, no current thread) needs the poke only.
+// With no periodic tick, the poke is the ONLY way an idle CPU learns
+// there is work to steal.
 //
 // The slice timer is left alone when the caller holds a lock that ranks
 // at or above the hrtimer base; the arrival then waits for the slice
 // end, as it always did.
 void sched_wakeup_check(void) {
     struct cpu *c = this_cpu();
-    if (!c->current || c->current == c->idle) { return; }
-    if (lock_rank_ok(LOCK_RANK_TIMEOUT)) {
+    if (c->current == c->idle && c->current) { return; }
+    // !c->current: this is the BSP still in kmain, which will not run
+    // the thread at all -- only a poked idle CPU stealing it will.
+    if (c->current && lock_rank_ok(LOCK_RANK_TIMEOUT)) {
         struct hrtimer *t = &sched_timer[c - &cpus[0]];
         if (!t->fn) { hrtimer_init(t, sched_timer_fn); }
         hrtimer_start(t, ktime_get_ns());
@@ -257,9 +262,11 @@ void enqueue_ready_on(int cpu_index, struct thread *t) {
     spin_unlock_irqrestore(&rq->lock, f);
     // Sent AFTER the unlock: the target may be spinning on this very lock
     // with interrupts disabled and could not take the IPI. Without this
-    // poke a target parked in idle's `sti; hlt` waits for its next local
-    // timer tick before noticing the work.
-    smp_send_reschedule(cpu_index);
+    // poke a target parked in idle's `sti; hlt` would sleep through the
+    // work -- there is no periodic tick to wake it. Queuing on THIS CPU
+    // is the same question asked of ourselves (no self-IPI).
+    if (cpu_index == (int)(this_cpu() - &cpus[0])) { sched_wakeup_check(); }
+    else { smp_send_reschedule(cpu_index); }
 }
 
 // Takes one thread from the busiest remote run queue. Called only when
@@ -286,9 +293,8 @@ void enqueue_ready_on(int cpu_index, struct thread *t) {
 // (CR3, TSS.rsp0, the xstate area, GS) is already reloaded on every
 // switch.
 //
-// An idle CPU discovers new work on its next local timer tick rather
-// than being poked: 10ms of latency in exchange for not sending an IPI
-// on every enqueue.
+// An idle CPU discovers new work when it is poked (sched_wakeup_check,
+// enqueue_ready_on): there is no periodic tick that would wake it.
 static struct thread *steal_work(struct cpu *self) {
     int online = smp_online_count();
     if (online < 2) { return 0; }
@@ -336,6 +342,35 @@ static struct thread *steal_work(struct cpu *self) {
 struct thread   *kzombies;
 struct spinlock  kzombies_lock;
 
+// "Tickless idle" made checkable: one AP measures the timer interrupts
+// it takes across a stretch of >= 250 ms in which it stays in its idle
+// loop the whole time (any switch to real work restarts the window). A
+// 100 Hz tick would show ~100/s; tickless, an idle CPU wakes only for
+// its own timers. Passes under 20/s.
+#define TICKLESS_WINDOW_NS 250000000ULL
+static volatile int tickless_reported;
+static void tickless_selftest_check(void) {
+    struct cpu *c = this_cpu();
+    if (tickless_reported || c == &cpus[0]) { return; }
+    static struct { uint64_t t0, n0, sw0; int armed; } w[MAX_CPUS];
+    int k = (int)(c - &cpus[0]);
+    uint64_t now = ktime_get_ns(), sw = c->busy_ns;   // busy_ns moves only if real work ran
+    if (!w[k].armed || sw != w[k].sw0) {
+        w[k].t0 = now; w[k].n0 = c->timer_ticks_local; w[k].sw0 = sw; w[k].armed = 1;
+        return;
+    }
+    if (now - w[k].t0 < TICKLESS_WINDOW_NS) { return; }
+    if (__atomic_exchange_n(&tickless_reported, 1, __ATOMIC_ACQ_REL)) { return; }
+    uint64_t per_s = (c->timer_ticks_local - w[k].n0) * NSEC_PER_SEC / (now - w[k].t0);
+    serial_write_string("[timer] idle cpu");
+    serial_write_hex64((uint64_t)k);
+    serial_write_string(" interrupts/s=");
+    serial_write_hex64(per_s);
+    serial_write_string("\n");
+    serial_write_string(per_s < 20 ? "[timer] tickless idle selftest passed\n"
+                                   : "[timer] tickless idle selftest FAILED\n");
+}
+
 static void idle_entry(void) {
     for (;;) {
         uint64_t f = spin_lock_irqsave(&kzombies_lock);
@@ -358,13 +393,19 @@ static void idle_entry(void) {
         smp_parallel_selftest_check();
         smp_timer_selftest_check();
         smp_steal_selftest_check();
+        tickless_selftest_check();
 
         // The idle thread schedules for ITSELF rather than relying on
-        // being preempted. Every CPU has a local timer now, so this is
-        // no longer load-bearing the way it was when only the BSP was
-        // preempted -- but an AP woken by a reschedule IPI would
-        // otherwise loop and halt again, waiting up to a full tick to
-        // pick up the work the IPI was announcing.
+        // being preempted: an AP woken by a reschedule IPI must look for
+        // the work the IPI announced.
+        //
+        // With interrupts OFF from before the look until the hlt. With a
+        // periodic tick, a wakeup landing between schedule() finding
+        // nothing and the hlt cost at most one tick; tickless, it could
+        // cost forever. schedule() returns with IF as it found it (off),
+        // and `sti; hlt` is atomic -- sti's one-instruction shadow means
+        // an interrupt already pending is taken inside the hlt, waking it.
+        __asm__ volatile ("cli" ::: "memory");
         schedule();
 
         __asm__ volatile ("sti; hlt");
@@ -596,6 +637,8 @@ void schedule(void) {
         if (prev->state == THREAD_RUNNING) { prev->state = THREAD_READY; }
         c->rq.prev_pending = prev;
     }
+
+    timer_account_switch(prev);    // busy/idle ns for /proc/stat, charged per switch
 
     static uint64_t discarded_rsp; // used the first time schedule() is ever called, from kmain
     if (prev) {

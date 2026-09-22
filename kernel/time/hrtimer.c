@@ -118,6 +118,7 @@ int hrtimer_active(const struct hrtimer *t) { return t->state != HRTIMER_INACTIV
 void hrtimer_request_resched(void) { this_base()->resched = 1; }
 
 void hrtimer_interrupt(void) {
+    this_cpu()->timer_ticks_local++;
     struct hrtimer_base *b = this_base();
     uint64_t f = spin_lock_irqsave(&b->lock);
     b->in_interrupt = 1;

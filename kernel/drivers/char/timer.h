@@ -9,7 +9,7 @@
 // Monotonic tick count since boot, at TIMER_HZ (100 Hz / 10 ms).
 uint64_t timer_ticks(void);
 
-// Busy and idle timer ticks summed over all CPUs since boot. A caller
+// Busy and idle time summed over all CPUs since boot, in 10 ms units. A caller
 // samples twice and takes the ratio of the differences -- the same
 // shape as reading /proc/stat.
 void cpu_usage_ticks(uint64_t *busy, uint64_t *idle);
@@ -19,6 +19,10 @@ void cpu_usage_ticks(uint64_t *busy, uint64_t *idle);
 // call from any CPU (rdtsc is core-local but QEMU keeps them in sync,
 // and the scheduler only needs per-CPU monotonicity).
 uint64_t sched_clock_ns(void);
+
+// schedule() calls this on the switching CPU just before it leaves prev.
+struct thread;
+void timer_account_switch(struct thread *prev);
 
 void timer_init(void);
 // Arms THIS CPU's LAPIC timer. The BSP gets it from timer_init; every

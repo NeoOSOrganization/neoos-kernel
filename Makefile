@@ -600,6 +600,7 @@ CORE_REQUIRED_MARKERS := \
 	"[hrtimer] selftest passed" \
 	"[wheel] selftest passed" \
 	"[wheel] ktimerd selftest passed" \
+	"[timer] tickless idle selftest passed" \
 	"[pci] ALL PASSED" \
 	"[virtio-net] ALL PASSED" \
 	"[route] ALL PASSED" \

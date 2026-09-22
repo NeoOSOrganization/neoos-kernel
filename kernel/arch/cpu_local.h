@@ -59,10 +59,14 @@ struct cpu {
     //
     // net.c reads this to decide whether to deliver inline or defer.
     int               loop_depth;
-    // Local timer interrupts taken. Only the selftest reads it, and it
+    // Local timer interrupts taken (every hrtimer_interrupt). Selftests read it, and it
     // is the one direct evidence that this CPU is actually being
     // preempted rather than merely looking busy.
     volatile uint64_t timer_ticks_local;
+    // Nanoseconds this CPU spent running something vs. its idle thread,
+    // charged at each context switch from acct_since (timer.c). Written
+    // only by this CPU; read by cpu_usage_ticks from anywhere.
+    uint64_t          busy_ns, idle_ns, acct_since;
     // Threads this CPU has taken from another CPU's queue. Read by the
     // steal selftest, which needs a fact about the mechanism rather
     // than a snapshot of where a handful of test threads happened to

@@ -52,7 +52,12 @@ netrx_handler netrx_set_handler(netrx_handler fn);
 // the frame, which is also why netrx_start() runs before the APs.
 uint64_t netrx_boot_window_open(void);
 void     netrx_boot_window_close(uint64_t saved);
-static inline void netrx_boot_park(void) { __asm__ volatile ("hlt"); }
+// One park = hlt until the next interrupt, and never longer than 10 ms:
+// callers bound their waits by counting parks (200 parks ~ 2 s). The
+// 10 ms used to be the periodic tick's; with no tick, a park arms its
+// own one-shot hrtimer, or a BSP whose NIC interrupt is routed to an AP
+// could hlt until its once-a-second log timer.
+void netrx_boot_park(void);
 
 // Starts the draining thread. Separate from netrx_init because the
 // scheduler has to exist first.

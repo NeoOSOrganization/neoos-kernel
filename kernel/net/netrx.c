@@ -1,6 +1,7 @@
 // netrx.c -- the queue between the network interrupt and the stack.
 
 #include "time/ktime.h"
+#include "time/hrtimer.h"
 #include "netrx.h"
 #include "net.h"
 #include "../sync/lock.h"
@@ -41,6 +42,15 @@ uint64_t netrx_boot_window_open(void) {
     uint64_t rflags;
     __asm__ volatile ("pushfq; pop %0; sti" : "=r"(rflags) :: "memory");
     return rflags;
+}
+
+static struct hrtimer park_timer;
+static enum hrtimer_restart park_fn(struct hrtimer *t) { (void)t; return HRTIMER_NORESTART; }
+
+void netrx_boot_park(void) {
+    if (!park_timer.fn) { hrtimer_init(&park_timer, park_fn); }
+    hrtimer_start(&park_timer, ktime_after_ns(10000000ULL));
+    __asm__ volatile ("hlt");
 }
 
 void netrx_boot_window_close(uint64_t saved) {
