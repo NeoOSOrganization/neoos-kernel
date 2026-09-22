@@ -338,14 +338,21 @@ void tlb_shootdown_selftest(void) {
     // frame must NOT be back in pmm's free list until the shootdown
     // acknowledges. Freeing early is how a stale TLB entry ends up
     // pointing at another process's page.
+    //
+    // Asserted on the frame's OWN refcount, never the global free count:
+    // by now other CPUs free frames concurrently -- the shootdown's own
+    // IPIs wake idle APs, whose idle loops then drain kzombies and hand
+    // kernel stacks back to pmm mid-test. The test keeps a reference of
+    // its own throughout, so the frame is never actually freed (and
+    // reused) while it is being watched: 2 = ours + the deferred one.
     uint64_t frame = pmm_alloc(0);
     if (!frame) {
         serial_write_string("[tlb] selftest FAILED: no memory\n");
         return;
     }
-    uint64_t free_before = pmm_free_frame_count();
+    pmm_frame_share(frame);        // our own reference
     tlb_defer_free(frame, 0, 0);   // owner 0: released only by a full shootdown
-    if (pmm_free_frame_count() != free_before) {
+    if (pmm_frame_refcount(frame) != 2) {
         serial_write_string("[tlb] selftest FAILED: deferred free returned the frame early\n");
         return;
     }
@@ -354,10 +361,11 @@ void tlb_shootdown_selftest(void) {
     uint64_t before = __atomic_load_n(&ipi_tlb_count, __ATOMIC_ACQUIRE);
     tlb_shootdown(0);   // all address spaces; also flushes the deferred queue
 
-    if (pmm_free_frame_count() != free_before + 1) {
+    if (pmm_frame_refcount(frame) != 1) {
         serial_write_string("[tlb] selftest FAILED: deferred free never returned the frame\n");
         return;
     }
+    pmm_free(frame, 0);            // drop ours
     if (smp_online_count() > 1 &&
         __atomic_load_n(&ipi_tlb_count, __ATOMIC_ACQUIRE) <= before) {
         serial_write_string("[tlb] selftest FAILED: shootdown IPI never delivered\n");
@@ -374,19 +382,20 @@ void tlb_shootdown_selftest(void) {
     uint64_t owned = pmm_alloc(0);
     if (!owned) { serial_write_string("[tlb] selftest FAILED: no memory (owner)\n"); return; }
     uint64_t mine = 0xAAAA000, theirs = 0xBBBB000;
-    free_before = pmm_free_frame_count();
+    pmm_frame_share(owned);
     tlb_defer_free(owned, 0, mine);
 
     tlb_shootdown(theirs);
-    if (pmm_free_frame_count() != free_before) {
+    if (pmm_frame_refcount(owned) != 2) {
         serial_write_string("[tlb] selftest FAILED: shootdown released another address space's frame\n");
         return;
     }
     tlb_shootdown(mine);
-    if (pmm_free_frame_count() != free_before + 1) {
+    if (pmm_frame_refcount(owned) != 1) {
         serial_write_string("[tlb] selftest FAILED: targeted shootdown did not release its own frame\n");
         return;
     }
+    pmm_free(owned, 0);
     // A COW-shared frame deferred by two DIFFERENT address spaces: the
     // slot must hold both references, and since no single targeted
     // shootdown covers both owners, neither may release it -- only a
