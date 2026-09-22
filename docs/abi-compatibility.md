@@ -56,7 +56,7 @@ application hits, in order" list are now closed:
 | Was #4 | **`struct dirent` layout** | **CLOSED.** Linux's `getdents64` record, matching `DT_*`. |
 | Was #5 | **`O_CREAT` value diverges** | **CLOSED** — fixed in Phase 14. |
 | Was #7 | **No `clone`/`futex`** | **CLOSED** (2026-09-07 refresh). `futex` exists with Linux semantics; `clone` now exists too (musl's exact `pthread_create` flag combination only — see the refresh below and `docs/stdlib.md`), and real musl `pthread_create`/`pthread_join`/mutexes/condvars all work unmodified. |
-| Was #8 | **No `clock_gettime`/`nanosleep`** | **MOSTLY CLOSED.** Both exist; resolution is 10ms and there are no absolute timeouts — §8a. |
+| Was #8 | **No `clock_gettime`/`nanosleep`** | **CLOSED (2026-09-23).** ns resolution, `clock_getres`, `TIMER_ABSTIME`, `rem` on EINTR — §8a and the hrtimer refresh at the end. |
 | Was #9 | **13-character filenames** | **CLOSED** (a FAT constraint, not an ABI one): VFAT long names, read and write. |
 
 Since this report was last written, a per-process **working directory**
@@ -163,7 +163,7 @@ that is fine -- musl's mallocng falls back to `mmap`. See
 | `FUTEX_WAIT`/`FUTEX_WAKE`/`FUTEX_PRIVATE_FLAG` | **Match** (0, 1, 128). |
 | `F_GETFL`/`F_SETFL`, `O_NONBLOCK` (0x800), `O_CLOEXEC` (0x80000) | **Match.** |
 | `O_*` (open) | **Match** (`O_RDONLY` 0, `O_WRONLY` 1, `O_RDWR` 2, `O_CREAT` 0x40, `O_EXCL` 0x80, `O_TRUNC` 0x200, `O_APPEND` 0x400, `O_NONBLOCK` 0x800, `O_DIRECTORY` 0x10000, `O_CLOEXEC` 0x80000). |
-| `CLOCK_*` | **Match** (`CLOCK_REALTIME` 0, `CLOCK_MONOTONIC` 1, ...). All ids resolve; `CLOCK_REALTIME` is wall time anchored to the CMOS RTC, the rest count from boot. Resolution is one 10ms tick (§8a). |
+| `CLOCK_*` | **Match** (`CLOCK_REALTIME` 0, `CLOCK_MONOTONIC` 1, ...). All six common ids resolve (`REALTIME`, `MONOTONIC`, `PROCESS_CPUTIME_ID`, `THREAD_CPUTIME_ID`, `MONOTONIC_RAW`, `BOOTTIME`); `CLOCK_REALTIME` is wall time anchored to the CMOS RTC. Resolution 1 ns (`clock_getres`), TSC-backed (§8a). `TIMER_ABSTIME` = 1. |
 | `TCGETS`/`TCSETS`/`TIOCGWINSZ` etc. | **Match** — Linux's ioctl numbers (§8b). |
 | `VT_*` / `KD*` ioctl numbers | **Match** — `VT_OPENQRY` 0x5600, `VT_GETMODE` 0x5601, `VT_SETMODE` 0x5602, `VT_GETSTATE` 0x5603, `VT_RELDISP` 0x5605, `VT_ACTIVATE` 0x5606, `VT_WAITACTIVE` 0x5607, `KDSETMODE` 0x4B3A, `KDGETMODE` 0x4B3B; `KD_TEXT` 0, `KD_GRAPHICS` 1. `struct vt_stat` is Linux's three `unsigned short`s. **Diverges:** 6 VTs not 63, and `VT_SETMODE`/`VT_RELDISP` are inert — see §8e. |
 | `EV_*` (input event types) | **Match** (`EV_SYN` 0, `EV_KEY` 1, `EV_MSC` 4, etc.). `EV_VERSION` is 0x010001. |
@@ -210,7 +210,8 @@ variable's broadcast wakes every waiter instead of moving them to the
 mutex's queue. Correct, but a thundering herd, and musl's
 `pthread_cond_broadcast` will take the slower path. No `*_BITSET`, no
 `FUTEX_WAKE_OP`, no priority-inheritance futexes. Timeouts are relative
-only and rounded up to a 10ms tick.
+only (no `FUTEX_WAIT_BITSET`), but exact to the nanosecond since the
+hrtimer milestone.
 
 `<semaphore.h>` and `<pthread.h>` (mutexes, condvars, and a small
 threads subset) are built on it in `lib/` and are placeholders: musl
@@ -241,16 +242,15 @@ divergences that survive are listed there.)*
 | Signal frame | NeoOS-shaped; **not** Linux's `rt_sigframe` |
 | Stack alignment | SysV 16-byte at entry — matches |
 
-### 8a. The clock — DIVERGES in precision, not in shape
+### 8a. The clock — matches (2026-09-23)
 
-`clock_gettime` and `nanosleep` exist with Linux's argument order.
-NeoOS's only time source is the 100Hz LAPIC tick, so **resolution is
-10ms**. `CLOCK_REALTIME` is anchored to the CMOS RTC read once at boot;
-`CLOCK_MONOTONIC` and the CPU-time clocks count from boot. If the RTC
-cannot be read, `CLOCK_REALTIME` silently falls back to a boot epoch
-and formats as January 1970. `nanosleep` rounds up to a whole tick and
-ignores the remaining-time argument (nothing interrupts a sleep
-partway). `stat`'s timestamps are still 0 — nothing records file times.
+`clock_gettime`, `clock_getres`, `nanosleep` and `clock_nanosleep` have
+Linux's shape and, since the hrtimer milestone, its precision: one TSC
+nanosecond time base, 1 ns reported resolution, every timed wait on a
+per-thread hrtimer, `TIMER_ABSTIME`, and `rem` written on `EINTR`.
+`CLOCK_REALTIME` is anchored to the CMOS RTC read once at boot; if the
+RTC cannot be read it falls back to a boot epoch and formats as January
+1970. `stat`'s timestamps are still 0 — nothing records file times.
 
 ### 8b. The terminal
 
@@ -328,12 +328,12 @@ at least stop the kernel drawing over it. Raw keyboard modes
    Fixed by the musl shim, not the kernel.
 3. ~~**No `clone`**~~ **CLOSED (2026-09-07)** — musl's pthreads now
    sit on it directly, unmodified. See the refresh below.
-4. **10ms clock resolution and no absolute timeouts** — why
-   `sem_timedwait` and `pthread_cond_timedwait` diverge into
-   relative-timeout spellings, and why `stat` times are all 0.
+4. ~~**10ms clock resolution and no absolute timeouts**~~ **CLOSED
+   (2026-09-23)** — ns clocks and `TIMER_ABSTIME`. `stat` times are
+   still all 0 (a filesystem gap, not a clock one).
 5. **`poll`/`select` are a subset** (M1a, narrowed by CS2):
    `POLLIN/OUT/ERR/HUP/NVAL` only, no `epoll`, no `ppoll`/`pselect6`
-   sigmask, 10 ms timeout resolution. **`select` no longer has an
+   sigmask; timeouts exact to the ns since 2026-09-23. **`select` no longer has an
    `nfds` cap below `FD_SETSIZE`** — it sizes its descriptor array to
    the caller's request and reports every ready fd, matching Linux;
    until CS2 it collected into a fixed 16-entry array and *silently
@@ -1314,3 +1314,53 @@ EPOLLTCP_CONC=8` (the level-triggered oracle, unchanged), and the
   where the remaining work would be.
 - **No `RTLD_LAZY` distinction** — musl resolves eagerly regardless,
   which is musl's behaviour rather than NeoOS's.
+
+## Refresh — high-resolution timers (2026-09-23)
+
+Design: `docs/superpowers/specs/2026-09-23-hrtimers-design.md`. The
+10 ms tick is gone as the basis of timekeeping: one TSC nanosecond
+clock (`ktime`), per-CPU hrtimers on a TSC-deadline or LAPIC one-shot
+clock-event device, a hierarchical timer wheel for TCP/ARP, and
+tickless idle.
+
+### Implemented
+
+| Linux facility | state on NeoOS |
+|---|---|
+| `clock_gettime` | all six common clocks, ns resolution; CPU-time clocks are real scheduler runtime |
+| `clock_getres` | **new** (NeoOS 137 / Linux 229): `{0, 1}` for every supported clock, `EINVAL` otherwise, NULL `res` allowed |
+| `nanosleep` | ns deadline, never early; `EINTR` writes `rem` |
+| `clock_nanosleep` | relative and `TIMER_ABSTIME` on `REALTIME`/`MONOTONIC`/`MONOTONIC_RAW`/`BOOTTIME`; relative `EINTR` writes `remain` |
+| `poll`/`ppoll`/`select`/`pselect6`/`epoll_wait` | ns deadlines; `poll` with `nfds == 0` sleeps for the timeout (it returned at once before) |
+| `futex(FUTEX_WAIT)` | ns relative timeout; malformed timespec `EINVAL`; zero timeout `ETIMEDOUT` at once |
+| `rt_sigtimedwait` | ns timeout; malformed timespec `EINVAL` |
+| `getrusage` | `ru_utime` is real CPU time (user + kernel, not split — divergence recorded in `docs/stdlib.md`); `ru_stime` 0 |
+| scheduler slices | `sched_setattr`'s `sched_runtime` is honoured down to its 43.75 µs floor: the slice end is an hrtimer (the old 500 µs arming floor is gone) |
+
+Measured with `make hrtest` (userland/hrtest.c):
+
+| | TCG (`-cpu Nehalem`, LAPIC one-shot) | KVM (`-cpu host`, TSC-deadline) |
+|---|---|---|
+| 200 µs `nanosleep`, median / worst | ~230 µs / ~0.9 ms | ~202 µs / ~205 µs (outliers to ~36 ms while the boot's ATA flush polls with interrupts off) |
+| context switches/s, busiest CPU, 100 µs slices | ~8 500 (107 before) | ~9 700 |
+| timer interrupts/s on an idle CPU | 0 | 0–2 (was 100) |
+
+### What a ported application would still hit
+
+- **No POSIX interval timers**: `timer_create`/`timer_settime`,
+  `setitimer`, `alarm` — and so no `SIGALRM`. Programs that time out
+  via `alarm()` (e.g. BusyBox `timeout`-style code, some test suites)
+  block instead.
+- **No `timerfd`** (event-loop libraries — libuv, .NET's timers, Go —
+  mostly fall back to timeouts on `epoll_wait`, which now works to the
+  ns; a library that insists on `timerfd_create` fails).
+- **No `clock_settime`/`settimeofday`/`adjtimex`**: the wall clock is
+  the RTC read at boot plus the TSC; nothing can set or slew it (no NTP).
+- **No `FUTEX_WAIT_BITSET`** (absolute futex deadlines): musl uses
+  relative `FUTEX_WAIT`, so musl programs are unaffected; glibc-built
+  binaries would hit it.
+- **No timer slack**: `prctl(PR_SET_TIMERSLACK)` is not implemented
+  (`EINVAL`), and no timer coalescing happens.
+- **The TSC is assumed invariant and synchronised across CPUs** — true
+  under QEMU and KVM on the reference host; a machine without an
+  invariant TSC would see clock drift across frequency changes.

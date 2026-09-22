@@ -537,10 +537,12 @@ one compare-exchange; these calls run only when it fails.
   extra flag.
 - **The timeout is relative, always.** Linux's `FUTEX_WAIT` is also
   relative, so this matches — but `FUTEX_WAIT_BITSET`, which Linux uses
-  for absolute deadlines, does not exist here. NeoOS has no clock
-  syscall to build an absolute deadline from yet.
-- **Timeouts are rounded up to a 10ms tick.** The scheduler clock is
-  the only time source. A 1µs timeout sleeps for one tick.
+  for absolute deadlines, does not exist here.
+- **Timeouts are exact to the nanosecond** (hrtimer milestone): the
+  wait ends at the deadline, bounded below only by the clock-event
+  minimum (see "Clocks and timers"). A malformed timespec is `EINVAL`
+  and a zero timeout is `ETIMEDOUT` at once, as on Linux. A wake that
+  races the expiry returns 0, never a spurious `ETIMEDOUT`.
 - **A futex on a copy-on-write page breaks the sharing.** The kernel
   resolves the physical address through `user_range_writable`, which
   un-shares the page. After `fork`, parent and child therefore have
@@ -799,8 +801,8 @@ int clock_nanosleep(clockid_t, int flags, const struct timespec *, struct timesp
 int close_range(unsigned int first, unsigned int last, unsigned int flags);
 ```
 
-- **`ppoll`** is `poll` with a `struct timespec` timeout (rounded up to
-  the 10 ms tick, like every NeoOS timeout) and an optional signal
+- **`ppoll`** is `poll` with a `struct timespec` timeout (exact to the
+  nanosecond, like every NeoOS timeout) and an optional signal
   mask. The mask is swapped in for the duration of the wait via the
   same mechanism as `rt_sigsuspend` — **not** with Linux's exact
   atomicity. The difference is observable only to a program that races
@@ -809,10 +811,12 @@ int close_range(unsigned int first, unsigned int last, unsigned int flags);
   `pause()` compiles to).
 - **`clock_nanosleep`** adds the absolute-deadline sleep
   (`TIMER_ABSTIME`) NeoOS's relative `nanosleep` lacked —
-  `pthread_cond_timedwait`, .NET and Go timers use it. `CLOCK_MONOTONIC`
-  and `CLOCK_REALTIME` (the latter offset by the boot epoch);
-  `CLOCK_PROCESS_CPUTIME_ID` → `-EINVAL`. `remain` is ignored on
-  `-EINTR`, the same divergence `nanosleep` documents.
+  `pthread_cond_timedwait`, .NET and Go timers use it.
+  `CLOCK_MONOTONIC`, `CLOCK_MONOTONIC_RAW`, `CLOCK_BOOTTIME` and
+  `CLOCK_REALTIME` (the latter offset by the boot epoch); the CPU-time
+  clocks → `-EINVAL` (as Linux does for sleeping on them). On `-EINTR`
+  a **relative** sleep writes the time left to `remain`, as Linux does;
+  an absolute one never writes it.
 - **`close_range(first, last, flags)`** closes every fd in the
   inclusive range (silent on unused slots). `CLOSE_RANGE_UNSHARE` is a
   no-op (NeoOS fd tables are already per-process); **`CLOSE_RANGE_CLOEXEC`
@@ -1390,19 +1394,15 @@ running, past the epoll wall above:
   ASP.NET Core's generic host creates one unconditionally to watch
   `appsettings.json`, whether or not the app ever reloads
   configuration at runtime.
-- **`getrusage(who, usage)`** — every field of `struct rusage` is
-  zero except `ru_utime`, which is approximated from wall-clock time
-  since boot: NeoOS has no per-process/thread CPU-time, page-fault, or
-  context-switch accounting to report exactly instead, and `who`
-  (`RUSAGE_SELF`/`CHILDREN`/`THREAD`) makes no difference for the
-  same reason. `ru_utime` is deliberately **not** just tick-quantized
-  wall-clock, either: it is forced strictly monotonic at microsecond
-  granularity (never equal to or less than the previous call's
-  answer), because a caller diffing two readings close enough
-  together to land in the same 10ms timer tick would otherwise see a
-  ZERO delta — indistinguishable from "this thread never ran" — from
-  a merely-coarse approximation. **Fatal without this** — called
-  during the GC's own startup diagnostics.
+- **`getrusage(who, usage)`** — `ru_utime` is the calling process's
+  **real CPU time** (the scheduler's per-thread nanosecond runtime,
+  summed over live threads plus those that have exited), at
+  microsecond precision. **DIVERGENCE:** it is user *and* kernel time —
+  the scheduler does not split them — and `ru_stime` stays 0. Every
+  other field is zero (no page-fault or context-switch counters), and
+  `who` (`RUSAGE_SELF`/`CHILDREN`/`THREAD`) makes no difference.
+  **Fatal without this call** — the .NET GC's startup diagnostics
+  use it.
 - **`gettid()`** — not a new primitive at all: it is exactly
   NeoOS's own `thread_self()` (`SYS_THREAD_SELF`) under Linux's name,
   so the shim maps it there directly rather than adding a second
@@ -1973,18 +1973,41 @@ nothing.
   `isatty` probes with `ioctl(TIOCGWINSZ)`.
 - `int clock_gettime(int clk, struct timespec *out)` — see below.
 - `int nanosleep(const struct timespec *req, struct timespec *rem)` —
-  blocks on a timer waitq until the deadline, rounded **up** to a whole
-  10ms tick. Returns `-EINTR` if the thread is killed mid-sleep. `rem`
-  is accepted and ignored.
+  sleeps until the deadline on the thread's own hrtimer — never early,
+  not rounded to any tick. Returns `-EINTR` if a signal ends it, with
+  the time left written to `rem`, as on Linux.
 - `int set_tid_address(void *ptr)` — returns the caller's tid.
 - `void exit_group(int code)` — ends every thread in the process.
 
-### DIVERGENCE: 10ms resolution, and a fragile wall clock
+### Clocks and timers (hrtimer milestone)
 
-NeoOS's only fine time source is the 100Hz LAPIC tick, so **resolution
-is 10ms**. `CLOCK_REALTIME` is wall time, anchored to the CMOS RTC read
-once at boot; `CLOCK_MONOTONIC`, `CLOCK_MONOTONIC_RAW` and the two
-CPU-time clocks count from boot. All five ids resolve.
+Every clock reads one time base: nanoseconds since boot from the TSC,
+calibrated against the PIT at boot (`kernel/time/ktime.c`).
+
+- `clock_gettime`: `CLOCK_REALTIME` (the RTC's boot epoch + the TSC
+  clock), `CLOCK_MONOTONIC`, `CLOCK_MONOTONIC_RAW`, `CLOCK_BOOTTIME`
+  (all three the TSC clock — NeoOS never suspends and does not slew),
+  and `CLOCK_PROCESS_CPUTIME_ID` / `CLOCK_THREAD_CPUTIME_ID` (the
+  scheduler's nanosecond runtime accounting). Any other id: `EINVAL`.
+- `clock_getres` (new): **1 ns** for every clock above, as Linux
+  reports for hrtimer-backed clocks; `EINVAL` otherwise; `res` may be
+  NULL.
+- Every timed wait — `nanosleep`, `clock_nanosleep`, `poll`, `ppoll`,
+  `select`, `pselect6`, `epoll_wait`, `futex(FUTEX_WAIT)`,
+  `rt_sigtimedwait` — expires at its nanosecond deadline on a per-thread
+  hrtimer. The only floor is the **clock-event minimum**: a deadline
+  closer than **2 µs** (TSC-deadline mode: KVM, real hardware) or
+  **10 µs** (LAPIC one-shot mode: QEMU TCG) fires that far out instead.
+  Measured: a 200 µs `nanosleep` has a median of ~202 µs on KVM and
+  ~230 µs on TCG. Timeouts too large to represent are "forever"
+  (Linux's `KTIME_MAX` clamp).
+- The scheduler's slice end is an hrtimer (no 500 µs floor), and an idle
+  CPU takes no periodic interrupt at all (tickless idle).
+- Not implemented (see `docs/abi-compatibility.md`): POSIX interval
+  timers (`timer_create`, `setitimer`, `alarm`), `timerfd`,
+  `clock_settime`, `FUTEX_WAIT_BITSET`, timer slack.
+
+### DIVERGENCE: a fragile wall clock
 
 If the RTC cannot be read at boot, `CLOCK_REALTIME` silently falls back
 to a boot epoch and formats as January 1970 (`rtc_is_real()` reports
@@ -2662,7 +2685,9 @@ readiness change.
   dropped* everything past the sixteenth interesting fd — no error, no
   truncation flag. That was a correctness bug, not a documented limit;
   `userland/polltrunc.c` is its regression test.
-- **Timeout resolution is one 10 ms tick.**
+- **Timeouts are exact to the nanosecond** (hrtimer milestone), and
+  `poll` with `nfds == 0` is a plain timed sleep, as on Linux (it used
+  to return 0 at once).
 - **The wake is a global broadcast:** every `poll`/`select` caller wakes
   on *any* pipe/socket/tty/evdev readiness change and re-scans its own
   fds. Correct, and free at NeoOS's process count; a scaling concern a

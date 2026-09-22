@@ -299,3 +299,51 @@ Userland test `hrtest.nex` (embedded in the suite, marker
 Regression bar: `tools/gauntlet.sh 15` at 15/15 with zero retries,
 the whole `wm-*` suite, and `make desktop KVM=1` checked by hand on the
 TSC-deadline path.
+
+## Deviations recorded during implementation (2026-09-23)
+
+What shipped differs from the sections above in these places; each was
+a decision made while implementing, with its reason:
+
+- **One global timer wheel and one `ktimerd`**, not one per CPU
+  (section 4). NeoOS's timer counts do not need the split, and one wheel
+  keeps cancel trivially correct. The **horizon is ~33 s** (64 × 512 ms),
+  not "~36 min" as section 4 said; later expiries clamp to the last
+  level and re-cascade, as described.
+- **The wheel forwards its clock before filing a timer** and arms
+  `ktimerd` for the next occupied bucket's *slot* time. Without the
+  first, a timer filed after an idle stretch landed in a coarse level
+  and fired hundreds of ms late; without the second, `ktimerd` woke
+  every jiffy until a coarse bucket came due. Due timers wait on a
+  locked list so `del_timer_sync` cannot race one collected but not yet
+  run.
+- **A timed waitq sleep starts its `sleep_timer` inside the sleep path**,
+  after the thread is queued and the caller's guard is dropped, with
+  interrupts still off — not before the sleep, under the guard (section
+  3). The latter is a lock-rank inversion under guards ranked above the
+  hrtimer base (poll heads, epoll) and has a lost-wakeup window. Only a
+  callback that itself dequeues the thread reports `-ETIMEDOUT`, so a
+  real wake racing the expiry returns 0 (Linux semantics).
+- **Wakeup preemption and idle pokes** (`sched_wakeup_check`): a thread
+  queued on a busy CPU fires that CPU's slice timer at once (EEVDF's
+  check, within the anti-thrash floor) and pokes one idle CPU to steal
+  it. Section 3 named "wakeup preemption checks"; with tickless idle
+  (section 5) the poke is also the only way an idle CPU learns of work.
+- **The idle loop looks for work with interrupts off and then does an
+  atomic `sti; hlt`**; with a tick, a wake between the two cost ≤ 10 ms,
+  tickless it could cost forever.
+- **The boot's network waits** (`netrx_boot_park`) arm their own 10 ms
+  one-shot: their bounds were counted in ticks.
+- **The virtio-net interrupt is re-routed to an AP** once the APs are
+  up. The BSP spends tens of seconds with interrupts off in `kmain`
+  under load; the old BSP-only timeout scan froze DHCP's clock with it,
+  hiding that RX was starved. Per-thread hrtimers exposed it.
+- **Selftests**: the wheel is checked on a private instance with a
+  simulated clock (a level-3 timer needs > 4 s of real time and a boot
+  is over sooner), plus two real timers through `ktimerd`; the tickless
+  check measures an idle AP over ≥ 250 ms windows of uninterrupted
+  idleness. `hrtest` asserts sleep bounds on medians and reports the
+  worst case (the boot's ATA flush polls with interrupts off for
+  ~35 ms on KVM, delaying timers on that CPU). Its slice check counts
+  switches per CPU with `sched_getcpu` over 2 × ncpu spinners, because
+  `sched_setaffinity` is recorded but not enforced.
