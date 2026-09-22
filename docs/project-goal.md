@@ -80,3 +80,27 @@ None of this invalidates what's already shipped and tested:
 
 These remain the working desktop stack. Gallium3D is the new target
 for what comes *after* them, not a replacement for what already works.
+
+## Status
+
+**Sub-project 1 (OSMesa/softpipe bring-up) complete**, as of
+2026-09-22 -- see
+`docs/superpowers/specs/2026-09-22-gallium3d-osmesa-bringup-design.md`
+and `docs/superpowers/plans/2026-09-22-gallium3d-osmesa-bringup.md`.
+Mesa's OSMesa target (real `glBegin`/`glVertex2f`/GLSL-capable OpenGL
+API, `softpipe` Gallium pipe driver) cross-compiles for NeoOS via the
+hosted `x86_64-neoos-linux-musl` toolchain and Meson, in a new
+`neoos-mesa` repo, and a real triangle renders off-screen with correct
+pixel output (`center pixel: r=255 g=0 b=0`, `corner pixel: r=0 g=0
+b=0`), verified under headless QEMU. Full 15/15-zero-retry gauntlet
+regression stays green.
+
+No application-facing windowing integration exists yet -- that is
+sub-project 2, not yet brainstormed. One piece of information that
+brainstorming pass will need: Mesa's OSMesa target builds as a shared
+library (`libOSMesa.so`) unconditionally, regardless of Meson's
+`--default-library=static` -- so any future NeoOS application linking
+against Mesa (OSMesa now, `libGL`/EGL later) needs NeoOS's dynamic
+linker and a handful of runtime `.so`s (`libOSMesa.so.8`,
+`libglapi.so.0`, `libstdc++.so.6`, `libgcc_s.so.1`, `libc.so`) placed
+at `/lib`, not a purely static link.

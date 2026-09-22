@@ -205,3 +205,52 @@ yet: OSMesa's context-creation API is Mesa-specific, not how a real
 GL application (written against EGL or GLX) creates a context. That
 gap is sub-project 2's job, to be brainstormed separately once this
 one is implemented and verified.
+
+## Deviations found during implementation (2026-09-22)
+
+Implementation is complete and verified (a real triangle renders
+correctly through OSMesa/softpipe under headless QEMU, full gauntlet
+green). Five things differed from this spec's assumptions, all
+resolved without changing the spec's goals:
+
+1. **The Meson option is spelled `-Dgallium-drivers=swrast`, not
+   `softpipe`**, in Mesa 22.3.5's `meson.build` -- it still builds and
+   installs Gallium's `softpipe` pipe driver under the hood (the
+   library and its source paths are named `softpipe` throughout); only
+   the option's allowed-value name differs from this spec's Goals
+   section.
+2. **zlib and libexpat both turned out to be genuine, hard
+   requirements** of Mesa's build with this option set -- confirmed by
+   Meson's configure log listing both as required dependencies, not an
+   assumption. Ported as `neoos-zlib` (1.3.1) and `neoos-expat`
+   (2.6.2), both cross-compiled with the hosted toolchain, per this
+   spec's own contingency plan.
+3. **Meson's cross-file `sys_root` property is actively harmful here**
+   and must NOT be set: it makes Meson prepend the sysroot path onto
+   every path `pkg-config` reports, which corrupts absolute paths for
+   packages (like `neoos-zlib`/`neoos-expat`) that aren't staged under
+   a real sysroot tree. `pkg_config_libdir` alone is sufficient, and is
+   also what prevents the cross build from silently resolving zlib/
+   expat against the HOST's glibc-ABI system packages (the first,
+   more dangerous failure mode found -- Meson reported "zlib found:
+   YES" using the host's copy before `pkg_config_libdir` was added).
+4. **zlib needed `-fPIC`.** Mesa's OSMesa target links `libz.a`
+   directly into a shared object (see point 5), and a non-PIC static
+   archive can't satisfy that (`relocation R_X86_64_32 ... can not be
+   used when making a shared object`).
+5. **Mesa's OSMesa target is unconditionally a shared library**
+   (`libOSMesa.so.8.0.0`), regardless of Meson's
+   `--default-library=static` -- upstream's `meson.build` hardcodes
+   `shared_library()` for this specific target. This changed Task 6's
+   test program from a static link to a normal dynamic link, using
+   NeoOS's already-proven dynamic-linking support (`PT_INTERP`/
+   `ET_DYN`, the same mechanism `make dyntest` already exercises).
+   `libOSMesa.so.8`, `libglapi.so.0` (a transitive dependency),
+   `libstdc++.so.6`, `libgcc_s.so.1`, and `libc.so`/
+   `ld-musl-x86_64.so.1` all had to be placed at `/lib` on the test
+   disk image -- stripped, since Mesa's unstripped build products
+   (`libOSMesa.so.8.0.0` alone is ~87MB) exceed the 32MB test disk
+   entirely. **Sub-project 2's brainstorming needs this as a starting
+   fact**: any future NeoOS application linking against Mesa is a
+   dynamic-linking consumer, not a static one, and needs these runtime
+   libraries shipped alongside it.
