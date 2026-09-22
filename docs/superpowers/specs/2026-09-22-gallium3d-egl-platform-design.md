@@ -294,3 +294,85 @@ this new EGL platform — reviving
 a backend that actually has working alpha blending — is sub-project
 3, to be brainstormed separately once this platform is implemented and
 verified.
+
+## Deviations found during implementation
+
+- **No `meson_options.txt`/`platforms`-array change needed** (recorded
+  as a correction during planning, confirmed true in practice):
+  `platform_device.c`/`platform_surfaceless.c` already compile
+  unconditionally inside `src/egl/meson.build`'s `if with_dri2` block
+  regardless of the `platforms` option, and `platform_neoos.c` joined
+  that same list. Simpler than this section originally assumed.
+- **`libdrm` is a hard, unconditional configure-time dependency of
+  `with_dri2`**, not just of real DRM/KMS hardware use — not
+  anticipated here. `-Degl=enabled` derives `with_dri2 = true`
+  (`with_dri and (with_dri_platform == 'drm' or ...)`, true whenever
+  the cross-file's `host_machine.system() == 'linux'`), and Mesa's
+  top-level `meson.build` makes `dependency('libdrm', required: ...)`
+  required whenever `with_dri2` is true, full stop — regardless of
+  whether the platform being built actually touches a DRM device.
+  Fixed with a new `neoos-libdrm` sibling repo (core-only build, every
+  hardware backend disabled); its device enumeration correctly finds
+  no `/dev/dri` and reports zero devices at runtime on NeoOS, which is
+  real behavior on a system with none, not a faked stub.
+- **`libexpat.a` needed `-fPIC`**, not previously required: sub-project
+  1 never linked `libexpat.a` into any shared object (only into a
+  static test binary), so the missing `-fPIC` never surfaced until
+  `libEGL.so` — a real `.so` — started linking it directly. Fixed in
+  `neoos-expat/build.sh` with `-DCMAKE_POSITION_INDEPENDENT_CODE=ON`.
+- **Upstream Mesa's meson build never produces a standalone `libGL.so`
+  without GLX** — the single biggest gap versus this spec's assumption
+  that `-Dopengl=true -Dgles1=false -Dgles2=false` alone would yield
+  one. `libGL.so` is exclusively a `src/glx/meson.build` product
+  (full GLX/X11-protocol stack: `glxclient.h`, `glxcmds.c`,
+  `indirect_*.c`), inapplicable with no X11. The real fix: Mesa
+  unconditionally builds `src/mapi/glapi`'s `libglapi_bridge.a` (pure
+  per-symbol dispatch-thunk entry points — `glVertex2f`, `glBegin`,
+  etc. — forwarding into whatever table `_glapi_set_dispatch()` last
+  installed; zero GLX/X11 code). `neoos-mesa/build.sh` links that
+  archive into a hand-assembled `libGL.so`, dynamically linked against
+  the same shared `libglapi.so.0` that `libEGL.so` already uses, so
+  `eglMakeCurrent`'s internal dispatch-table install is visible to
+  both. No Mesa source is patched for this — it is a new link recipe
+  in `neoos-mesa`'s own `build.sh` only.
+- **`platform_neoos.h`'s `dri2_initialize_neoos` declaration had to be
+  removed from the public header**: it used Mesa's internal
+  `_EGLDisplay` type, which broke compilation for any external
+  consumer of the header (the test client included). It stayed
+  correctly declared in `egl_dri2.h` (Task 3's patch) for
+  `platform_neoos.c`'s own definition to match against — the public
+  header now carries only `EGL_PLATFORM_NEOOS_MESA` and `struct
+  NeoosEGLWindow`.
+- **Two real first-compile-attempt errors in `platform_neoos.c`**, as
+  Task 5 budgeted for: `struct dri2_egl_display` has no `base` member
+  (`PlatformDisplay` lives on `_EGLDisplay` itself, reached via
+  `dri2_surf->base.Resource.Display->PlatformDisplay`, not through
+  `dri2_egl_display()`); and `wmclient.c`'s own `#include "wmproto.h"`
+  wasn't found because `build.sh` only copied `wmclient.c`/`.h`, not
+  the protocol header they depend on — fixed by copying `wmproto.h`
+  alongside them, same read-only-from-`neoos-wm` treatment.
+- **`LIBGL_DRIVERS_PATH` must be set by the application at runtime**:
+  Mesa's meson build bakes `swrast_dri.so`'s `dlopen` search path in
+  as an absolute build-host path (`$prefix/$libdir/dri`), meaningless
+  once deployed to a NeoOS disk image. NeoOS's `inittab` has no
+  env-var syntax (checked `userland/init.c`: entries are just
+  mode+argv), so `egl_triangle_client.c` calls
+  `setenv("LIBGL_DRIVERS_PATH", "/lib/dri", 1)` itself before
+  `eglInitialize`. Any future EGL application needs the same call (or
+  an inittab wrapper) pointed at wherever it stages the driver.
+- **The regression check's `PORT_DIRS` invocation from sub-project 1's
+  plan no longer fits on the 32MB test disk**: with EGL now enabled,
+  `neoos-mesa/build-output/` also holds `libEGL.so`, `libGL.so`, and
+  two ~89MB unstripped `dri/*.so` copies — `PORT_DIRS=mesa=<dir>`
+  copies everything non-`.nex` under that directory to `::opt/mesa/`,
+  which overflows the disk. Task 8's regression re-run used an
+  isolated portdir holding only `triangle_test.nex`, matching Task 7's
+  own pattern, instead of pointing `PORT_DIRS` at `build-output/`
+  directly.
+- **wm's window placement is not the origin**: the design's pixel
+  check assumed a top-left-placed window; `wm`'s actual default
+  placement was `(60, 60)`, discovered by scanning the full screenshot
+  for the red bounding box rather than assuming a fixed offset. Any
+  future screenshot-based check against a freshly created window
+  should scan for the window/content bounding box rather than
+  hardcoding `(0, 0)`-relative coordinates.
