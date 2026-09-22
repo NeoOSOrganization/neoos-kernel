@@ -199,10 +199,25 @@ loop, not assumed.)
 
 ### 4. Taskbar client (`taskbar.nex`)
 
-New file in `neoos-wm`, musl-linked (like `wm.c` itself -- needed for
-`clock_gettime`/`gmtime`/`snprintf`; unlike `wm.c` it does **not** link
-`neoos-tinygl`, since glass shading is entirely the compositor's job --
-the client only ever draws opaque content into its own buffer).
+New file in `neoos-wm`, **libneoos-linked** (like `wmdemo.c` -- crt0.o
++ `libneoos.a`, not musl). This is a correction from an earlier draft
+of this spec, which assumed musl was needed for `clock_gettime`/
+`gmtime`/`snprintf`: `clock_gettime` is a thin direct syscall
+passthrough in `neoos-libneoos/src/syscall.c`, identical to what
+musl's shim ultimately reaches, and `docs/stdlib.md`'s own divergence
+note confirms `CLOCK_REALTIME` is genuinely RTC-anchored wall time at
+the kernel level (the comment in `neoos-libneoos/include/time.h`
+claiming a boot epoch is stale documentation, not current behavior --
+verified against the actual syscall wrapper, not trusted from the
+comment alone). And since the clock is drawn via bitmap-glyph lookup
+(section 5), not `printf`-style formatting, no `gmtime`/`snprintf` is
+needed either -- just `tv_sec % 86400` arithmetic to extract hour/
+minute digits directly. `pthread_create` (needed below) is already
+proven working on this exact plain libneoos+crt0.o toolchain, not just
+musl -- `userland/mmstress.c` uses it today. `taskbar.nex` does **not**
+link `neoos-tinygl` either way, since glass shading is entirely the
+compositor's job -- the client only ever draws opaque content into its
+own buffer.
 
 - One surface: `wm_create_surface_ex(c, 0, screen_h - 40, screen_w, 40, WM_SURFACE_GLASS | WM_SURFACE_FIXED_POS, 50, "taskbar")`.
 - Draws, into its own pixel buffer, every time it redraws:
@@ -210,7 +225,11 @@ the client only ever draws opaque content into its own buffer).
     with a small margin, vertically centered in the 40px bar.
   - The clock, right-aligned, using the existing 12x24 bitmap font
     (`userland/term/font_term.c`'s `term_glyphs`, reused as-is -- see
-    section 5) formatted `HH:MM` via `gmtime_r` + `snprintf`.
+    section 5): `clock_gettime(CLOCK_REALTIME, &ts)`, then
+    `total = ts.tv_sec % 86400; hh = total/3600; mm = (total/60)%60;`,
+    each of the 4 digits (plus the `:` glyph) looked up in
+    `term_glyphs` directly by character code -- no string formatting
+    anywhere in this path.
 - Main loop: `poll()`s the wm connection's fd with a 1-second timeout
   (matching the redraw cadence the clock needs), drains
   `wm_poll_event` each wake, redraws+recommits when the minute value
@@ -219,16 +238,15 @@ the client only ever draws opaque content into its own buffer).
   `WM_POINTER_MOTION`) falls inside the Start button's rect.
 - On a Start click: if `menu_open` is false, `spawn("/usr/local/bin/startmenu.nex")`,
   record the child pid, set `menu_open = true`, and spawn a reaper
-  pthread (`pthread_create`, available since the clone/pthread
-  milestone) that calls the blocking `wait(child_pid)` and, on return,
-  sets `menu_open = false`. This is what lets a second Start click --
-  after the menu already self-closed from a focus-loss event -- open a
-  fresh one instead of doing nothing; without reaping via `wait`, the
-  child would also sit as an unreaped zombie (a known problem class in
-  this project -- see `docs/superpowers/plans/...` memory of the TLB
-  deferred-free investigation). If `menu_open` is already true, the
-  click still lands on the taskbar (which is a different surface than
-  the menu), so `set_focus` already closes the existing menu on the
+  pthread (`pthread_create`) that calls the blocking `wait(child_pid)`
+  and, on return, sets `menu_open = false`. This is what lets a second
+  Start click -- after the menu already self-closed from a focus-loss
+  event -- open a fresh one instead of doing nothing; without reaping
+  via `wait`, the child would also sit as an unreaped zombie (a known
+  problem class in this project -- see the TLB deferred-free
+  investigation memory). If `menu_open` is already true, the click
+  still lands on the taskbar (which is a different surface than the
+  menu), so `set_focus` already closes the existing menu on the
   compositor side -- the taskbar does not need to also explicitly kill
   it.
 
@@ -363,7 +381,8 @@ this repo, plus a host-native piece where one exists:
 - **Clock correctness**: confirm the rendered clock text, sampled via
   screenshot at a known injected time (QEMU's `-rtc base=...` flag),
   matches the expected `HH:MM` -- exercises the actual font-rendering
-  and `clock_gettime`/`gmtime_r` path, not just "some text appeared."
+  and `clock_gettime`/digit-extraction path, not just "some text
+  appeared."
 
 ## Open questions for planning
 
@@ -377,8 +396,7 @@ this repo, plus a host-native piece where one exists:
   or whether `taskbar.nex` should just `poll()` the raw fd itself
   before calling `wm_poll_event` in a drain loop -- both are valid,
   the plan should pick one and say why.
-- Whether `pthread_create`'s exact signature/linking requirements (musl
-  pthreads, confirmed shipped per the clone/pthread milestone) need
-  any taskbar-specific Makefile flags beyond what `wm.c` already uses
-  for its musl link -- verify against a real trial build during
-  planning, not assumed here.
+- `taskbar.nex`'s Makefile rule should mirror `MMSTRESS.ELF`'s exactly
+  (crt0.o + `libneoos.a`, `pthread_create` already proven there) --
+  confirm no extra flags are needed during planning by checking that
+  rule directly rather than re-deriving one.
