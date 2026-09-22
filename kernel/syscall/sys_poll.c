@@ -7,6 +7,7 @@
 // broadcast wake, and poll()'s remaining nfds cap -- select() sizes its
 // array to the caller's request and has no cap below FD_SETSIZE).
 
+#include "time/ktime.h"
 #include "syscall/syscall_internal.h"
 #include "sched/proc.h"
 #include "sched/fd_table.h"
@@ -161,14 +162,20 @@ static int64_t poll_core(struct pollfd *pfd, unsigned n, int64_t deadline,
     return ready;
 }
 
-// timeout_ms < 0 -> block forever; 0 -> non-blocking; else a deadline in
-// timer ticks (one tick = 10 ms).
+// poll_core's deadline: 0 = non-blocking scan, (int64_t)UINT64_MAX =
+// block forever, otherwise an absolute ktime_get_ns() value. A relative
+// timeout too large to fit is forever, as Linux clamps to KTIME_MAX.
+static int64_t deadline_from_ns(uint64_t ns) {
+    if (ns == 0) { return 0; }
+    uint64_t d = ktime_after_ns(ns);
+    return d > (uint64_t)INT64_MAX ? (int64_t)UINT64_MAX : (int64_t)d;
+}
+
+// timeout_ms < 0 -> block forever; 0 -> non-blocking; else exactly
+// that many ms from now -- no longer rounded to a 10 ms tick.
 static int64_t deadline_from_ms(int timeout_ms) {
     if (timeout_ms < 0)  { return (int64_t)UINT64_MAX; }
-    if (timeout_ms == 0) { return 0; }
-    uint64_t ticks = (uint64_t)timeout_ms / 10;
-    if (ticks == 0) { ticks = 1; }
-    return (int64_t)(timer_ticks() + ticks);
+    return deadline_from_ns((uint64_t)timeout_ms * 1000000ULL);
 }
 
 int64_t sys_poll(struct syscall_args *a) {
@@ -182,7 +189,9 @@ int64_t sys_poll(struct syscall_args *a) {
     // built on a poll loop, is straight past it. select() was widened in
     // CS2.2; this is the same fix on the other call.
     if (n > FD_TABLE_MAX) { return -EINVAL; }
-    if (n == 0) { return 0; }
+    // No fds is still a timed sleep, as on Linux: poll(NULL, 0, ms) is
+    // a common portable sleep. poll_core's scan is simply empty.
+    if (n == 0) { return poll_core(0, 0, deadline_from_ms(tmo), 0); }
     if (!uptr) { return -EFAULT; }
 
     // Small polls -- which is nearly all of them -- stay on the stack.
@@ -233,14 +242,7 @@ int64_t sys_ppoll(struct syscall_args *a) {
         if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000L) {
             return -EINVAL;
         }
-        uint64_t ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-        if (ns == 0) {
-            deadline = 0;
-        } else {
-            uint64_t ticks = (ns + 9999999ULL) / 10000000ULL;   // 10 ms tick, round up
-            if (ticks == 0) { ticks = 1; }
-            deadline = (int64_t)(timer_ticks() + ticks);
-        }
+        deadline = deadline_from_ns(ktime_ts_to_ns((uint64_t)ts.tv_sec, (uint64_t)ts.tv_nsec));
     }
 
     if (n == 0) {
@@ -357,16 +359,17 @@ int64_t sys_select(struct syscall_args *a) {
         n++;
     }
 
-    int timeout_ms = -1;
+    int64_t deadline = (int64_t)UINT64_MAX;   // NULL timeval == block forever
     if (utv) {
         long tv[2];
         uint64_t m = copy_from_user(tv, (const void *)(uintptr_t)utv, sizeof tv);
         if (m > 0) { kfree(pfd); return -EFAULT; }
-        timeout_ms = (int)(tv[0] * 1000 + tv[1] / 1000);
-        if (timeout_ms < 0) { timeout_ms = 0; }
+        // Microsecond precision kept; a negative field is a zero timeout.
+        uint64_t sec = tv[0] > 0 ? (uint64_t)tv[0] : 0, usec = tv[1] > 0 ? (uint64_t)tv[1] : 0;
+        deadline = deadline_from_ns(ktime_ts_to_ns(sec, usec * 1000));
     }
 
-    int64_t r = poll_core(pfd, n, deadline_from_ms(timeout_ms), 0);
+    int64_t r = poll_core(pfd, n, deadline, 0);
     if (r < 0) { kfree(pfd); return r; }
 
     // Rebuild the sets from revents.
@@ -437,7 +440,7 @@ int64_t sys_epoll_ctl(struct syscall_args *a) {
 // its sockets from another thread -- so a single up-front snapshot would
 // block that thread forever. epoll_ctl_do() also fires waitq_poll_notify()
 // to cut the latency to ~0 for the common case; this only bounds it.
-#define EPOLL_REEVAL_TICKS 5
+#define EPOLL_REEVAL_NS 50000000ULL
 
 // Copy the edge state poll_core just maintained back onto the
 // registrations it came from, so the NEXT epoll_wait picks up where
@@ -525,7 +528,7 @@ static int64_t epoll_wait_core(struct syscall_args *a) {
         if (timeout_ms == 0) {
             d = 0;
         } else {
-            int64_t cap = (int64_t)timer_ticks() + EPOLL_REEVAL_TICKS;
+            int64_t cap = (int64_t)ktime_after_ns(EPOLL_REEVAL_NS);
             d = (user_deadline == (int64_t)UINT64_MAX || user_deadline > cap)
                     ? cap : user_deadline;
         }
@@ -569,7 +572,7 @@ static int64_t epoll_wait_core(struct syscall_args *a) {
 
         if (timeout_ms == 0) { return 0; }
         if (user_deadline != (int64_t)UINT64_MAX &&
-            (int64_t)timer_ticks() >= user_deadline) {
+            (int64_t)ktime_get_ns() >= user_deadline) {
             return 0;
         }
         // loop: re-snapshot and re-scan

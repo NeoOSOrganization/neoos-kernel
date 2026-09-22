@@ -115,6 +115,7 @@ struct thread *thread_alloc(struct process *p) {
     set_load_weight(&t->se, 0);
     t->se.slice       = 0;   // resolves to SCHED_BASE_SLICE_NS
     t->cpus_allowed   = ~0ULL;
+    hrtimer_init(&t->sleep_timer, waitq_sleep_timer_fn);
     t->xstate = kmalloc(cpu_state_size());
     if (!t->xstate) { kfree(t); return 0; }
     cpu_state_init(t->xstate);

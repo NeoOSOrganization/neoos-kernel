@@ -114,13 +114,12 @@
 // needs out under the lock and transmits after dropping it.
 #define LOCK_RANK_ARP        15
 
-// The timed-sleep list. It was rank THREAD (2), which was fine while
-// waitq_sleep_timeout's only caller held no lock -- but any of the IPC
-// guards above hands itself to waitq_sleep_timeout as `release`, and
-// timeout_add runs while that guard is still held. At rank 2 that is a
-// descending acquire and an instant panic. It belongs here, directly
-// under WAITQ, for the same reason WAITQ is where it is: it is taken on
-// the way into a sleep, under whatever guard the sleeper was holding.
+// The per-CPU hrtimer bases (kernel/time/hrtimer.c) and the timer
+// wheel. Taken from the timer interrupt and when a timer is started or
+// cancelled -- a timed waitq sleep starts its hrtimer only after
+// dropping the caller's guard, so nothing is held under it there. It
+// ranks below WAITQ and RUNQUEUE because a callback that wakes a thread
+// takes those, though only after the base lock is dropped.
 #define LOCK_RANK_TIMEOUT    16
 // Per-wait-queue. Above every lock legally held across waitq_sleep() (a
 // mutex passes its own guard in as `release`, carrying the mutex's

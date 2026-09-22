@@ -1,3 +1,4 @@
+#include "time/ktime.h"
 #include "net/dhcp.h"
 #include "net/net.h"
 #include "net/route.h"
@@ -199,7 +200,7 @@ static int send_msg(uint8_t type, uint32_t ciaddr_n, uint32_t requested_n,
 }
 
 static void sleep_ticks(uint64_t n) {
-    waitq_sleep_timeout(&dhcp_wait, 0, timer_ticks() + n);
+    waitq_sleep_timeout(&dhcp_wait, 0, ktime_after_ticks(n));
 }
 
 static void install(const struct dhcp_lease *l) {

@@ -16,6 +16,7 @@
 #include "ipc/futex.h"
 #include "ipc/pipe.h"
 #include "drivers/char/timer.h"
+#include "time/ktime.h"
 #include "mm/vma.h"
 #include "mm/paging.h"
 #include "mm/heap.h"
@@ -127,6 +128,7 @@ int64_t sys_rt_sigtimedwait(struct syscall_args *a) {
     if (ts_ptr) {
         missed = copy_from_user(&ts, (const void *)(uintptr_t)ts_ptr, sizeof ts);
         if (missed > 0) { return -EFAULT; }
+        if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000L) { return -EINVAL; }
         have_ts = 1;
     }
     struct thread *t = current_thread();
@@ -139,9 +141,9 @@ int64_t sys_rt_sigtimedwait(struct syscall_args *a) {
 
     uint64_t deadline = 0;
     if (have_ts) {
-        uint64_t ticks = (uint64_t)ts.tv_sec * TIMER_HZ
-                       + (uint64_t)ts.tv_nsec / (1000000000UL / TIMER_HZ);
-        deadline = timer_ticks() + (ticks ? ticks : 1);
+        // Absolute ktime deadline; a zero timeout is already past, so
+        // the pending set is checked once and -EAGAIN returned.
+        deadline = ktime_after_ns(ktime_ts_to_ns((uint64_t)ts.tv_sec, (uint64_t)ts.tv_nsec));
     }
 
     int64_t rc = -EAGAIN;

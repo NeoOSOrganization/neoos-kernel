@@ -1,3 +1,4 @@
+#include "time/ktime.h"
 #include "net/tcp.h"
 #include "net/net.h"
 #include "net/route.h"
@@ -1112,8 +1113,7 @@ static void tcp_timer_thread(void) {
         for (int i = 0; i < TCP_MAX_CONNS; i++) {
             if (conns[i].in_use) { active = 1; break; }
         }
-        waitq_sleep_timeout(&timer_wait, 0,
-                            timer_ticks() + (active ? 1 : 20));
+        waitq_sleep_timeout(&timer_wait, 0, ktime_after_ticks(active ? 1 : 20));
     }
 }
 

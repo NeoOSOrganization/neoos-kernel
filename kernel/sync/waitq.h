@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "sync/spinlock_types.h"
+#include "time/hrtimer.h"
 
 // Deliberately does NOT include lock.h: lock.h includes THIS header
 // (struct mutex embeds a struct waitq by value), so including it back
@@ -39,16 +40,18 @@ int  waitq_sleep(struct waitq *q, struct spinlock *release);
 int  waitq_sleep_unless(struct waitq *q, struct spinlock *release,
                         volatile int *abort);
 int  waitq_sleep_timeout_unless(struct waitq *q, struct spinlock *release,
-                                uint64_t deadline, volatile int *abort);
+                                uint64_t deadline_ns, volatile int *abort);
 
-// Like waitq_sleep, but also returns -ETIMEDOUT once timer_ticks()
-// reaches `deadline`. nanosleep and futex(FUTEX_WAIT) with a timeout
-// need exactly this, so it is paid for once here.
+// Like waitq_sleep, but also returns -ETIMEDOUT once ktime_get_ns()
+// reaches `deadline_ns` -- an ABSOLUTE ktime value (ktime_after_ns()
+// builds one). A deadline already past returns -ETIMEDOUT at once;
+// UINT64_MAX never expires. The wake is the thread's own sleep_timer
+// hrtimer, so it lands at the deadline, not at the next tick.
 int  waitq_sleep_timeout(struct waitq *q, struct spinlock *release,
-                         uint64_t deadline);
+                         uint64_t deadline_ns);
+// struct thread's sleep_timer callback (thread.c installs it).
+enum hrtimer_restart waitq_sleep_timer_fn(struct hrtimer *h);
 
-// Called once per timer tick to wake expired sleepers.
-void waitq_timeout_tick(void);
 void waitq_wake_one(struct waitq *q);
 void waitq_wake_all(struct waitq *q);
 
@@ -74,10 +77,10 @@ uint64_t waitq_poll_depth(void);   // threads blocked on the broadcast now
 // tell a useful wake from a wasted one.
 uint64_t waitq_poll_wasted(void);
 void     waitq_poll_count_wasted(void);                 // wake every poll_core
-// Sleeps until notified, the deadline, or a signal -- unless *abort is
+// Sleeps until notified, the deadline (absolute ktime ns), or a signal -- unless *abort is
 // already set when the queue lock is taken, in which case it returns
 // immediately without sleeping. CS5.2's lost-wakeup guard; see waitq.c.
-int  waitq_poll_wait(uint64_t deadline, volatile int *abort);
+int  waitq_poll_wait(uint64_t deadline_ns, volatile int *abort);
 // Wakes one NAMED poll sleeper: what a per-object poll head calls
 // instead of broadcasting to every poller in the system.
 void waitq_poll_wake_thread(struct thread *t);
@@ -85,8 +88,9 @@ void waitq_poll_enter(void);
 void waitq_poll_leave(void);
 
 // Removes `t` from whatever queue it is blocked on, leaving it
-// dequeued but NOT ready. Used by thread_kill.
-void waitq_remove(struct thread *t);
+// dequeued but NOT ready. Used by thread_kill and the sleep timer.
+// Returns 1 if t was still queued (so the caller now owns its wake).
+int  waitq_remove(struct thread *t);
 
 void waitq_selftest_start(void);
 void waitq_churn_selftest(void);   // exit-vs-drain race; needs APs online

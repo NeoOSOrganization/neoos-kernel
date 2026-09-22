@@ -25,6 +25,7 @@
 #include "errno.h"
 #include "ipc/signal.h"
 #include "drivers/char/timer.h"
+#include "time/ktime.h"
 #include "mm/paging.h"
 #include "sched/proc.h"
 
@@ -98,16 +99,17 @@ static int64_t futex_wait(uint32_t *uaddr, uint32_t val,
     w.woken = 0;
     waitq_init(&w.q);
 
-    uint64_t deadline = 0;
+    uint64_t deadline = 0;   // 0 = no timeout
     if (timeout) {
+        if (timeout->tv_sec < 0 || timeout->tv_nsec < 0 || timeout->tv_nsec >= 1000000000L) {
+            return -EINVAL;   // Linux's check for a malformed timespec
+        }
         // Relative, as Linux's FUTEX_WAIT is (FUTEX_WAIT_BITSET is the
-        // absolute one, and is not implemented). Rounded UP to a whole
-        // tick: a timeout shorter than the 10ms tick must still sleep,
-        // not return immediately.
-        uint64_t ticks = (uint64_t)timeout->tv_sec * TIMER_HZ
-                       + ((uint64_t)timeout->tv_nsec + (1000000000UL / TIMER_HZ) - 1)
-                         / (1000000000UL / TIMER_HZ);
-        deadline = timer_ticks() + (ticks ? ticks : 1);
+        // absolute one, and is not implemented). An absolute ktime
+        // deadline, never 0 after boot -- so a zero timeout is a
+        // deadline already past and returns -ETIMEDOUT at once, as on
+        // Linux.
+        deadline = ktime_after_ns(ktime_ts_to_ns((uint64_t)timeout->tv_sec, (uint64_t)timeout->tv_nsec));
     }
 
     uint64_t f = spin_lock_irqsave(&b->lock);

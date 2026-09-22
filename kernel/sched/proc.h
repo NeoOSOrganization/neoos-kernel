@@ -11,6 +11,7 @@
 #include "mm/vma.h"
 #include "elf.h"
 #include "sched/sched_entity.h"
+#include "time/hrtimer.h"
 
 #define KERNEL_STACK_ORDER 2 // 4 frames = 16KiB
 
@@ -252,7 +253,11 @@ struct thread {
     // poll head yet, and so still needs the global broadcast. Pollers
     // fully covered by poll heads are skipped by it.
     volatile int  poll_wants_broadcast;
-    uint64_t      sleep_deadline;   // 0 = none; else a timer_ticks() value
+    // Armed only across a timed waitq sleep (waitq_sleep_timeout*): its
+    // callback dequeues and wakes this thread, and sets sleep_timed_out
+    // only if it was the one that did.
+    struct hrtimer sleep_timer;
+    volatile int  sleep_timed_out;
     // How deep THIS THREAD is inside a loopback delivery. It belongs to
     // the thread rather than the CPU because it describes a CALL CHAIN:
     // a per-CPU counter is incremented on one CPU and, if the thread is
@@ -260,7 +265,6 @@ struct thread {
     // permanently deep and the other underflowed into never limiting
     // anything at all. See loopback_transmit in net.c.
     int           net_loop_depth;
-    struct thread *timeout_next;    // list of threads with a deadline
 
     sigset_t_k    blocked;
     sigset_t_k    pending;         // thread-directed: tkill()

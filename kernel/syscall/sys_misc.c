@@ -72,9 +72,6 @@ int64_t sys_futex(struct syscall_args *a) {
 #define CLOCK_MONOTONIC_RAW      4
 #define CLOCK_BOOTTIME           7
 
-#define TICK_HZ     100
-#define NS_PER_TICK (1000000000ULL / TICK_HZ)
-
 static int clock_valid(int clk) {
     return clk == CLOCK_REALTIME || clk == CLOCK_MONOTONIC || clk == CLOCK_MONOTONIC_RAW ||
            clk == CLOCK_BOOTTIME || clk == CLOCK_PROCESS_CPUTIME_ID || clk == CLOCK_THREAD_CPUTIME_ID;
@@ -129,17 +126,28 @@ int64_t sys_clock_getres(struct syscall_args *a) {
     return 0;
 }
 
-// Relative sleep, rounded UP to a whole tick: sleeping less than asked
-// is a bug a caller cannot defend against, whereas sleeping slightly
-// longer is what every tick-driven kernel does.
-//
-// DIVERGES: the remaining-time argument is ignored, because nothing
-// here can interrupt a sleep partway and report a remainder yet.
+// Sleeps until deadline_ns (absolute ktime) on the thread's own
+// hrtimer: at the deadline, never before it, not rounded to a tick.
+// Nothing ever wakes the queue; only the timer or a signal ends it. On
+// EINTR the remainder of a RELATIVE sleep goes to rem_p (Linux
+// semantics; absolute sleeps pass 0 and never write it).
+static int64_t sleep_until(uint64_t deadline_ns, uint64_t rem_p) {
+    struct waitq q;
+    waitq_init(&q);
+    int rc = waitq_sleep_timeout(&q, NULL, deadline_ns);
+    if (rc != -EINTR) { return 0; }
+    if (rem_p) {
+        uint64_t now = ktime_get_ns(), left = deadline_ns > now ? deadline_ns - now : 0;
+        struct k_timespec r = { .tv_sec = (int64_t)(left / NSEC_PER_SEC), .tv_nsec = (int64_t)(left % NSEC_PER_SEC) };
+        if (copy_to_user((void *)(uintptr_t)rem_p, &r, sizeof r) > 0) { return -EFAULT; }
+    }
+    return -EINTR;
+}
+
 // clock_nanosleep(clockid, flags, request, remain) -- MSC-2. The
 // absolute-deadline sleep .NET / Go / musl's pthread_cond_timedwait
 // want. TIMER_ABSTIME (flag 1) treats `request` as an absolute time on
-// `clockid`; flags 0 is relative, identical to nanosleep. `remain` is
-// ignored on -EINTR, the same divergence nanosleep documents.
+// `clockid`; flags 0 is relative, identical to nanosleep.
 #define TIMER_ABSTIME 1
 int64_t sys_clock_nanosleep(struct syscall_args *a) {
     int      clk   = (int)a->a1;
@@ -147,7 +155,7 @@ int64_t sys_clock_nanosleep(struct syscall_args *a) {
     uint64_t req_p = (uint64_t)a->a3;
     if (!req_p) { return -EFAULT; }
     if (clk != CLOCK_REALTIME && clk != CLOCK_MONOTONIC &&
-        clk != CLOCK_MONOTONIC_RAW) {
+        clk != CLOCK_MONOTONIC_RAW && clk != CLOCK_BOOTTIME) {
         return -EINVAL;
     }
 
@@ -159,25 +167,19 @@ int64_t sys_clock_nanosleep(struct syscall_args *a) {
         return -EINVAL;
     }
 
-    uint64_t deadline_ticks;
+    uint64_t ns = ktime_ts_to_ns((uint64_t)req.tv_sec, (uint64_t)req.tv_nsec);
     if (flags & TIMER_ABSTIME) {
-        int64_t sec = req.tv_sec;
-        if (clk == CLOCK_REALTIME) { sec -= rtc_boot_epoch(); }
-        if (sec < 0) { return 0; }   // deadline already in the past
-        uint64_t ns = (uint64_t)sec * 1000000000ULL + (uint64_t)req.tv_nsec;
-        deadline_ticks = (ns + NS_PER_TICK - 1) / NS_PER_TICK;
-        if (deadline_ticks <= timer_ticks()) { return 0; }
-    } else {
-        uint64_t ns = (uint64_t)req.tv_sec * 1000000000ULL + (uint64_t)req.tv_nsec;
-        uint64_t ticks = (ns + NS_PER_TICK - 1) / NS_PER_TICK;
-        if (ticks == 0) { return 0; }
-        deadline_ticks = timer_ticks() + ticks;
+        uint64_t target = ns;
+        if (clk == CLOCK_REALTIME) {
+            uint64_t e = (uint64_t)rtc_boot_epoch() * NSEC_PER_SEC;
+            if (target <= e) { return 0; }   // deadline already in the past
+            target -= e;
+        }
+        if (target <= ktime_get_ns()) { return 0; }
+        return sleep_until(target, 0);
     }
-
-    struct waitq q;
-    waitq_init(&q);
-    int rc = waitq_sleep_timeout(&q, NULL, deadline_ticks);
-    return (rc == -EINTR) ? -EINTR : 0;
+    if (ns == 0) { return 0; }
+    return sleep_until(ktime_after_ns(ns), (uint64_t)a->a4);
 }
 
 int64_t sys_nanosleep(struct syscall_args *a) {
@@ -190,21 +192,9 @@ int64_t sys_nanosleep(struct syscall_args *a) {
         return -EINVAL;
     }
 
-    uint64_t ns    = (uint64_t)req.tv_sec * 1000000000ULL + (uint64_t)req.tv_nsec;
-    uint64_t ticks = (ns + NS_PER_TICK - 1) / NS_PER_TICK;
-    if (ticks == 0 && ns > 0) { ticks = 1; }
-    if (ticks == 0) { return 0; }
-
-    uint64_t deadline = timer_ticks() + ticks;
-    struct waitq q;
-    waitq_init(&q);
-    // Nothing ever wakes this queue; waitq_timeout_tick() dequeues the
-    // sleeper when timer_ticks() reaches `deadline`. -EINTR if the
-    // thread is killed while blocked, matching the interrupted-sleep
-    // contract (rem is still ignored — documented).
-    int rc = waitq_sleep_timeout(&q, NULL, deadline);
-    if (rc == -EINTR) { return -EINTR; }
-    return 0;
+    uint64_t ns = ktime_ts_to_ns((uint64_t)req.tv_sec, (uint64_t)req.tv_nsec);
+    if (ns == 0) { return 0; }
+    return sleep_until(ktime_after_ns(ns), (uint64_t)a->a2);
 }
 
 // Always present so the dispatch table has a real handler at

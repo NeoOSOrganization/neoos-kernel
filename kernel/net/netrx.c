@@ -1,5 +1,6 @@
 // netrx.c -- the queue between the network interrupt and the stack.
 
+#include "time/ktime.h"
 #include "netrx.h"
 #include "net.h"
 #include "../sync/lock.h"
@@ -115,7 +116,7 @@ static void netrx_thread(void) {
                 // timeout is armed only while something is pending, so
                 // an idle machine still sleeps until the next frame.
                 if (arp_pending()) {
-                    waitq_sleep_timeout(&rx_wait, &rx_lock, timer_ticks() + 1);
+                    waitq_sleep_timeout(&rx_wait, &rx_lock, ktime_after_ticks(1));
                 } else {
                     waitq_sleep(&rx_wait, &rx_lock);
                 }

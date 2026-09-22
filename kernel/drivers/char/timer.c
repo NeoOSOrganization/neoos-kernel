@@ -55,8 +55,8 @@ static enum hrtimer_restart tick_fn(struct hrtimer *t) {
         }
     }
 
-    // The BSP runs the per-tick housekeeping once for every 10 ms of
-    // real (TSC) time that has passed, however the interrupts fell.
+    // The BSP logs once per second of real (TSC) time, however the
+    // interrupts fell.
     if (c == &cpus[0]) {
         static uint64_t last_tick;
         uint64_t now_tick = timer_ticks();
@@ -67,9 +67,6 @@ static enum hrtimer_restart tick_fn(struct hrtimer *t) {
                 serial_write_hex64(last_tick);
                 serial_write_string("\n");
             }
-            // Wake anything whose timed sleep has expired. A scan per
-            // tick is cheaper than a heap at NeoOS's thread counts.
-            waitq_timeout_tick();
         }
     }
 

@@ -10,6 +10,14 @@ uint64_t ktime_get_ns(void);
 // now + ns / now + ticks*10ms, saturating at UINT64_MAX ("forever").
 uint64_t ktime_after_ns(uint64_t ns);
 uint64_t ktime_after_ticks(uint64_t ticks);
+// A user timespec's value in ns, saturating at UINT64_MAX ("forever")
+// the way Linux clamps to KTIME_MAX. sec and nsec must be validated
+// non-negative by the caller.
+static inline uint64_t ktime_ts_to_ns(uint64_t sec, uint64_t nsec) {
+    if (sec >= UINT64_MAX / NSEC_PER_SEC) { return UINT64_MAX; }
+    uint64_t ns = sec * NSEC_PER_SEC;
+    return (ns + nsec < ns) ? UINT64_MAX : ns + nsec;
+}
 // Absolute ktime ns -> absolute TSC value (for TSC-deadline).
 uint64_t ktime_ns_to_tsc(uint64_t ns);
 // Called once by timer_init with the PIT-measured TSC rate.

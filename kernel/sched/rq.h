@@ -82,6 +82,8 @@ uint64_t sched_slice_remaining_ns(struct rq *rq);  // sched.c, takes rq->lock
 // Arms THIS CPU's slice hrtimer for the running task's remaining slice,
 // or cancels it on idle. Called on every arrival on a CPU.
 void sched_arm_slice_timer(void);                  // sched.c
+// A thread was just queued on THIS CPU: wakeup-preemption check.
+void sched_wakeup_check(void);                     // sched.c
 
 // Scheduler ABI helpers (SCH-1 Task 5). fair_* need rq->lock held.
 void fair_reweight_current(struct rq *rq, int nice, int policy, uint64_t slice_ns);

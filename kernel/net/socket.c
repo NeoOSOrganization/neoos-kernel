@@ -11,6 +11,7 @@
 // a stream, and silently corrupt its own protocol. SOCK_STREAM returns
 // -EPROTONOSUPPORT until there is a real TCP behind it.
 
+#include "time/ktime.h"
 #include "net/socket.h"
 #include "net/net.h"
 #include "net/tcp.h"
@@ -864,7 +865,7 @@ static int stream_wait_connected(struct tcb *t) {
             return t->so_error ? -t->so_error : -ECONNREFUSED;
         }
         if (signal_pending_any(current_thread())) { return -EINTR; }
-        waitq_sleep_timeout(&t->waiters, 0, timer_ticks() + STREAM_POLL_TICKS);
+        waitq_sleep_timeout(&t->waiters, 0, ktime_after_ticks(STREAM_POLL_TICKS));
     }
 }
 
@@ -898,7 +899,7 @@ int64_t socket_accept4(int fd, struct k_sockaddr *addr, uint32_t *len, int flags
         if (c) { break; }
         if (nonblock || (flags & SOCK_NONBLOCK)) { sock_put(s); return -EAGAIN; }
         if (signal_pending_any(current_thread())) { sock_put(s); return -EINTR; }
-        waitq_sleep_timeout(&l->waiters, 0, timer_ticks() + STREAM_POLL_TICKS);
+        waitq_sleep_timeout(&l->waiters, 0, ktime_after_ticks(STREAM_POLL_TICKS));
     }
     sock_put(s);
 
@@ -1080,7 +1081,7 @@ static int64_t stream_send(struct socket *s, int nonblock,
         if (done >= len) { break; }
         if (nonblock) { return done ? (int64_t)done : -EAGAIN; }
         if (signal_pending_any(current_thread())) { return done ? (int64_t)done : -EINTR; }
-        waitq_sleep_timeout(&t->waiters, 0, timer_ticks() + STREAM_POLL_TICKS);
+        waitq_sleep_timeout(&t->waiters, 0, ktime_after_ticks(STREAM_POLL_TICKS));
     }
     return (int64_t)done;
 }
@@ -1094,7 +1095,7 @@ static int64_t stream_recv(struct socket *s, int nonblock, void *buf, uint64_t l
         if (rc != -EAGAIN) { return rc; }
         if (nonblock) { return -EAGAIN; }
         if (signal_pending_any(current_thread())) { return -EINTR; }
-        waitq_sleep_timeout(&t->waiters, 0, timer_ticks() + STREAM_POLL_TICKS);
+        waitq_sleep_timeout(&t->waiters, 0, ktime_after_ticks(STREAM_POLL_TICKS));
     }
 }
 

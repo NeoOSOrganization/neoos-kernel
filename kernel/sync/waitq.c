@@ -4,7 +4,8 @@
 #include "arch/cpu_local.h"
 #include "errno.h"
 #include "ipc/signal.h"
-#include "drivers/char/timer.h"
+#include "time/ktime.h"
+#include <stddef.h>
 #include "drivers/char/serial.h"
 #include "smp/smp.h"
 
@@ -106,20 +107,21 @@ static struct thread *waitq_dequeue(struct waitq *q) {
     return t;
 }
 
-void waitq_remove(struct thread *t) {
+int waitq_remove(struct thread *t) {
     struct waitq *q = t->blocked_on;
-    if (!q) { return; }
+    if (!q) { return 0; }
     uint64_t rf = spin_lock_irqsave(&q->lock);
     // Re-read under the lock: the thread may have been woken between the
     // read above and the acquire, in which case q is stale.
     if (t->blocked_on != q) {
         spin_unlock_irqrestore(&q->lock, rf);
-        return;
+        return 0;
     }
     struct thread **pp = &q->head;
     struct thread *prev = 0;
     while (*pp && *pp != t) { prev = *pp; pp = &(*pp)->next; }
-    if (*pp) {
+    int found = *pp != 0;
+    if (found) {
         *pp = t->next;
         // Repairing tail matters even when t is the ONLY queued thread:
         // leaving a stale tail pointing at a freed thread makes the
@@ -129,14 +131,20 @@ void waitq_remove(struct thread *t) {
     t->next = 0;
     t->blocked_on = 0;
     spin_unlock_irqrestore(&q->lock, rf);
+    return found;
 }
 
-int waitq_sleep(struct waitq *q, struct spinlock *release) {
-    return waitq_sleep_unless(q, release, 0);
-}
-
-int waitq_sleep_unless(struct waitq *q, struct spinlock *release,
-                       volatile int *abort) {
+// The one sleep path. deadline_ns 0 means untimed; otherwise the
+// thread's sleep_timer is started for it, and only AFTER the thread is
+// queued and `release` is dropped, with interrupts still off:
+//   - no lock is held when the hrtimer base lock (LOCK_RANK_TIMEOUT) is
+//     taken, whatever rank the caller's guard has;
+//   - the timer is on THIS CPU, whose interrupts stay off until
+//     schedule() has switched away, so its callback cannot run before
+//     the thread is on the queue -- it always finds it there, or finds
+//     that someone else already woke it. There is no lost-wakeup window.
+static int sleep_common(struct waitq *q, struct spinlock *release,
+                        volatile int *abort, uint64_t deadline_ns) {
     struct thread *t = current_thread();
 
     // If the caller holds `release`, spin_lock_irqsave already cleared
@@ -173,9 +181,13 @@ int waitq_sleep_unless(struct waitq *q, struct spinlock *release,
 
     if (release) { spin_unlock_irqrestore(release, 0); } // deliberately keeps IF off
 
+    if (deadline_ns && deadline_ns != UINT64_MAX) {
+        hrtimer_start(&t->sleep_timer, deadline_ns);
+    }
+
     schedule();
 
-    // Resumed: woken normally, or killed while blocked.
+    // Resumed: woken normally, timed out, or killed while blocked.
     t->blocked_on = 0;
     int rc = signal_pending_any(t) ? -EINTR : 0;
 
@@ -184,87 +196,43 @@ int waitq_sleep_unless(struct waitq *q, struct spinlock *release,
     return rc;
 }
 
-// Threads sleeping with a deadline, scanned once per timer tick.
-static struct thread *timeout_list;
-static struct spinlock timeout_lock;
-static int timeout_lock_ready;
-
-static void timeout_add(struct thread *t, uint64_t deadline) {
-    if (!timeout_lock_ready) {
-        spin_init(&timeout_lock, LOCK_RANK_TIMEOUT, "waitq-timeout");
-        timeout_lock_ready = 1;
-    }
-    uint64_t f = spin_lock_irqsave(&timeout_lock);
-    t->sleep_deadline = deadline;
-    t->timeout_next = timeout_list;
-    timeout_list = t;
-    spin_unlock_irqrestore(&timeout_lock, f);
+int waitq_sleep(struct waitq *q, struct spinlock *release) {
+    return sleep_common(q, release, 0, 0);
 }
 
-static void timeout_remove(struct thread *t) {
-    if (!timeout_lock_ready) { return; }
-    uint64_t f = spin_lock_irqsave(&timeout_lock);
-    struct thread **pp = &timeout_list;
-    while (*pp && *pp != t) { pp = &(*pp)->timeout_next; }
-    if (*pp) { *pp = t->timeout_next; }
-    t->timeout_next = 0;
-    t->sleep_deadline = 0;
-    spin_unlock_irqrestore(&timeout_lock, f);
+int waitq_sleep_unless(struct waitq *q, struct spinlock *release,
+                       volatile int *abort) {
+    return sleep_common(q, release, abort, 0);
 }
 
-void waitq_timeout_tick(void) {
-    if (!timeout_lock_ready || !timeout_list) { return; }
-    uint64_t now = timer_ticks();
-
-    // Expired sleepers are unlinked under the lock and woken after it is
-    // dropped. Waking can spin (thread_enqueue_ready waits for the
-    // sleeper to finish leaving its CPU), and spinning while holding
-    // timeout_lock would block every other CPU's timeout_add for the
-    // duration -- for no reason, since the wake needs nothing this list
-    // protects.
-    struct thread *expired = 0;
-
-    uint64_t f = spin_lock_irqsave(&timeout_lock);
-    struct thread **pp = &timeout_list;
-    while (*pp) {
-        struct thread *t = *pp;
-        if (t->sleep_deadline && now >= t->sleep_deadline) {
-            *pp = t->timeout_next;
-            t->sleep_deadline = 0;
-            t->timeout_next = expired;
-            expired = t;
-        } else {
-            pp = &t->timeout_next;
-        }
+// Runs in the timer interrupt. Only a callback that finds the thread
+// still queued wakes it and reports the timeout: if a waker (or a kill)
+// got there first, that wake stands and the sleep returns 0 / -EINTR.
+enum hrtimer_restart waitq_sleep_timer_fn(struct hrtimer *h) {
+    struct thread *t = (struct thread *)((char *)h - offsetof(struct thread, sleep_timer));
+    if (waitq_remove(t)) {
+        t->sleep_timed_out = 1;
+        waitq_make_ready(t);
     }
-    spin_unlock_irqrestore(&timeout_lock, f);
-
-    while (expired) {
-        struct thread *t = expired;
-        expired = t->timeout_next;
-        t->timeout_next = 0;
-        if (t->state == THREAD_BLOCKED) {
-            waitq_remove(t);
-            waitq_make_ready(t);
-        }
-    }
+    return HRTIMER_NORESTART;
 }
 
 int waitq_sleep_timeout(struct waitq *q, struct spinlock *release,
-                        uint64_t deadline) {
-    return waitq_sleep_timeout_unless(q, release, deadline, 0);
+                        uint64_t deadline_ns) {
+    return waitq_sleep_timeout_unless(q, release, deadline_ns, 0);
 }
 
 int waitq_sleep_timeout_unless(struct waitq *q, struct spinlock *release,
-                               uint64_t deadline, volatile int *abort) {
+                               uint64_t deadline_ns, volatile int *abort) {
     struct thread *t = current_thread();
-    if (timer_ticks() >= deadline) { return -ETIMEDOUT; }
-    timeout_add(t, deadline);
-    int rc = waitq_sleep_unless(q, release, abort);
-    int expired = (t->sleep_deadline == 0 && rc == 0);
-    timeout_remove(t);
+    if (ktime_get_ns() >= deadline_ns) { return -ETIMEDOUT; }
+    t->sleep_timed_out = 0;
+    int rc = sleep_common(q, release, abort, deadline_ns);
+    // After this the callback cannot touch t or q -- q may live in the
+    // caller's stack frame, gone the moment we return.
+    hrtimer_cancel(&t->sleep_timer);
     if (rc != 0) { return rc; }
-    return expired ? -ETIMEDOUT : 0;
+    return t->sleep_timed_out ? -ETIMEDOUT : 0;
 }
 
 // thread_wake does the BLOCKED -> READY transition atomically, so a
@@ -389,9 +357,9 @@ void waitq_poll_leave(void) { __atomic_sub_fetch(&waitq_poll_active, 1, __ATOMIC
 // a notifier sets the flag BEFORE taking that lock, so either this
 // thread sees the flag, or the notifier's wake happens after the
 // enqueue and finds the thread there.
-int waitq_poll_wait(uint64_t deadline, volatile int *abort) {
+int waitq_poll_wait(uint64_t deadline_ns, volatile int *abort) {
     // Poll waiters never hold a lock across this, so pass none.
-    return waitq_sleep_timeout_unless(&poll_broadcast, 0, deadline, abort);
+    return waitq_sleep_timeout_unless(&poll_broadcast, 0, deadline_ns, abort);
 }
 
 // Wakes ONE poll sleeper, named. This is what a per-object poll head

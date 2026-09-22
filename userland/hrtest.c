@@ -3,6 +3,7 @@
 // "PASS hrtest" only if every check passed.
 #define _GNU_SOURCE
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <time.h>
 #include <errno.h>
@@ -97,9 +98,57 @@ static void test_slices(void) {
           (unsigned long long)per_s);
 }
 
+static int cmp_u64(const void *x, const void *y) {
+    uint64_t a = *(const uint64_t *)x, b = *(const uint64_t *)y;
+    return a < b ? -1 : a > b;
+}
+static uint64_t median(uint64_t *v, int n) { qsort(v, n, sizeof *v, cmp_u64); return v[n / 2]; }
+
+// Bounds are asserted on MEDIANS: hrtest shares the machine with the
+// boot's own selftests, and one of them polls the ATA drive with
+// interrupts off for tens of ms, delaying any timer queued on that
+// CPU. A tick-rounded kernel would put EVERY sample past 10 ms, so a
+// median still separates the two cleanly. The worst case is reported.
+static void test_sleeps(void) {
+    // 50 x 200us: never early.
+    uint64_t v[50]; int early = 0; uint64_t worst = 0;
+    for (int i = 0; i < 50; i++) {
+        uint64_t t0 = now_ns(CLOCK_MONOTONIC);
+        struct timespec d = { 0, 200000 }; nanosleep(&d, 0);
+        v[i] = now_ns(CLOCK_MONOTONIC) - t0;
+        if (v[i] < 200000) { early = 1; }
+        if (v[i] > worst) { worst = v[i]; }
+    }
+    CHECK("nanosleep_not_early", !early, "a 200us sleep returned early");
+    uint64_t med = median(v, 50);
+    printf("hrtest: nanosleep 200us median=%lluus worst=%lluus\n",
+           (unsigned long long)(med / 1000), (unsigned long long)(worst / 1000));
+    CHECK("nanosleep_median", med < 2000000, "median %lluus", (unsigned long long)(med / 1000));
+
+    uint64_t p[5], w[5]; int abs_early = 0;
+    for (int i = 0; i < 5; i++) {
+        uint64_t t0 = now_ns(CLOCK_MONOTONIC);
+        poll(0, 0, 3);
+        p[i] = now_ns(CLOCK_MONOTONIC) - t0;
+
+        struct timespec abs; clock_gettime(CLOCK_MONOTONIC, &abs);
+        abs.tv_nsec += 1500000; if (abs.tv_nsec >= 1000000000) { abs.tv_sec++; abs.tv_nsec -= 1000000000; }
+        uint64_t target = (uint64_t)abs.tv_sec * 1000000000ULL + (uint64_t)abs.tv_nsec;
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &abs, 0);
+        uint64_t woke = now_ns(CLOCK_MONOTONIC);
+        if (woke < target) { abs_early = 1; w[i] = 0; } else { w[i] = woke - target; }
+    }
+    uint64_t pm = median(p, 5), wm = median(w, 5);
+    CHECK("poll_3ms", p[0] >= 3000000 && pm >= 3000000 && pm < 9000000,
+          "poll(3ms) median %lluus", (unsigned long long)(pm / 1000));
+    CHECK("abstime", !abs_early && wm < 9000000, "woke %lluus past the deadline (median)%s",
+          (unsigned long long)(wm / 1000), abs_early ? ", and once early" : "");
+}
+
 int main(void) {
     test_clocks();
     test_slices();
+    test_sleeps();
     if (fails == 0) { printf("PASS hrtest\n"); } else { printf("hrtest: %d FAILED\n", fails); }
     return fails ? 1 : 0;
 }

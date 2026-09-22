@@ -94,6 +94,35 @@ void sched_arm_slice_timer(void) {
     hrtimer_start(t, ktime_get_ns() + sched_slice_remaining_ns(&c->rq));
 }
 
+// A thread was just queued on THIS CPU. If the CPU is running something
+// else, that task's slice timer may be up to a whole slice -- or, alone
+// on the queue, SCHED_HOUSEKEEPING_NS -- away, and nothing else would
+// look at the queue before it. So:
+//   - fire the slice timer now: its sched_tick is EEVDF's wakeup-
+//     preemption check (a more urgent arrival preempts once the anti-
+//     thrash floor has passed), and it re-arms for the real remaining
+//     slice now that the task has company;
+//   - poke one idle CPU, which steals the thread if it is still waiting.
+// An idle CPU needs neither: its idle loop schedules on the way out of
+// the interrupt or syscall that did the waking.
+//
+// The slice timer is left alone when the caller holds a lock that ranks
+// at or above the hrtimer base; the arrival then waits for the slice
+// end, as it always did.
+void sched_wakeup_check(void) {
+    struct cpu *c = this_cpu();
+    if (!c->current || c->current == c->idle) { return; }
+    if (lock_rank_ok(LOCK_RANK_TIMEOUT)) {
+        struct hrtimer *t = &sched_timer[c - &cpus[0]];
+        if (!t->fn) { hrtimer_init(t, sched_timer_fn); }
+        hrtimer_start(t, ktime_get_ns());
+    }
+    int online = smp_online_count(), me = (int)(c - &cpus[0]);
+    for (int i = 0; i < online; i++) {
+        if (i != me && cpus[i].current == cpus[i].idle) { smp_send_reschedule(i); break; }
+    }
+}
+
 // ---- scheduler ABI (SCH-1 Task 5) ----------------------------------
 
 void sched_apply_attr(struct thread *t, int nice, int policy, uint64_t slice_ns) {
@@ -165,6 +194,7 @@ void enqueue_ready(struct thread *t) {
     rq_clock_update(rq);
     fair_enqueue(rq, t);
     spin_unlock_irqrestore(&rq->lock, f);
+    sched_wakeup_check();
 }
 
 // Retained for API compatibility; schedule() calls fair_pick directly.
