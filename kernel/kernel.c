@@ -172,6 +172,8 @@ void kmain(void *multiboot_info) {
 
     timer_init();
     hrtimer_selftest();   // opens interrupts only while it waits
+    wheel_init();         // before anything arms a timer_list (TCP, ARP)
+    wheel_selftest();
     // AFTER timer_init: the RTC anchor is stored as "epoch at tick
     // zero", so it needs a tick counter that already means something.
     tty_init();
@@ -382,10 +384,8 @@ void kmain(void *multiboot_info) {
     // AFTER process_init: it starts a kernel thread. The queue would
     // simply fill and drop without one, which is why the driver may be
     // brought up first.
-    wheel_init();          // before anything arms a timer_list (TCP, ARP)
-    wheel_selftest();
+    wheel_start_ktimerd();
     netrx_start();
-    tcp_timer_start();
     dhcp_start(net_device());
 
     // BEFORE the spawns, and before any kernel thread exists.

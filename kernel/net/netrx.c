@@ -109,20 +109,13 @@ static void netrx_thread(void) {
                 // so a frame posted in between cannot wake an empty
                 // queue. It returns with the lock held again.
                 //
-                // D2: while an ARP request is outstanding, sleep on a
-                // TIMEOUT instead. A retry that only fires when a frame
-                // happens to arrive is not a retry -- and the frame it
-                // is waiting for is the one that is not coming. The
-                // timeout is armed only while something is pending, so
-                // an idle machine still sleeps until the next frame.
-                if (arp_pending()) {
-                    waitq_sleep_timeout(&rx_wait, &rx_lock, ktime_after_ticks(1));
-                } else {
-                    waitq_sleep(&rx_wait, &rx_lock);
-                }
+                // ARP retries no longer need this thread awake: they
+                // are a timer on the wheel (arp.c's arp_timer), so an
+                // idle machine sleeps here until the next frame even
+                // while a resolution is outstanding.
+                waitq_sleep(&rx_wait, &rx_lock);
             }
             spin_unlock_irqrestore(&rx_lock, f);
-            arp_tick();
             continue;
         }
 

@@ -29,7 +29,8 @@ int  del_timer(struct timer_list *t);       // 1 if it was pending
 // del_timer, then wait out a callback already running. Never call it
 // on a timer from that timer's own callback.
 int  del_timer_sync(struct timer_list *t);
-void wheel_init(void);                      // before the first mod_timer; spawns ktimerd
+void wheel_init(void);                      // before the first mod_timer (right after timer_init)
+void wheel_start_ktimerd(void);             // once threads can be created
 void wheel_selftest(void);                  // synchronous, simulated clock: "[wheel] selftest passed"
 void wheel_selftest_start(void);            // thread, real ktimerd: "[wheel] ktimerd selftest passed"
 #endif

@@ -189,7 +189,11 @@ void tcp_input(struct netdev *dev, const struct ipv4_header *ip,
                const uint8_t *seg, uint32_t len);
 // The timer thread's body, one pass over every active TCB.
 void tcp_timer_tick(void);
-void tcp_timer_start(void);
+// Schedules the next deadline pass on the timer wheel; ticks from now.
+uint64_t tcp_deadline_in(uint64_t ticks);
+void     tcp_timer_kick(void);
+// tcp_timer_tick passes run so far (the "no every-tick polling" check).
+uint64_t tcp_timer_pass_count(void);
 
 // Allocation and lifetime. Both halves of TCP use these; nothing else
 // should.

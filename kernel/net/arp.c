@@ -1,3 +1,5 @@
+#include "time/wheel.h"
+#include "time/ktime.h"
 #include "net/arp.h"
 #include "net/net.h"
 #include "net/eth.h"
@@ -36,6 +38,18 @@ static struct spinlock  arp_lock;
 static uint64_t stat_requests_tx, stat_replies_tx, stat_learned, stat_dropped;
 
 static const uint8_t bcast[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+
+// ONE wheel timer for all pending resolutions: arp_tick() is its
+// callback, and arp_tick() re-arms it for the earliest retry left.
+// Statically set up, so a resolution started before arp_init (or
+// before ktimerd exists) still has a callback to run.
+static void arp_timer_fn(struct timer_list *t) { (void)t; arp_tick(); }
+static struct timer_list arp_timer = { .fn = arp_timer_fn };
+
+// Retry deadlines are timer_ticks() (100 Hz); the wheel counts jiffies.
+static void arp_timer_arm(uint64_t deadline_ticks) {
+    timer_reduce(&arp_timer, deadline_ticks * (TICK_NS / JIFFY_NS));
+}
 
 void arp_init(void) {
     spin_init(&arp_lock, LOCK_RANK_ARP, "arp");
@@ -189,6 +203,7 @@ int arp_resolve(struct netdev *dev, uint32_t ip_n, uint8_t mac[6],
     e->state       = ARP_PENDING;
     e->requests    = 1;
     e->deadline    = timer_ticks() + ARP_RETRY_TICKS;
+    arp_timer_arm(e->deadline);
     e->dev         = dev;
     e->pending_len = 0;
     if (len <= ETH_MTU) {
@@ -281,6 +296,7 @@ void arp_tick(void) {
     // the lock dropped, so the first pass decides and the second acts.
     struct { struct netdev *dev; uint32_t ip_n; } retry[ARP_CACHE_MAX];
     int n = 0;
+    uint64_t next = UINT64_MAX;   // earliest retry still pending
 
     uint64_t f = spin_lock_irqsave(&arp_lock);
     for (int i = 0; i < ARP_CACHE_MAX; i++) {
@@ -302,8 +318,10 @@ void arp_tick(void) {
                 n++;
             }
         }
+        if (e->state == ARP_PENDING && e->deadline < next) { next = e->deadline; }
     }
     spin_unlock_irqrestore(&arp_lock, f);
+    if (next != UINT64_MAX) { arp_timer_arm(next); }
 
     for (int i = 0; i < n; i++) { send_request(retry[i].dev, retry[i].ip_n); }
 }

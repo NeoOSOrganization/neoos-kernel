@@ -1,3 +1,4 @@
+#include "time/wheel.h"
 #include "time/ktime.h"
 #include "net/tcp.h"
 #include "net/net.h"
@@ -82,10 +83,15 @@ static const char *state_name(enum tcp_state s) {
 }
 
 // Caller holds t->lock.
+void tcp_timer_kick(void);
+
 static void set_state(struct tcb *t, enum tcp_state s) {
     if (t->state == s) { return; }
     t->state = s;
     if (t->trace_n < 16) { t->trace[t->trace_n++] = (uint8_t)s; }
+    // Every way into CLOSED, so the reclaim rule (tcp_timer_tick) runs
+    // promptly once the socket is gone too -- there is no periodic poll.
+    if (s == TCP_CLOSED) { tcp_timer_kick(); }
 }
 
 void tcp_dump(struct tcb *t, const char *why) {
@@ -482,7 +488,7 @@ void tcp_output(struct tcb *t) {
             t->rtt_at  = timer_ticks();
         }
         t->snd_nxt += n;
-        if (!t->rto_deadline) { t->rto_deadline = timer_ticks() + t->rto_ticks; }
+        if (!t->rto_deadline) { t->rto_deadline = tcp_deadline_in(t->rto_ticks); }
         t->delack_deadline = 0;    // the data carried the ACK
     }
 
@@ -491,7 +497,7 @@ void tcp_output(struct tcb *t) {
         send_flags(t, TCP_FIN | TCP_ACK, t->snd_nxt);
         t->snd_nxt++;
         t->fin_sent = 2;
-        if (!t->rto_deadline) { t->rto_deadline = timer_ticks() + t->rto_ticks; }
+        if (!t->rto_deadline) { t->rto_deadline = tcp_deadline_in(t->rto_ticks); }
     }
 }
 
@@ -837,7 +843,7 @@ static void tcp_segment(struct tcb *t, const struct ipv4_header *ip,
         }
         cc_on_ack(t, acked);
         t->rto_deadline = (t->snd_una != t->snd_nxt)
-                        ? timer_ticks() + t->rto_ticks : 0;
+                        ? tcp_deadline_in(t->rto_ticks) : 0;
         wake(t);
     } else if (ack == t->snd_una && data_len == 0 && t->snd_una != t->snd_nxt) {
         if (cc_on_dupack(t)) { retransmit(t); }
@@ -851,7 +857,7 @@ static void tcp_segment(struct tcb *t, const struct ipv4_header *ip,
         t->snd_wl1 = seq;
         t->snd_wl2 = ack;
         if (!t->snd_wnd && was) {
-            t->persist_deadline = timer_ticks() + t->rto_ticks;
+            t->persist_deadline = tcp_deadline_in(t->rto_ticks);
         } else if (t->snd_wnd) {
             t->persist_deadline = 0;
         }
@@ -867,7 +873,7 @@ static void tcp_segment(struct tcb *t, const struct ipv4_header *ip,
             // transfer cost one ACK per two segments instead of one per
             // segment.
             if (!t->delack_deadline) {
-                t->delack_deadline = timer_ticks() + TCP_DELACK_TICKS;
+                t->delack_deadline = tcp_deadline_in(TCP_DELACK_TICKS);
             } else {
                 t->delack_deadline = 0;
                 send_flags(t, TCP_ACK, t->snd_nxt);
@@ -898,7 +904,7 @@ static void tcp_segment(struct tcb *t, const struct ipv4_header *ip,
             break;
         case TCP_FIN_WAIT_2:
             set_state(t, TCP_TIME_WAIT);
-            t->timewait_deadline = timer_ticks() + TCP_TIMEWAIT_TICKS;
+            t->timewait_deadline = tcp_deadline_in(TCP_TIMEWAIT_TICKS);
             break;
         default: break;
         }
@@ -910,11 +916,11 @@ static void tcp_segment(struct tcb *t, const struct ipv4_header *ip,
         seq_ge(t->snd_una, t->snd_nxt)) {
         set_state(t, t->fin_rcvd ? TCP_TIME_WAIT : TCP_FIN_WAIT_2);
         if (t->state == TCP_TIME_WAIT) {
-            t->timewait_deadline = timer_ticks() + TCP_TIMEWAIT_TICKS;
+            t->timewait_deadline = tcp_deadline_in(TCP_TIMEWAIT_TICKS);
         }
     } else if (t->state == TCP_CLOSING && seq_ge(t->snd_una, t->snd_nxt)) {
         set_state(t, TCP_TIME_WAIT);
-        t->timewait_deadline = timer_ticks() + TCP_TIMEWAIT_TICKS;
+        t->timewait_deadline = tcp_deadline_in(TCP_TIMEWAIT_TICKS);
     } else if (t->state == TCP_LAST_ACK && seq_ge(t->snd_una, t->snd_nxt)) {
         enter_closed(t, 0);
         return;
@@ -976,10 +982,10 @@ void tcp_input(struct netdev *dev, const struct ipv4_header *ip,
             uint32_t m = parse_mss(seg, hdr_len);
             if (m) { c->mss = m > TCP_MAX_MSS ? TCP_MAX_MSS : m; }
             set_state(c, TCP_SYN_RECEIVED);
-            c->establish_deadline = timer_ticks() + TCP_ESTABLISH_TICKS;
+            c->establish_deadline = tcp_deadline_in(TCP_ESTABLISH_TICKS);
             send_flags(c, TCP_SYN | TCP_ACK, c->iss);
             c->snd_nxt++;
-            c->rto_deadline = timer_ticks() + c->rto_ticks;
+            c->rto_deadline = tcp_deadline_in(c->rto_ticks);
             spin_unlock_irqrestore(&c->lock, f);
             tcp_tx_flush(c);
             return;
@@ -1093,34 +1099,57 @@ void tcp_timer_tick(void) {
     }
 }
 
-static struct waitq timer_wait;
+// ONE wheel timer for the whole table (spec: kernel/time/wheel.c). Its
+// callback is tcp_timer_tick() -- the per-connection logic is unchanged
+// -- and it re-arms itself for the earliest deadline left anywhere, so
+// an idle stack is never woken at all. Firing still happens in a THREAD
+// (ktimerd), because firing a timer TRANSMITS: that takes the ARP lock
+// and may spin on the device, neither of which belongs in an interrupt.
+static void tcp_timer_fn(struct timer_list *tl);
+// Statically set up: loopback selftests arm deadlines before kmain
+// reaches anything like an init call, and before ktimerd exists.
+static struct timer_list tcp_timer = { .fn = tcp_timer_fn };
+static volatile uint64_t tcp_timer_passes;
 
-static void tcp_timer_thread(void) {
-    for (;;) {
-        tcp_timer_tick();
-        // A THREAD rather than a tick callback because firing a timer
-        // TRANSMITS: transmitting takes the ARP lock and may spin on the
-        // device, and neither belongs in a timer interrupt. Nothing ever
-        // wakes this queue; the timeout is the whole mechanism.
-        //
-        // One pass per tick WHILE THERE ARE CONNECTIONS, and one every
-        // 200ms when there are none. The first version woke at 100 Hz
-        // forever, which on a machine that spends most of its life with
-        // no TCP at all is a hundred pointless wakeups a second --
-        // scheduler churn charged to every other test in the suite, for
-        // a table that is empty.
-        int active = 0;
-        for (int i = 0; i < TCP_MAX_CONNS; i++) {
-            if (conns[i].in_use) { active = 1; break; }
-        }
-        waitq_sleep_timeout(&timer_wait, 0, ktime_after_ticks(active ? 1 : 20));
+// Deadlines are in timer_ticks() (100 Hz); the wheel counts jiffies.
+#define TCP_TICK_JIFFIES (TICK_NS / JIFFY_NS)
+
+static void tcp_timer_fn(struct timer_list *tl) {
+    (void)tl;
+    tcp_timer_passes++;
+    tcp_timer_tick();
+    uint64_t next = UINT64_MAX;
+    for (int i = 0; i < TCP_MAX_CONNS; i++) {
+        struct tcb *c = &conns[i];
+        if (!c->in_use) { continue; }
+        uint64_t d[5] = { c->rto_deadline, c->delack_deadline, c->persist_deadline,
+                          c->timewait_deadline, c->establish_deadline };
+        for (int k = 0; k < 5; k++) { if (d[k] && d[k] < next) { next = d[k]; } }
+        // A finished connection whose socket is gone is reclaimed by the
+        // tick; do that on the next jiffy.
+        if (c->sock_gone && c->state == TCP_CLOSED &&
+            !__atomic_load_n(&c->reclaimed, __ATOMIC_ACQUIRE)) { next = 0; }
     }
+    if (next == UINT64_MAX) { return; }
+    // timer_reduce, not mod_timer: a deadline another CPU set while this
+    // scan ran has already armed the (then idle) timer, possibly EARLIER
+    // than anything seen here -- and must not be pushed later.
+    timer_reduce(&tcp_timer, next == 0 ? jiffies() + 1 : next * TCP_TICK_JIFFIES);
 }
 
-void tcp_timer_start(void) {
-    waitq_init(&timer_wait);
-    thread_alloc_kernel(tcp_timer_thread);
+// Every deadline goes through here, so the wheel timer is never later
+// than the earliest deadline. Returns the deadline, in ticks.
+uint64_t tcp_deadline_in(uint64_t ticks) {
+    uint64_t d = timer_ticks() + ticks;
+    timer_reduce(&tcp_timer, d * TCP_TICK_JIFFIES);
+    return d;
 }
+
+// Something became reclaimable (socket gone, state CLOSED): run the
+// tick on the next jiffy rather than whenever a deadline next falls.
+void tcp_timer_kick(void) { timer_reduce(&tcp_timer, jiffies() + 1); }
+
+uint64_t tcp_timer_pass_count(void) { return tcp_timer_passes; }
 
 // ------------------------------------------------- the socket-facing ops
 //
@@ -1149,11 +1178,11 @@ int tcp_connect(struct tcb *t, uint32_t dst_n, uint16_t dport_n) {
     t->snd_wnd = TCP_SNDBUF;
     cc_init(t);
     set_state(t, TCP_SYN_SENT);
-    t->establish_deadline = timer_ticks() + TCP_ESTABLISH_TICKS;
+    t->establish_deadline = tcp_deadline_in(TCP_ESTABLISH_TICKS);
     t->rtt_pending = 1; t->rtt_seq = t->iss; t->rtt_at = timer_ticks();
     send_flags(t, TCP_SYN, t->iss);
     t->snd_nxt++;
-    t->rto_deadline = timer_ticks() + t->rto_ticks;
+    t->rto_deadline = tcp_deadline_in(t->rto_ticks);
     spin_unlock_irqrestore(&t->lock, f);
     tcp_tx_flush(t);
     return 0;
@@ -1254,6 +1283,7 @@ void tcp_close(struct tcb *t) {
     uint64_t f = spin_lock_irqsave(&t->lock);
     enum tcp_state st = t->state;
     t->sock_gone = 1;
+    tcp_timer_kick();
     if (st == TCP_LISTEN) {
         for (int i = 0; i < t->accept_n; i++) { orphans[n_orphans++] = t->accept_q[i]; }
         t->accept_n = 0;
@@ -1495,5 +1525,11 @@ void tcp_selftest(void) {
     }
     for (int i = 0; i < n; i++) { held[i]->state = TCP_CLOSED; tcp_release(held[i]); }
 
+    // Deadline-driven, not polled: a boot's worth of TCP selftests
+    // should cost tens of timer passes, where the old 100 Hz thread ran
+    // hundreds.
+    serial_write_string("[tcp] timer passes=");
+    serial_write_hex64(tcp_timer_pass_count());
+    serial_write_string("\n");
     serial_write_string(failed ? "[tcp] FAILED\n" : "[tcp] ALL PASSED\n");
 }

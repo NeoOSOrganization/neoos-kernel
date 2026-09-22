@@ -217,13 +217,17 @@ static void ktimerd(void) {
     }
 }
 
+// Early: timers may be armed from here on (the boot's network
+// selftests arm TCP and ARP timers long before threads exist). They
+// simply wait until ktimerd starts and takes its first pass.
 void wheel_init(void) {
     spin_init(&wheel_lock, LOCK_RANK_TIMEOUT, "wheel");
     waitq_init(&ktimerd_wait);
     hrtimer_init(&wheel_hrt, wheel_hrt_fn);
     wb.clk = jiffies();
-    thread_alloc_kernel(ktimerd);
 }
+
+void wheel_start_ktimerd(void) { thread_alloc_kernel(ktimerd); }
 
 // ---- selftest ---------------------------------------------------------
 //
