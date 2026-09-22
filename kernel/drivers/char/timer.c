@@ -5,7 +5,6 @@
 #include "sync/waitq.h"
 #include "arch/cpu_local.h"
 #include "sched/proc.h"
-#include "sched/rq.h"
 #include "time/ktime.h"
 #include "time/clockevent.h"
 #include "time/hrtimer.h"
@@ -38,7 +37,8 @@ void cpu_usage_ticks(uint64_t *busy, uint64_t *idle) {
 
 // The legacy 10 ms housekeeping tick, now just a periodic hrtimer per
 // CPU. Its body is the old timer_handler minus the clock bookkeeping
-// ktime made unnecessary.
+// ktime made unnecessary and the preemption the slice hrtimer
+// (sched_arm_slice_timer) now owns.
 static struct hrtimer tick_timer[MAX_CPUS];
 
 static enum hrtimer_restart tick_fn(struct hrtimer *t) {
@@ -72,13 +72,6 @@ static enum hrtimer_restart tick_fn(struct hrtimer *t) {
             waitq_timeout_tick();
         }
     }
-
-    // Never preempt a CPU that has not yet entered the scheduler: before
-    // its first schedule() it is still on a BOOTSTRAP stack (kmain on
-    // the BSP, ap_main on an AP) with no thread to save that context
-    // into. tlb_shootdown enables interrupts while waiting for acks, and
-    // a tick landing in that window would strand the BSP mid-kmain.
-    if (c->current && sched_tick(&c->rq)) { hrtimer_request_resched(); }
 
     hrtimer_forward_now(t, HOUSE_NS);
     return HRTIMER_RESTART;

@@ -68,7 +68,7 @@ void           fair_accept_stolen(struct rq *rq, struct thread *t); // migrated-
 // Set rq->clock / rq->clock_task from the monotonic ns source.
 void rq_clock_update(struct rq *rq);
 
-// Called from timer_handler on every tick. Takes rq->lock, charges the
+// Called from THIS CPU's slice hrtimer (sched_arm_slice_timer). Takes rq->lock, charges the
 // running task, and returns 1 if it should be preempted now (slice
 // spent, or a more-eligible task is waiting past the anti-thrash
 // floor). The caller then invokes schedule().
@@ -79,6 +79,9 @@ int sched_tick(struct rq *rq);                // sched.c, takes rq->lock
 // preempted, for arming the one-shot timer. HOUSEKEEPING_NS if idle.
 uint64_t fair_slice_remaining_ns(struct rq *rq);   // fair.c, rq->lock held
 uint64_t sched_slice_remaining_ns(struct rq *rq);  // sched.c, takes rq->lock
+// Arms THIS CPU's slice hrtimer for the running task's remaining slice,
+// or cancels it on idle. Called on every arrival on a CPU.
+void sched_arm_slice_timer(void);                  // sched.c
 
 // Scheduler ABI helpers (SCH-1 Task 5). fair_* need rq->lock held.
 void fair_reweight_current(struct rq *rq, int nice, int policy, uint64_t slice_ns);

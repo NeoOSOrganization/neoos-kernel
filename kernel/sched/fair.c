@@ -445,16 +445,17 @@ void fair_accept_stolen(struct rq *rq, struct thread *t) {
 // ---- tick / preemption (SCH-1 Task 4) -------------------------------
 //
 // EEVDF preemption is event-driven: fair_pick tells the timer code how
-// long the picked task may run (fair_slice_remaining_ns), which arms a
-// one-shot LAPIC timer. When it fires, timer_handler calls sched_tick
-// -> fair_entity_tick, which decides whether to actually switch.
+// long the picked task may run (fair_slice_remaining_ns), which arms
+// this CPU's slice hrtimer (sched_arm_slice_timer). When it fires, its
+// callback calls sched_tick -> fair_entity_tick, which decides whether
+// to actually switch.
 
 // A task that just got the CPU is not preempted for a marginally
 // earlier-deadline waiter until it has run this long -- stops two
 // near-equal tasks from trading the CPU every interrupt.
 #define SCHED_MIN_PREEMPT_NS 100000ULL   // 0.1 ms
 
-#define SCHED_HOUSEKEEPING_NS 10000000ULL  // 10 ms fallback tick
+#define SCHED_HOUSEKEEPING_NS 10000000ULL  // 10 ms re-check when nothing competes
 
 int fair_entity_tick(struct rq *rq) {
     struct cfs_rq *cfs = &rq->cfs;

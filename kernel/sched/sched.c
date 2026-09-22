@@ -19,6 +19,8 @@
 #include "smp/smp.h"
 #include "drivers/char/timer.h"
 #include "sched/rq.h"
+#include "time/hrtimer.h"
+#include "time/ktime.h"
 
 extern void context_switch(uint64_t *old_rsp, uint64_t *new_rsp);
 extern void kernel_thread_entry_trampoline(void);
@@ -43,8 +45,8 @@ void rq_clock_update(struct rq *rq) {
     rq->clock_task = now;
 }
 
-// Timer-tick entry points. timer_handler holds no rq lock; these take
-// it, so fair.c stays "lock already held" throughout.
+// Slice-timer entry points. The hrtimer callback holds no rq lock;
+// these take it, so fair.c stays "lock already held" throughout.
 int sched_tick(struct rq *rq) {
     uint64_t f = spin_lock_irqsave(&rq->lock);
     rq_clock_update(rq);
@@ -59,6 +61,37 @@ uint64_t sched_slice_remaining_ns(struct rq *rq) {
     uint64_t ns = fair_slice_remaining_ns(rq);
     spin_unlock_irqrestore(&rq->lock, f);
     return ns;
+}
+
+// ---- the slice timer ----------------------------------------------
+//
+// Each CPU's preemption point is an hrtimer armed for exactly the
+// running task's remaining slice -- bounded below only by the
+// clock-event minimum, not the old 500 us arming floor. See the hrtimer
+// spec, section 3.
+static struct hrtimer sched_timer[MAX_CPUS];
+
+static enum hrtimer_restart sched_timer_fn(struct hrtimer *t) {
+    struct cpu *c = this_cpu();
+    // Never preempt a CPU that has not yet entered the scheduler: before
+    // its first schedule() it is still on a BOOTSTRAP stack (kmain on
+    // the BSP, ap_main on an AP) with no thread to save that context
+    // into. The idle task arms no slice timer.
+    if (!(c->current && c->current != c->idle)) { return HRTIMER_NORESTART; }
+    if (sched_tick(&c->rq)) { hrtimer_request_resched(); }
+    // Slice not spent (someone woke, or a partial tick): run to the
+    // new end. On a resched, schedule()'s sched_post_switch re-keys it
+    // for whatever runs next.
+    t->expires_ns = ktime_get_ns() + sched_slice_remaining_ns(&c->rq);
+    return HRTIMER_RESTART;
+}
+
+void sched_arm_slice_timer(void) {
+    struct cpu *c = this_cpu();
+    struct hrtimer *t = &sched_timer[c - &cpus[0]];
+    if (!t->fn) { hrtimer_init(t, sched_timer_fn); }
+    if (!c->current || c->current == c->idle) { hrtimer_try_cancel(t); return; }
+    hrtimer_start(t, ktime_get_ns() + sched_slice_remaining_ns(&c->rq));
 }
 
 // ---- scheduler ABI (SCH-1 Task 5) ----------------------------------
@@ -82,6 +115,9 @@ void sched_apply_attr(struct thread *t, int nice, int policy, uint64_t slice_ns)
     }
     t->se.batch_hint = (policy == SCHED_BATCH) ? 1 : 0;
     spin_unlock_irqrestore(&rq->lock, f);
+    // A new slice for the running task takes effect now, not at the
+    // end of the one it was armed for.
+    if (t == this_cpu()->current) { sched_arm_slice_timer(); }
 }
 
 void sched_do_yield(void) {
@@ -344,6 +380,10 @@ void idle_init(void) { idle_init_for(0); }
 // CPU is running the thread. Reading `s` before the clear is safe
 // because nothing else may touch a thread's state while on_cpu is set.
 void sched_post_switch(void) {
+    // Every arrival on a CPU -- resumed, switched to, brand-new -- comes
+    // through here, so this is where the slice timer follows the task.
+    sched_arm_slice_timer();
+
     struct cpu *c = this_cpu();
     struct thread *p = c->rq.prev_pending;
     if (!p) { return; }
@@ -512,6 +552,7 @@ void schedule(void) {
     __asm__ volatile ("mov %0, %%cr3" :: "r"(next_cr3) : "memory");
 
     if (prev == next) {
+        sched_arm_slice_timer();   // it may have been picked afresh: new slice
         schedule_restore_if(flags);
         return;
     }
