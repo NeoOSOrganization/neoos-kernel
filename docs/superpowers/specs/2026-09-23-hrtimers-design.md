@@ -124,21 +124,25 @@ void hrtimer_forward(struct hrtimer *t, uint64_t interval_ns); // for RESTART
 ## 3. What moves onto hrtimers
 
 **Timed sleeps.** `struct thread` embeds one `struct hrtimer
-sleep_timer`. The waitq API gains nanosecond deadlines:
+sleep_timer`. The existing waitq timeout functions keep their names and
+signatures, but their `deadline` argument changes unit: it is now an
+ABSOLUTE `ktime_get_ns()` value (`0` still means "none" where it did,
+`UINT64_MAX` still means "forever" in `poll_core`):
 
 ```c
-int waitq_sleep_timeout_ns(struct waitq *q, struct spinlock *release,
-                           uint64_t deadline_ns);        // + _unless variant
-int waitq_poll_wait_ns(uint64_t deadline_ns, volatile int *abort);
+int waitq_sleep_timeout(struct waitq *q, struct spinlock *release,
+                        uint64_t deadline_ns);
+int waitq_sleep_timeout_unless(..., uint64_t deadline_ns, volatile int *abort);
+int waitq_poll_wait(uint64_t deadline_ns, volatile int *abort);
+uint64_t ktime_after_ns(uint64_t ns);   // now + ns, saturating
+uint64_t ktime_after_ticks(uint64_t t); // now + t × 10 ms, for coarse callers
 ```
 
-The sleeper starts its own `sleep_timer` on its CPU; the callback marks
-it timed-out and wakes it. After waking it `hrtimer_cancel`s. The
-global `timeout_list`, `timeout_lock` and `waitq_timeout_tick()` are
-deleted. The tick-deadline functions remain as thin wrappers (ticks →
-ns) for the kernel-internal sleepers that only want coarse sleeps
-(`netrx`, `socket.c`'s stream polling, `dhcp`), so nothing is left on
-a second mechanism.
+Every one of the 14 callers is converted in the same change (a single
+mechanism, no tick-deadline wrappers left behind to be misused). The
+sleeper starts its own `sleep_timer` on its CPU; the callback marks it
+timed-out and wakes it; after waking it `hrtimer_cancel`s. The global
+`timeout_list`, `timeout_lock` and `waitq_timeout_tick()` are deleted.
 
 **Syscalls converted to exact nanosecond deadlines** (no tick
 rounding; relative timeouts become `now + ns`, absolute ones are used
@@ -150,7 +154,8 @@ as-is):
 - `poll`, `ppoll`, `select`, `pselect6`, `epoll_wait`/`epoll_pwait`
   (`poll_core`'s deadline becomes ns; epoll's periodic re-evaluation
   cap stays, expressed in ns).
-- `futex(FUTEX_WAIT)` (relative) and `FUTEX_WAIT_BITSET` (absolute).
+- `futex(FUTEX_WAIT)` (relative; `FUTEX_WAIT_BITSET` is not
+  implemented today and stays out of scope).
 - `rt_sigtimedwait`.
 
 **The scheduler.** Each CPU has a `sched_timer` hrtimer. It is (re)armed
@@ -203,12 +208,23 @@ int  del_timer_sync(struct timer_list *t);   // also waits out a running fn
   timer transmits, which takes the ARP lock and may spin on the device
   (exactly why `tcp_timer_thread` is a thread today).
 
-**Migrated onto the wheel:**
-- TCP: each connection gets `rto_timer`, `delack_timer` and
-  `timewait_timer`. `tcp_timer_thread`'s scan-every-tick loop is
-  deleted; `rto_deadline` etc. become `mod_timer` calls and the
-  callbacks run the existing per-connection timeout handlers.
-- ARP: the retry/expiry deadline per entry becomes a `timer_list`.
+Plus `timer_reduce(t, expires)`: arm if idle, otherwise only ever move
+the expiry EARLIER (Linux's `timer_reduce`).
+
+**Migrated onto the wheel** — contained, without rewriting the TCP
+state machine:
+- TCP: ONE `tcp_timer` `timer_list`. `tcp_timer_tick()`'s per-
+  connection logic (deadlines + the reclaim rule) is kept as is and
+  becomes the callback, which re-arms for the earliest remaining
+  deadline across all connections (not armed at all when none).
+  Every `x_deadline = timer_ticks() + N` assignment goes through
+  `tcp_deadline_in(N)`, which `timer_reduce`s the timer to that
+  deadline; the reclaim transitions (`sock_gone` set, entry to CLOSED)
+  kick it to the next jiffy. `tcp_timer_thread` and its every-tick
+  poll are deleted.
+- ARP: ONE `arp_timer`, `timer_reduce`d to each retry deadline, whose
+  callback runs `arp_tick()`. netrx stops sleeping one tick at a time
+  while a request is pending.
 
 ## 5. Tickless idle and housekeeping
 
