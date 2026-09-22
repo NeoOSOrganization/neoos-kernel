@@ -265,7 +265,7 @@ $(DISK_IMG): $(BUILD_DIR)/embedfs_table.c $(USERLAND_BUILD)/TERM.ELF $(USERLAND_
 	head -c 8192 /dev/zero | tr '\0' 'N' > $(DISK_SRC)/bigfile.txt
 	printf 'nested file contents\n' > $(DISK_SRC)/dir/nested.txt
 	printf 'a long name survived the round trip\n' > "$(DISK_SRC)/A Long File Name.txt"
-	dd if=/dev/zero of=$(DISK_IMG) bs=1M count=32 status=none
+	dd if=/dev/zero of=$(DISK_IMG) bs=1M count=64 status=none
 	mkfs.fat -F 16 $(DISK_IMG)
 	@# A clean root: directories only, no loose files. Everything below
 	@# has a place -- programs in bin/sbin, the test suite in usr/tests,
@@ -323,6 +323,25 @@ $(DISK_IMG): $(BUILD_DIR)/embedfs_table.c $(USERLAND_BUILD)/TERM.ELF $(USERLAND_
 		echo "disk: neoos-wm found at $(WM_DIR) -- wm.nex and gm_cursors installed"; \
 	else \
 		echo "disk: no neoos-wm build at $(WM_DIR)/build/WM.ELF -- headless image, no compositor"; \
+	fi
+	@# wm.nex now links real Mesa (OSMesa) instead of neoos-tinygl --
+	@# see docs/superpowers/specs/2026-09-22-wm-mesa-everywhere-design.md.
+	@# These runtime .so's are staged unconditionally whenever a stripped
+	@# set exists at MESA_DIR, the same "you get what you built" signal
+	@# WM_DIR/PORT_DIRS use above -- wm is not opt-in the way a port is,
+	@# so this is not gated on PORT_DIRS.
+	@if [ -d "$(MESA_DIR)/build-output-runtime-libs" ]; then \
+		mmd -i $(DISK_IMG) ::lib 2>/dev/null || true; \
+		for f in libOSMesa.so.8 libglapi.so.0 libstdc++.so.6 libgcc_s.so.1 libc.so ld-musl-x86_64.so.1; do \
+			if [ -f "$(MESA_DIR)/build-output-runtime-libs/$$f" ]; then \
+				mcopy -o -i $(DISK_IMG) "$(MESA_DIR)/build-output-runtime-libs/$$f" "::lib/$$f"; \
+			else \
+				echo "disk: WARNING -- $(MESA_DIR)/build-output-runtime-libs/$$f missing, wm.nex will fail to start if it needs it"; \
+			fi; \
+		done; \
+		echo "disk: Mesa runtime libraries staged from $(MESA_DIR)/build-output-runtime-libs"; \
+	else \
+		echo "disk: no $(MESA_DIR)/build-output-runtime-libs -- if wm.nex is Mesa-linked, it will fail to start"; \
 	fi
 	@if [ -f "$(WM_DIR)/build/TASKBAR.ELF" ]; then \
 		mmd -i $(DISK_IMG) ::usr/local 2>/dev/null || true; \
@@ -936,6 +955,7 @@ spvtest: iso disk-image
 # serial log. The bound is what keeps a headless run from hanging the
 # build.
 WM_DIR ?= ../neoos-wm
+MESA_DIR ?= ../neoos-mesa
 WM_ELF     := $(WM_DIR)/build/WM.ELF
 WMDEMO_ELF := $(WM_DIR)/build/WMDEMO.ELF
 
