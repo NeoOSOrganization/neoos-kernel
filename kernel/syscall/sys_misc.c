@@ -21,6 +21,7 @@
 #include "ipc/pipe.h"
 #include "drivers/char/timer.h"
 #include "drivers/char/rtc.h"
+#include "time/ktime.h"
 #include "drivers/input/input.h"
 #include "mm/vma.h"
 #include "mm/paging.h"
@@ -54,52 +55,77 @@ int64_t sys_futex(struct syscall_args *a) {
 
 // ---- the clock -------------------------------------------------------
 //
-// NeoOS's only fine time source is the 100Hz tick counter the local
-// APIC timer advances, so the resolution is 10ms. CLOCK_REALTIME is
-// wall time, anchored to the CMOS RTC read once at boot (dev/rtc.c);
-// CLOCK_MONOTONIC and the CPU-time clocks count from boot.
+// Every clock reads ktime (kernel/time/ktime.c): nanoseconds since boot
+// from the calibrated TSC. CLOCK_REALTIME is wall time, anchored to the
+// CMOS RTC read once at boot (dev/rtc.c); CLOCK_MONOTONIC and friends
+// count from boot; the CPU-time clocks are the scheduler's nanosecond
+// runtime accounting.
 //
-// DIVERGENCE, recorded in docs/stdlib.md: 10ms resolution, no absolute
-// timeouts, and if the RTC could not be read at boot CLOCK_REALTIME
-// silently falls back to a boot epoch and formats as January 1970.
+// DIVERGENCE, recorded in docs/stdlib.md: if the RTC could not be read
+// at boot CLOCK_REALTIME silently falls back to a boot epoch and
+// formats as January 1970.
 
 #define CLOCK_REALTIME           0
 #define CLOCK_MONOTONIC          1
 #define CLOCK_PROCESS_CPUTIME_ID 2
 #define CLOCK_THREAD_CPUTIME_ID  3
 #define CLOCK_MONOTONIC_RAW      4
+#define CLOCK_BOOTTIME           7
 
 #define TICK_HZ     100
 #define NS_PER_TICK (1000000000ULL / TICK_HZ)
 
+static int clock_valid(int clk) {
+    return clk == CLOCK_REALTIME || clk == CLOCK_MONOTONIC || clk == CLOCK_MONOTONIC_RAW ||
+           clk == CLOCK_BOOTTIME || clk == CLOCK_PROCESS_CPUTIME_ID || clk == CLOCK_THREAD_CPUTIME_ID;
+}
+
+// ns of CPU this thread has had, including the stretch it is running now.
+static uint64_t thread_cpu_ns(struct thread *t) {
+    uint64_t ns = t->se.sum_exec_runtime;
+    if (t == current_thread() && t->se.exec_start && ktime_get_ns() > t->se.exec_start) {
+        ns += ktime_get_ns() - t->se.exec_start;
+    }
+    return ns;
+}
+
+static uint64_t process_cpu_ns(struct process *p) {
+    uint64_t f = spin_lock_irqsave(&p->lock);
+    uint64_t ns = p->cpu_ns_exited;
+    for (struct thread *t = p->threads; t; t = t->proc_next) { ns += thread_cpu_ns(t); }
+    spin_unlock_irqrestore(&p->lock, f);
+    return ns;
+}
+
+static uint64_t clock_now_ns(int clk) {
+    switch (clk) {
+    case CLOCK_REALTIME:           return (uint64_t)rtc_boot_epoch() * NSEC_PER_SEC + ktime_get_ns();
+    case CLOCK_PROCESS_CPUTIME_ID: return process_cpu_ns(current_proc());
+    case CLOCK_THREAD_CPUTIME_ID:  return thread_cpu_ns(current_thread());
+    default:                       return ktime_get_ns();
+    }
+}
+
 int64_t sys_clock_gettime(struct syscall_args *a) {
     int clk = (int)a->a1;
     uint64_t out = (uint64_t)a->a2;
+    if (!clock_valid(clk)) { return -EINVAL; }
     if (!out) { return -EFAULT; }
+    uint64_t ns = clock_now_ns(clk);
+    struct k_timespec ts = { .tv_sec = (int64_t)(ns / NSEC_PER_SEC), .tv_nsec = (int64_t)(ns % NSEC_PER_SEC) };
+    if (copy_to_user((void *)(uintptr_t)out, &ts, sizeof ts) > 0) { return -EFAULT; }
+    return 0;
+}
 
-    switch (clk) {
-    case CLOCK_REALTIME:
-    case CLOCK_MONOTONIC:
-    case CLOCK_MONOTONIC_RAW:
-    case CLOCK_PROCESS_CPUTIME_ID:
-    case CLOCK_THREAD_CPUTIME_ID:
-        break;
-    default:
-        return -EINVAL;
-    }
-
-    uint64_t ticks = timer_ticks();
-    int64_t  sec   = (int64_t)(ticks / TICK_HZ);
-    int64_t  nsec  = (int64_t)((ticks % TICK_HZ) * NS_PER_TICK);
-
-    // CLOCK_REALTIME is wall time, anchored to the CMOS RTC read at
-    // boot; CLOCK_MONOTONIC counts from boot. They are different
-    // clocks now, which they were not when both were tick counters.
-    if (clk == CLOCK_REALTIME) { sec += rtc_boot_epoch(); }
-
-    struct k_timespec ts = { .tv_sec = sec, .tv_nsec = nsec };
-    uint64_t missed = copy_to_user((void *)(uintptr_t)out, &ts, sizeof ts);
-    if (missed > 0) { return -EFAULT; }
+// clock_getres(clockid, res) -- every clock is TSC-backed: 1 ns, as
+// Linux reports for hrtimer clocks. res may be NULL (Linux allows it).
+int64_t sys_clock_getres(struct syscall_args *a) {
+    int clk = (int)a->a1;
+    uint64_t out = (uint64_t)a->a2;
+    if (!clock_valid(clk)) { return -EINVAL; }
+    if (!out) { return 0; }
+    struct k_timespec ts = { .tv_sec = 0, .tv_nsec = 1 };
+    if (copy_to_user((void *)(uintptr_t)out, &ts, sizeof ts) > 0) { return -EFAULT; }
     return 0;
 }
 
@@ -288,11 +314,11 @@ int64_t sys_sysinfo(struct syscall_args *a) {
 
 // getrusage(who, usage) -- Linux's struct rusage shape exactly
 // (two timeval's -- user/system CPU time -- then fourteen longs).
-// Every field is zero: NeoOS has no per-process/thread CPU-time
-// accounting, no page-fault counters, no context-switch counters to
-// report honestly instead. `who` (RUSAGE_SELF/CHILDREN/THREAD) is
-// accepted and makes no difference, for the same reason. Zero reads
-// as "unknown", which is the truth, not a fabricated measurement.
+// ru_utime is the calling process's real CPU time (see below); every
+// other field is zero: NeoOS has no page-fault or context-switch
+// counters to report honestly instead. `who` (RUSAGE_SELF/CHILDREN/
+// THREAD) is accepted and makes no difference. Zero reads as
+// "unknown", which is the truth, not a fabricated measurement.
 // Found missing (fatal) getting a real ASP.NET Core app running --
 // the GC's own diagnostics call it during startup.
 struct neoos_rusage {
@@ -308,24 +334,9 @@ int64_t sys_getrusage(struct syscall_args *a) {
     struct neoos_rusage ru;
     for (unsigned i = 0; i < sizeof(ru); i++) { ((uint8_t *)&ru)[i] = 0; }
 
-    // ru_utime is NOT left at zero, and NOT just timer_ticks()-derived
-    // either: a caller measuring "did I get CPU time between these two
-    // getrusage calls" with calls close enough together to land in the
-    // SAME 10ms tick would see ZERO delta from a tick-quantized value,
-    // indistinguishable from "this thread never ran" -- a real bug
-    // report a merely-coarse approximation as "nothing ever happened".
-    // So this is force-monotonic at microsecond granularity: never
-    // less than the wall-clock-derived estimate, but never equal to or
-    // less than the PREVIOUS call's answer either, guaranteeing any
-    // caller diffing two readings -- however close together -- always
-    // sees forward progress, the property such a caller actually
-    // relies on. NeoOS has no real per-thread/process CPU-time
-    // accounting to report exactly instead. ru_stime stays zero: no
-    // separate kernel-vs-user split to approximate even this roughly.
-    static uint64_t last_us;
-    uint64_t us = timer_ticks() * 10000;
-    if (us <= last_us) { us = last_us + 1; }
-    last_us = us;
+    // ru_utime is the process's real CPU time (user + kernel: the
+    // scheduler does not split them). ru_stime stays zero.
+    uint64_t us = process_cpu_ns(current_proc()) / 1000;
     ru.ru_utime_sec  = (int64_t)(us / 1000000);
     ru.ru_utime_usec = (int64_t)(us % 1000000);
 

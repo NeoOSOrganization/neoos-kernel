@@ -282,6 +282,7 @@ void thread_exit_self(int code) {
         struct thread **pp = &p->threads;
         while (*pp && *pp != t) { pp = &(*pp)->proc_next; }
         if (*pp) { *pp = t->proc_next; }
+        p->cpu_ns_exited += t->se.sum_exec_runtime;   // keeps CLOCK_PROCESS_CPUTIME_ID whole
 
         if (t->detached) {
             // No NeoOS-native joiner will ever call thread_join for

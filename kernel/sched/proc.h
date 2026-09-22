@@ -157,6 +157,7 @@ struct process {
     char cwd[VFS_MAX_PATH];
     struct thread *threads;         // live threads, via thread->proc_next
     struct thread *zombies;         // exited, unjoined; freed at reap
+    uint64_t cpu_ns_exited;         // CPU ns of threads that have exited
     struct thread_table *thread_table;  // per-process thread hash table (NEW)
     // Bitmap of live thread user stacks, one bit per slot. Was a single
     // uint16_t, which is where the 16-thread ceiling actually lived.

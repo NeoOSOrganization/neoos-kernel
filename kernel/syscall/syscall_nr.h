@@ -357,7 +357,11 @@
 // cannot do.
 #define SYS_PREAD           136
 
+// High-resolution timers: every clock is TSC-backed, so this reports
+// 1 ns (kernel/syscall/sys_misc.c).
+#define SYS_CLOCK_GETRES    137
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX              137
+#define SYS_MAX              138
 
 #endif
