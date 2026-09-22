@@ -298,3 +298,81 @@ None beyond what's already recorded in `docs/project-goal.md`'s
 Status section for sub-projects 1 and 2 (Vulkan/`llvmpipe`/hardware
 acceleration remain out of scope; `softpipe` is the only Gallium pipe
 driver in use).
+
+## Deviations found during implementation
+
+- **`OSMESA_ARGB` vs `OSMESA_BGRA` byte-order mapping was backwards**
+  in this spec's own Global Constraints. The claim ("`OSMESA_ARGB`
+  maps to `PIPE_FORMAT_B8G8R8A8_UNORM` on little-endian") had the two
+  cases of `neoos-mesa/upstream/src/gallium/frontends/osmesa/osmesa.c`'s
+  format table swapped: on little-endian, `OSMESA_ARGB` actually maps
+  to `PIPE_FORMAT_A8R8G8B8_UNORM` (memory bytes low→high: A,R,G,B) and
+  `OSMESA_BGRA` maps to `PIPE_FORMAT_B8G8R8A8_UNORM` (memory bytes
+  low→high: B,G,R,A — the layout `back` actually needs). Caught by
+  `renderer_test.c`'s own fill/blit checks failing with
+  byte-reversed-looking pixel values on first boot; confirmed against
+  the real Mesa source before fixing. `renderer_init` uses
+  `OSMESA_BGRA`, not `OSMESA_ARGB`.
+- **`glViewport`'s window coordinates are always bottom-up**, per the
+  GL spec, regardless of `OSMesaPixelStore(OSMESA_Y_UP, GL_FALSE)` --
+  Y_UP only affects how the color buffer itself is read back/written,
+  not `glViewport`'s own coordinate convention. Every `renderer.c`
+  function except `renderer_draw_glass` is unaffected because it
+  always uses the *full* `(0,0,g_w,g_h)` viewport (identical bottom-up
+  or top-down) and reaches window coordinates through the
+  top-down-remapped `glOrtho(0,w,h,0,-1,1)` matrix. `renderer_draw_glass`
+  narrows the viewport to `(x,y,w,h)` AND feeds raw `[-1,1]` NDC
+  vertices (bypassing `glOrtho` entirely), so it alone must flip y by
+  hand: `glViewport(x, g_h-y-h, w, h)`. Caught by the glass smoke-test
+  check landing at the wrong (mirrored) row; verified by direct pixel
+  inspection before fixing.
+- **OSMesa's software rasterizer does not write `target` synchronously
+  with a draw call.** Every `renderer.c` entry point that touches
+  pixels calls `glFinish()` before returning (matching
+  `neoos-mesa/test/triangle_test.c`'s own pattern from sub-project 1),
+  since callers (`wm.c`) read/copy `back` immediately after each call
+  returns. Not called out as a risk anywhere in this spec's Error
+  Handling or Testing sections; caught by the first boot of
+  `renderer_test.c` reading back all-zero pixels.
+- **`GL_GLEXT_PROTOTYPES` must be defined before including `GL/gl.h`**
+  for the GL 2.0+ shader entry points (`glCreateShader` etc.) to get
+  real prototypes rather than K&R-style implicit declarations. Not a
+  link error (the symbols are real, per this spec's own `nm -D`
+  verification) but worth avoiding; a one-line addition to
+  `renderer.c`'s top-of-file includes.
+- **The visual glass-effect check (Task 5 Step 2) could not use a
+  saved pre-migration reference screenshot** as this spec's Testing
+  section proposed — none existed for the specific two-window
+  (plain + glass) composition needed to make the lensing visible
+  (`wmdemo.c`'s glass-demo client deliberately fills its own content
+  with an opaque flat colour; only the undecorated ring around it,
+  sized by `BORDER`/`TITLE_H`, ever shows the shaded backdrop). The
+  implementation plan's own Task 5 Step 2 already downgraded this to
+  a qualitative human/agent visual check rather than a pixel-diff
+  gate, which is what was actually done: a zoomed crop of the glass
+  window's ring confirms a smoothly blended, cool-tinted rendering of
+  the backdrop window behind it, distinct from a flat copy.
+- **`WM.ELF`'s new dynamic-linking startup cost races `wmdemo`/
+  `taskbar`'s connection attempt** — unrelated to GL/rendering
+  correctness, but a real regression risk in the `wm`/`wm-glass`/
+  `wm-cursor`/`wm-cursor-fallback`/`wm-taskbar`/`wm-shot`
+  dev-convenience Makefile targets once `WM.ELF` became a
+  dynamically-linked binary loading ~16.5MB of Mesa runtime `.so`s off
+  NeoOS's ATA-PIO disk driver before reaching `listen()`. `wm.c`'s own
+  existing listen-before-heavy-setup ordering (predating this
+  migration) only helps with slowness *inside* `main()`; it cannot
+  help with the new cost, which is entirely in the dynamic linker,
+  before `main()` runs at all. Fixed outside `neoos-wm` entirely: a
+  new `wmwait` userland binary (`NeoOS/userland/wmwait.c`, a bare
+  5-second `nanosleep`, built with the existing freestanding
+  toolchain) inserted as a `wait` inittab entry between spawning
+  `wm.nex` and spawning/waiting on any wm client, across all six
+  affected Makefile targets. `wmclient.c`/`wmdemo.c`/`taskbar.c` (wire
+  protocol/client code) were deliberately left untouched, matching
+  this spec's Non-goals.
+- **`wm-taskbar`'s Start-menu-click failure is a pre-existing flake,
+  not a regression.** Investigated by building the pre-migration
+  TinyGL-linked `WM.ELF` in a throwaway git worktree at the last
+  commit before this milestone and re-running the same
+  click-injection flow against it: it failed identically ("start menu
+  never opened"). Out of this milestone's scope to fix.

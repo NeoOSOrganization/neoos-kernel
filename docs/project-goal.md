@@ -138,5 +138,62 @@ default is an absolute build-host path). Strip all of these before
 staging; unstripped `swrast_dri.so` alone is ~89MB, well past a 32MB
 test disk.
 
-Sub-project 3 (swapping `neoos-wm`'s own internal TinyGL usage onto
-this EGL/Gallium stack) remains open, not yet brainstormed.
+**Sub-project 3 (routing `neoos-wm`'s own rendering through real Mesa)
+complete**, as of 2026-09-22 -- see
+`docs/superpowers/specs/2026-09-22-wm-mesa-everywhere-design.md` and
+`docs/superpowers/plans/2026-09-22-wm-mesa-everywhere.md`. `wm.c`
+renders entirely through a new `renderer.c`/`renderer.h` seam backed
+by real Mesa (OSMesa) -- desktop fill, window border/title, content
+blit, and cursor are now real `glBegin`/`glVertex2f`/`glTexImage2D`
+draw calls, and the glass-lensing pass is a real compiled GLSL
+program (`glCreateShader`/`glCompileShader`/`glLinkProgram`), its
+semantics recovered exactly from the still-present
+`glass_vertex.spvasm`/`glass_fragment.spvasm`. Both of `wm.c`'s old
+hand-rolled per-pixel alpha-blend loops (glass intensity, ARGB8888
+content) are deleted, replaced by real `glBlendFunc` state
+(`GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA` for straight-alpha content,
+`GL_ONE, GL_ONE_MINUS_SRC_ALPHA` for the cursor's premultiplied
+alpha). `neoos-tinygl` is no longer a `wm.c` dependency, though it
+remains available, untouched, for direct application use later.
+`WM.ELF` itself moves off the freestanding, statically-linked
+`x86_64-elf-gcc` build onto the hosted `x86_64-neoos-linux-musl`
+toolchain with real dynamic linking, matching `neoos-mesa`'s own test
+clients -- `wm.nex` is now a dynamically-linked binary requiring the
+same Mesa runtime `.so`s sub-project 1 introduced, staged
+permanently on every disk image (not opt-in, since `wm` runs on
+every real desktop boot). Verified via a standalone smoke test
+(`neoos-wm/test/renderer_test.c`, seven checks: flat fills, opaque
+and alpha-blended blits, premultiplied cursor blend, and an
+analytically-computed glass tint), every existing `wm`/`wm-glass`/
+`wm-cursor`/`wm-cursor-fallback` end-to-end target, and a screenshot
+confirming the glass window's shaded ring visibly lenses/tints the
+window behind it. Full 15/15-zero-retry gauntlet regression stays
+green.
+
+Two corrections to the design spec's own "verified" facts surfaced
+during implementation -- both fixed in code, recorded in the spec's
+own deviations section: `OSMESA_ARGB` vs `OSMESA_BGRA`'s byte-order
+mapping was backwards (the spec had them swapped relative to Mesa's
+actual `osmesa.c` format table), and `glViewport`'s window
+coordinates are always bottom-up regardless of `OSMESA_Y_UP`, which
+only `renderer_draw_glass` needed to hand-correct (every other
+`renderer.c` function reaches window coordinates through the
+top-down-remapped `glOrtho` matrix instead of raw NDC). A third,
+unrelated fix went into the `wm`/`wm-glass`/`wm-cursor`/
+`wm-cursor-fallback`/`wm-taskbar`/`wm-shot` dev-convenience Makefile
+targets: `WM.ELF`'s new dynamic-linking startup cost (loading
+~16.5MB of Mesa runtime `.so`s off NeoOS's ATA-PIO disk driver) races
+`wmdemo`/`taskbar`'s single, un-retried connection attempt; a new
+`wmwait` userland binary (`userland/wmwait.c`, a bare 5-second
+`nanosleep`) inserted between spawning `wm.nex` and spawning its
+client buys the needed head start without touching client code.
+`wm-taskbar`'s separate Start-menu-click flake was investigated and
+confirmed pre-existing (reproduces identically against the old,
+pre-migration TinyGL-linked `WM.ELF`), not a regression from this
+work.
+
+The Gallium3D project-goal's three sub-projects are now all complete.
+Any further graphics-stack work (e.g. giving `neoos-tinygl`-based
+applications a path onto real Mesa, or a second EGL/GL application
+beyond the sub-project 2 test client) is a new, not-yet-brainstormed
+milestone.
