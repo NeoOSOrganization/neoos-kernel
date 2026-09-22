@@ -75,12 +75,17 @@ supplied as `gm_cursors.tar.xz`.
 assets/icons/gm_cursors/
   cursors/
     default              # compiled Xcursor binary, copied verbatim from the archive
-    ...                  # (only `default` is USED this milestone; committing the
-                          #  rest of the theme's ~30 cursor files now, unused, costs
-                          #  nothing and avoids a second asset-import step later)
   LICENSE                # GPLv3, verbatim from the archive
   CREDITS                # one line: theme name + https://git.gianmarco.gg/gianmarco/gm-cursors
 ```
+
+Only `default` is committed. The full theme is 38MB (the `progress`/
+`wait` animated cursors alone are 10MB each -- many size variants times
+many animation frames); committing all ~30 unused files now for a
+one-cursor milestone is a real, permanent repo-size cost for zero
+present benefit, not "free" as an earlier draft of this spec assumed.
+Sub-projects 3-4 commit whichever additional named cursors they
+actually wire up, when they wire them up.
 
 ### 2. Xcursor binary parser (`neoos-wm/xcursor.h` / `xcursor.c`)
 
