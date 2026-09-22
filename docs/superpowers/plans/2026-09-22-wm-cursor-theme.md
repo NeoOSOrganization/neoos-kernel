@@ -746,6 +746,30 @@ EOF
 - Produces: nothing consumed by later tasks -- this is the milestone's
   final verification gate.
 
+> **ACTUAL EXECUTION NOTE (recorded after the fact):** the first run
+> of `wm-cursor`, using `timeout $(BOOT_TIMEOUT)` (150s) as planned,
+> took 178s wall-clock even though the log showed the test's real work
+> (cursor load, surface mapped, wmdemo exit) completing within the
+> first few seconds. Root cause: `wm.nex`'s own frame budget (`spawn
+> /wm.nex 90`) only advances on an actual repaint, which only happens
+> on new screen damage -- once `wmdemo` disconnects in this headless
+> run, nothing generates further damage, so `wm.nex` never reaches its
+> own exit condition and sits blocked in `poll()`. The outer
+> `$(BOOT_TIMEOUT)` was the only thing that ever ended the run, so the
+> test paid the full 150s hang-detector ceiling for ~2s of actual
+> work. This is a pre-existing property of `spawn /wm.nex N`, shared by
+> the earlier `wm`/`wm-glass` targets -- not introduced here, just
+> newly visible because this was the first time someone timed it end
+> to end.
+>
+> Fix (folded into Step 1/3 below rather than left as a separate
+> step): both `wm-cursor` and `wm-cursor-fallback` use a short local
+> `timeout 30` instead of `$(BOOT_TIMEOUT)` for their QEMU boot, with a
+> comment explaining why. Re-run: `wm-cursor` 58.5s total (down from
+> 178s), `wm-cursor-fallback` 30.5s total, both exit 0 with every
+> expected log line present. `$(BOOT_TIMEOUT)` itself is unchanged --
+> this only affects these two targets' own local timeout.
+
 - [ ] **Step 1: Add a `wm-cursor` target (happy path: log + screenshot)**
 
 Add, near the existing `wm`/`wm-glass`/`wm-shot` targets (after
