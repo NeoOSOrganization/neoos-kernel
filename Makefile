@@ -596,6 +596,7 @@ BOOT_MARKER  ?= NeoOS: interrupts enabled, starting scheduler
 # bare `make test` (no test suite, no BusyBox) require a SMALLER set --
 # see docs/superpowers/specs/2026-09-05-embedded-test-and-app-architecture.md.
 CORE_REQUIRED_MARKERS := \
+	"[hrtimer] clockevent: " \
 	"[pci] ALL PASSED" \
 	"[virtio-net] ALL PASSED" \
 	"[route] ALL PASSED" \

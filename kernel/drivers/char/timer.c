@@ -8,6 +8,7 @@
 #include "sched/proc.h"
 #include "sched/rq.h"
 #include "time/ktime.h"
+#include "time/clockevent.h"
 
 #define TICKS_PER_LOG 100          // 100Hz wall clock -> log once per second
 #define HOUSE_NS      10000000ULL  // 10 ms: wall-clock cadence + max one-shot
@@ -22,27 +23,15 @@
 // DEBUG_HZ (kernel build knob) is now a no-op: preemption granularity is
 // the per-task slice, tunable at runtime via sched_setattr.
 
-static uint32_t lapic_ticks_per_10ms = 0;
-
 // The floor and ceiling the LAPIC one-shot is armed within. The floor
 // is an interrupt-storm guard; the ceiling keeps the BSP's housekeeping
 // (the once-a-second log, expiring timed sleeps) running every tick.
-#define MIN_ARM_NS (HOUSE_NS / 20)   // 500 us, matching ns_to_lapic_count
+#define MIN_ARM_NS (HOUSE_NS / 20)   // 500 us
 
 // Both clocks are derived from ktime (the TSC) now, so neither can
 // drift the way the old armed-interval accumulator did.
 uint64_t timer_ticks(void) { return ktime_get_ns() / TICK_NS; }
 uint64_t sched_clock_ns(void) { return ktime_get_ns(); }
-
-static uint32_t ns_to_lapic_count(uint64_t ns) {
-    if (lapic_ticks_per_10ms == 0) { return 1; }
-    uint64_t c = (uint64_t)((__uint128_t)ns * lapic_ticks_per_10ms / HOUSE_NS);
-    uint32_t lo = lapic_ticks_per_10ms / 20;    // ~500 us floor: interrupt-storm guard
-    if (lo == 0) { lo = 1; }
-    if (c < lo) { c = lo; }
-    if (c > lapic_ticks_per_10ms) { c = lapic_ticks_per_10ms; }
-    return (uint32_t)c;
-}
 
 // Arms this CPU's one-shot for the running task's remaining slice,
 // clamped to the range the LAPIC is actually programmed within.
@@ -54,8 +43,7 @@ static void timer_arm_next(struct cpu *c) {
     }
     if (next_ns < MIN_ARM_NS) { next_ns = MIN_ARM_NS; }
     if (next_ns > HOUSE_NS)   { next_ns = HOUSE_NS; }
-    c->timer_armed_ns = next_ns;
-    lapic_timer_start_oneshot(ns_to_lapic_count(next_ns), VECTOR_TIMER);
+    clockevent_program(ktime_get_ns() + next_ns);
 }
 
 // EVERY CPU takes this from its own LAPIC one-shot. Only the BSP runs
@@ -136,8 +124,9 @@ void timer_handler(void) {
 
 void timer_init(void) {
     uint64_t tsc_per_10ms;
-    lapic_ticks_per_10ms = pit_calibrate_lapic_ticks_per_10ms(&tsc_per_10ms);
+    uint32_t lapic_ticks_per_10ms = pit_calibrate_lapic_ticks_per_10ms(&tsc_per_10ms);
     ktime_calibrate(tsc_per_10ms);
+    clockevent_init_bsp(lapic_ticks_per_10ms);
     serial_write_string("[timer] calibrated lapic ticks per 10ms=");
     serial_write_hex64(lapic_ticks_per_10ms);
     serial_write_string(" tsc per 10ms=");
@@ -151,6 +140,6 @@ void timer_init(void) {
 // never preempted. Calibration is not repeated -- the count is the same
 // on every core.
 void timer_init_this_cpu(void) {
-    this_cpu()->timer_armed_ns = HOUSE_NS;
-    lapic_timer_start_oneshot(lapic_ticks_per_10ms, VECTOR_TIMER);
+    clockevent_init_this_cpu();
+    clockevent_program(ktime_get_ns() + HOUSE_NS);
 }

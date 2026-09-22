@@ -21,6 +21,7 @@
 
 #define LVT_MASKED         (1u << 16)
 #define LVT_TIMER_PERIODIC (1u << 17)
+#define LVT_TIMER_TSC_DEADLINE (2u << 17)
 
 static volatile uint32_t *lapic_base;
 
@@ -113,4 +114,11 @@ void lapic_timer_start_oneshot(uint32_t initial_count, uint8_t vector) {
     lapic_write(LAPIC_REG_TIMER_DIV, 0x3); // divide by 16
     lapic_write(LAPIC_REG_LVT_TIMER, (uint32_t)vector); // no PERIODIC bit
     lapic_write(LAPIC_REG_TIMER_INIT, initial_count);
+}
+
+void lapic_timer_set_tsc_deadline_mode(uint8_t vector) {
+    lapic_write(LAPIC_REG_LVT_TIMER, (uint32_t)vector | LVT_TIMER_TSC_DEADLINE);
+    // SDM 10.5.4.1: an MFENCE orders the LVT write before any
+    // IA32_TSC_DEADLINE write that follows.
+    __asm__ volatile ("mfence" ::: "memory");
 }
