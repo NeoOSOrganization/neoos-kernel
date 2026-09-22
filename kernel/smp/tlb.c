@@ -25,7 +25,7 @@
 #include "sync/lock.h"
 #include "arch/cpu_local.h"
 #include "mm/pmm.h"
-#include "mm/heap.h"
+#include "mm/paging.h"
 #include "sched/proc.h"
 #include "drivers/char/serial.h"
 
@@ -66,42 +66,59 @@ static void shootdown_release(void) {
 // The deferred-free queue: frames whose mappings are gone but which
 // must not go back to pmm until every CPU has acknowledged a shootdown.
 //
-// It has to be UNBOUNDED, and that is not a nicety. Tearing down an
+// It has to be UNBOUNDED, and it must NEVER ALLOCATE. Tearing down an
 // address space defers every user page and every page-table frame at
-// once -- hundreds of them -- and vma_munmap does its unmapping UNDER
-// the process's mm_lock. The previous fixed 64-entry array handled a
-// full queue by performing an emergency shootdown on the spot, which
-// meant calling tlb_shootdown with mm_lock held: exactly what
-// tlb_shootdown asserts against, because a target spinning on that
-// same mm_lock with interrupts off can never acknowledge. It fired as
-// "[lock] PANIC: tlb_shootdown with a lock held" once enough processes
-// were exiting concurrently to fill the array.
+// once, and vma_munmap does its unmapping UNDER the process's mm_lock,
+// where a shootdown is forbidden (a target spinning on that mm_lock
+// with interrupts off can never acknowledge). The queue used to be a
+// 256-entry array with a kmalloc'd linked-list overflow -- and under
+// memory pressure that kmalloc failed, so the frame was LEAKED for
+// good. That is a death spiral: the backlog that exhausted memory is
+// itself memory the next shootdown would have returned, and leaking it
+// makes the next failure likelier ("[tlb] out of memory deferring a
+// frame; leaking it" by the hundred, next to a GL client under wm).
 //
-// So the array is a fast path and a linked list is the overflow. The
-// node is allocated BEFORE deferred_lock is taken -- kmalloc's heap
-// lock ranks above mm_lock but below nothing this path holds, whereas
-// deferred_lock is the innermost rank in the kernel and nothing may be
-// acquired beneath it.
+// So the bookkeeping is PER-FRAME METADATA sized once at boot: one
+// slot per frame pmm can ever hand out, linked into a single queue.
+// Deferring a frame just links its slot, so it cannot fail. The slot
+// cannot live inside the deferred frame itself: another CPU may still
+// write that frame through a stale TLB entry (or set A/D bits in a
+// freed page-table frame) until the shootdown completes.
 //
-// Each entry also records the address space it was unmapped from. A
-// stale translation for a frame can only exist on a CPU running in that
-// address space, so a shootdown aimed at one pml4 may release exactly
-// its own frames -- which is what keeps an ordinary munmap from having
-// to broadcast an IPI to every CPU in the machine. Owner 0 means "not
-// known"; those wait for a full shootdown.
-#define DEFER_MAX 256
-struct deferred { uint64_t phys; uint64_t owner; unsigned order; };
-static struct deferred deferred_frames[DEFER_MAX];
-static int             deferred_n;
+// Each slot records the address space the frame was unmapped from. A
+// stale translation can only exist on a CPU running in that address
+// space, so a shootdown aimed at one pml4 may release exactly its own
+// frames -- which is what keeps an ordinary munmap from broadcasting an
+// IPI to every CPU. Owner 0 means "not known": released only by a full
+// shootdown. A COW-shared frame can be deferred again while already
+// queued (two sharers unmapping it); the slot then counts both
+// references, and if the owners differ it degrades to owner 0, since
+// only a full shootdown covers both address spaces.
+#define DEFER_BACKLOG 256   // queued frames that count as a backlog
 
-struct deferred_node {
-    struct deferred_node *next;
-    uint64_t phys;
-    uint64_t owner;
-    unsigned order;
+struct defer_slot {
+    uint32_t next;     // frame index + 1 of the next queued slot; 0 ends
+    uint32_t owner;    // owner pml4's frame index + 1; 0 = unknown
+    uint32_t count;    // deferred references this slot holds
+    uint8_t  order;
+    uint8_t  queued;
+    uint16_t pad;
 };
-static struct deferred_node *deferred_overflow;
+#define SLOTS_PER_PAGE (PMM_FRAME_SIZE / sizeof(struct defer_slot))
+#define SLOT_DIR_MAX   ((4ULL * 1024 * 1024 * 1024 / PMM_FRAME_SIZE) / SLOTS_PER_PAGE)
+static struct defer_slot *slot_dir[SLOT_DIR_MAX];
+static uint64_t slot_limit;         // frames covered by slot_dir
+static uint32_t deferred_head;      // frame index + 1; 0 = empty
+static int      deferred_n;         // slots queued
 static struct spinlock deferred_lock;
+
+static struct defer_slot *slot_of(uint64_t frame) {
+    return &slot_dir[frame / SLOTS_PER_PAGE][frame % SLOTS_PER_PAGE];
+}
+
+static uint32_t owner_key(uint64_t pml4_phys) {
+    return pml4_phys ? (uint32_t)(pml4_phys / PMM_FRAME_SIZE) + 1 : 0;
+}
 
 void tlb_init(void) {
     // LOCK_RANK_TLB, not PROCESS: the deferred queue is filled from
@@ -110,98 +127,84 @@ void tlb_init(void) {
     // checker caught exactly that on the first boot.
     spin_init(&deferred_lock,  LOCK_RANK_TLB, "tlb-deferred");
     deferred_n = 0;
+    deferred_head = 0;
+
+    // One slot per frame pmm can ever hand out, taken now, while memory
+    // is plentiful, so that deferring a frame later never allocates.
+    // 16 bytes per 4KiB frame: 0.4% of RAM.
+    slot_limit = pmm_frame_limit();
+    uint64_t pages = (slot_limit + SLOTS_PER_PAGE - 1) / SLOTS_PER_PAGE;
+    for (uint64_t i = 0; i < pages; i++) {
+        uint64_t phys = pmm_alloc(0);
+        if (!phys) { lock_panic("tlb_init: no memory for the deferred-free slots", "tlb", 0); }
+        uint64_t *w = (uint64_t *)phys_to_virt(phys);
+        for (unsigned j = 0; j < PMM_FRAME_SIZE / 8; j++) { w[j] = 0; }
+        slot_dir[i] = (struct defer_slot *)w;
+    }
 }
 
 void tlb_defer_free(uint64_t phys, unsigned order, uint64_t owner_pml4) {
+    uint64_t frame = phys / PMM_FRAME_SIZE;
+    if (frame >= slot_limit) {
+        // pmm never hands out a frame at or past its limit, so this is
+        // a caller passing something pmm did not allocate. Returning it
+        // to pmm would be worse than dropping it.
+        lock_panic("tlb_defer_free: frame outside pmm's range", "tlb", 0);
+    }
+    uint32_t own = owner_key(owner_pml4);
+
     uint64_t f = spin_lock_irqsave(&deferred_lock);
-    if (deferred_n < DEFER_MAX) {
-        deferred_frames[deferred_n].phys  = phys;
-        deferred_frames[deferred_n].owner = owner_pml4;
-        deferred_frames[deferred_n].order = order;
+    struct defer_slot *sl = slot_of(frame);
+    if (sl->queued) {
+        if (sl->owner != own) { sl->owner = 0; }
+        sl->count++;
+    } else {
+        sl->queued = 1;
+        sl->count  = 1;
+        sl->owner  = own;
+        sl->order  = (uint8_t)order;
+        sl->next   = deferred_head;
+        deferred_head = (uint32_t)frame + 1;
         deferred_n++;
-        spin_unlock_irqrestore(&deferred_lock, f);
-        return;
     }
-    spin_unlock_irqrestore(&deferred_lock, f);
-
-    // Overflow. The node is allocated with deferred_lock NOT held: it
-    // is the innermost rank in the kernel, so kmalloc cannot be called
-    // beneath it.
-    struct deferred_node *n = (struct deferred_node *)kmalloc(sizeof(*n));
-    if (!n) {
-        // Out of memory with a frame that must not be reused yet. LEAK
-        // it, deliberately. Handing it back to pmm now is the exact
-        // memory-corruption this whole mechanism exists to prevent -- a
-        // stale TLB entry pointing at a page another process has since
-        // been given -- and a leaked frame under memory pressure is a
-        // far better outcome than that.
-        serial_write_string("[tlb] out of memory deferring a frame; leaking it\n");
-        return;
-    }
-    n->phys  = phys;
-    n->owner = owner_pml4;
-    n->order = order;
-
-    f = spin_lock_irqsave(&deferred_lock);
-    n->next = deferred_overflow;
-    deferred_overflow = n;
     spin_unlock_irqrestore(&deferred_lock, f);
 }
 
 void tlb_flush_deferred(uint64_t pml4_phys) {
-    // The array is drained one entry at a time rather than copied out
-    // wholesale. A 256-entry copy is 4KiB, which is too much to put on
-    // a 16KiB kernel stack that interrupts also nest on -- and making
-    // the copy `static` instead is worse, because two CPUs draining at
-    // once would clobber each other's copy the moment the first one
-    // dropped the lock. Taking the lock per entry costs nothing next to
-    // the pmm_free it guards.
-    //
-    // Scanned from the back with a swap-remove, so releasing a subset
-    // stays O(n) and the surviving entries need no shuffling. `i` is
-    // re-read from deferred_n on every pass because the lock is dropped
-    // across pmm_free and another CPU may have pushed or pulled.
-    for (int i = 0; ; i++) {
+    // pmm_free takes pmm_lock, which may not be taken beneath
+    // deferred_lock (the innermost rank), so releasable slots are
+    // unlinked under the lock in small batches, copied onto the stack,
+    // and freed with the lock dropped. Unlinking clears the slot, so a
+    // concurrent re-defer of the same frame starts a fresh entry rather
+    // than riding on one about to be released.
+    uint32_t want = owner_key(pml4_phys);
+    for (;;) {
+        struct { uint64_t phys; uint32_t count; uint8_t order; } batch[32];
+        int nb = 0;
+
         uint64_t lf = spin_lock_irqsave(&deferred_lock);
-        if (i >= deferred_n) { spin_unlock_irqrestore(&deferred_lock, lf); break; }
-        struct deferred d = deferred_frames[i];
-        if (pml4_phys != 0 && d.owner != pml4_phys) {
-            spin_unlock_irqrestore(&deferred_lock, lf);
-            continue;                      // someone else's; leave it queued
+        uint32_t *link = &deferred_head;
+        while (*link && nb < 32) {
+            uint64_t fr = *link - 1;
+            struct defer_slot *sl = slot_of(fr);
+            if (pml4_phys == 0 || sl->owner == want) {
+                batch[nb].phys  = fr * PMM_FRAME_SIZE;
+                batch[nb].count = sl->count;
+                batch[nb].order = sl->order;
+                nb++;
+                *link = sl->next;
+                sl->next = 0; sl->queued = 0; sl->count = 0; sl->owner = 0;
+                deferred_n--;
+            } else {
+                link = &sl->next;          // someone else's; leave it queued
+            }
         }
-        deferred_frames[i] = deferred_frames[--deferred_n];
         spin_unlock_irqrestore(&deferred_lock, lf);
-        pmm_free(d.phys, d.order);
-        i--;                               // re-examine the entry swapped in
-    }
 
-    // The overflow list is detached with a single pointer swap, so it
-    // needs no copy at all and can be walked outside the lock. Entries
-    // that do not belong to this shootdown go back on afterwards.
-    uint64_t f = spin_lock_irqsave(&deferred_lock);
-    struct deferred_node *over = deferred_overflow;
-    deferred_overflow = 0;
-    spin_unlock_irqrestore(&deferred_lock, f);
-
-    struct deferred_node *keep = 0;
-    while (over) {
-        struct deferred_node *next = over->next;
-        if (pml4_phys != 0 && over->owner != pml4_phys) {
-            over->next = keep;
-            keep = over;
-        } else {
-            pmm_free(over->phys, over->order);
-            kfree(over);
+        for (int i = 0; i < nb; i++) {
+            for (uint32_t c = 0; c < batch[i].count; c++) { pmm_free(batch[i].phys, batch[i].order); }
         }
-        over = next;
-    }
-    if (keep) {
-        struct deferred_node *tail = keep;
-        while (tail->next) { tail = tail->next; }
-        f = spin_lock_irqsave(&deferred_lock);
-        tail->next = deferred_overflow;
-        deferred_overflow = keep;
-        spin_unlock_irqrestore(&deferred_lock, f);
+        if (nb < 32) { break; }
     }
 }
 
@@ -218,15 +221,14 @@ void ipi_tlb_handler(void) {
     lapic_send_eoi();
 }
 
-// True when the deferred queue has built up frames that only a full
-// shootdown will release -- the fast array is full, or anything has
-// spilled to the overflow list. Used by callers that are in a safe
+// True when the deferred queue has built up enough frames that only a
+// full shootdown should be trusted to release them (orphans included). Used by callers that are in a safe
 // context to drain it (no lock, interrupts enable-able) but would not
 // otherwise issue a shootdown: a process exiting on a lightly-loaded
 // system, the idle loop.
 int tlb_deferred_backlog(void) {
     uint64_t lf = spin_lock_irqsave(&deferred_lock);
-    int backlog = (deferred_overflow != 0) || (deferred_n >= DEFER_MAX);
+    int backlog = deferred_n >= DEFER_BACKLOG;
     spin_unlock_irqrestore(&deferred_lock, lf);
     return backlog;
 }
@@ -263,8 +265,8 @@ void tlb_shootdown(uint64_t pml4_phys) {
     // exits and is reparented to an init that never reaps it -- the
     // boot-time network self-tests are exactly this -- leaves its ENTIRE
     // address space, thousands of frames, queued with an owner no future
-    // shootdown will ever name. Those saturate the fast array and spill
-    // onto the unbounded overflow list, and a sustained munmap workload
+    // shootdown will ever name. Those pile up in the queue, and a
+    // sustained munmap workload
     // then bleeds pmm dry; past that point vma_fault cannot get a frame
     // and the next user write faults on a VMA-covered-but-unmapped page.
     //
@@ -273,10 +275,7 @@ void tlb_shootdown(uint64_t pml4_phys) {
     // built up clears the orphans. Self-limiting: the first promoted
     // shootdown empties the backlog, so the next caller is not promoted.
     if (pml4_phys != 0) {
-        uint64_t lf = spin_lock_irqsave(&deferred_lock);
-        int backlog = (deferred_overflow != 0) || (deferred_n >= DEFER_MAX);
-        spin_unlock_irqrestore(&deferred_lock, lf);
-        if (backlog) { pml4_phys = 0; }
+        if (tlb_deferred_backlog()) { pml4_phys = 0; }
     }
 
     int self   = (int)(this_cpu() - &cpus[0]);
@@ -388,6 +387,35 @@ void tlb_shootdown_selftest(void) {
         serial_write_string("[tlb] selftest FAILED: targeted shootdown did not release its own frame\n");
         return;
     }
+    // A COW-shared frame deferred by two DIFFERENT address spaces: the
+    // slot must hold both references, and since no single targeted
+    // shootdown covers both owners, neither may release it -- only a
+    // full one, which must then return BOTH references.
+    //
+    // Asserted on the frame's own refcount, not the global free count:
+    // the network kernel threads are already allocating by now. The
+    // test keeps a third reference of its own throughout, so the frame
+    // can never be freed and handed to someone else mid-test and every
+    // expected count is exact.
+    uint64_t shared = pmm_alloc(0);
+    if (!shared) { serial_write_string("[tlb] selftest FAILED: no memory (shared)\n"); return; }
+    pmm_frame_share(shared);
+    pmm_frame_share(shared);                 // refcount 3: two sharers + the test
+    tlb_defer_free(shared, 0, mine);
+    tlb_defer_free(shared, 0, theirs);
+    tlb_shootdown(mine);
+    tlb_shootdown(theirs);
+    if (pmm_frame_refcount(shared) != 3) {
+        serial_write_string("[tlb] selftest FAILED: two-owner frame released by a targeted shootdown\n");
+        return;
+    }
+    tlb_shootdown(0);
+    if (pmm_frame_refcount(shared) != 1) {
+        serial_write_string("[tlb] selftest FAILED: full shootdown did not release both references\n");
+        return;
+    }
+    pmm_free(shared, 0);
+
     serial_write_string("[tlb] shootdown selftest passed, acks=");
     serial_write_hex64(__atomic_load_n(&ipi_tlb_count, __ATOMIC_ACQUIRE) - before);
     serial_write_string("\n");

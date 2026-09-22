@@ -4,6 +4,7 @@
 #include "mm/paging.h"
 #include "mm/heap.h"
 #include "smp/tlb.h"
+#include "sync/lock.h"
 #include "sched/proc.h"
 #include "errno.h"
 #include "drivers/char/serial.h"
@@ -277,6 +278,7 @@ struct vma_fault_io {
 #define VMA_FAULT_SIGSEGV   0
 #define VMA_FAULT_HANDLED   1
 #define VMA_FAULT_NEEDS_IO  2
+#define VMA_FAULT_NOMEM     3   // pmm empty; vma_fault may reclaim and retry
 
 static int vma_fault_locked(struct process *p, uint64_t addr, int write,
                             struct vma_fault_io *io) {
@@ -304,7 +306,7 @@ static int vma_fault_locked(struct process *p, uint64_t addr, int write,
     }
 
     uint64_t frame = pmm_alloc(0);
-    if (!frame) { return 0; }
+    if (!frame) { return VMA_FAULT_NOMEM; }
     // Zero here rather than calling sched/'s zero_frames: kernel/mm must
     // not reach into kernel/sched for code, and a fresh frame handed to
     // userland must never carry another process's bytes.
@@ -327,7 +329,7 @@ static int vma_fault_locked(struct process *p, uint64_t addr, int write,
         // Only reachable since paging_map_into started reporting failure
         // instead of installing a present entry pointing at physical 0.
         pmm_free(frame, 0);
-        return 0;                                          // -> SIGSEGV
+        return VMA_FAULT_NOMEM;
     }
     return 1;
 }
@@ -625,21 +627,49 @@ static int vma_install_faulted_page_locked(struct process *p,
     return paging_map_into(pml4, io->page_va, frame, pf) == 0;
 }
 
+// Out of frames. Before failing the fault, reclaim what the kernel is
+// merely HOLDING: frames already unmapped but parked in the TLB
+// deferred-free queue until a shootdown (every exiting or munmapping
+// process parks its pages there). A full shootdown returns all of them.
+// Only safe with no lock held -- tlb_shootdown waits for IPI acks and
+// asserts that -- which rules out a uaccess fault taken under a lock;
+// those fail as before. Returns 1 if anything came back.
+static int vma_reclaim(void) {
+    if (lock_held_depth() != 0) { return 0; }
+    uint64_t before = pmm_free_frame_count();
+    tlb_shootdown(0);
+    return pmm_free_frame_count() > before;
+}
+
 int vma_fault(struct process *p, uint64_t addr, int write) {
     struct vma_fault_io io = { 0, 0, 0, 0 };
 
-    uint64_t f = spin_lock_irqsave(&p->mm_lock);
-    int rc = vma_fault_locked(p, addr, write, &io);
-    spin_unlock_irqrestore(&p->mm_lock, f);
+    int rc;
+    for (int attempt = 0; ; attempt++) {
+        uint64_t f = spin_lock_irqsave(&p->mm_lock);
+        rc = vma_fault_locked(p, addr, write, &io);
+        spin_unlock_irqrestore(&p->mm_lock, f);
+        if (rc != VMA_FAULT_NOMEM) { break; }
+        if (attempt > 0 || !vma_reclaim()) {
+            // Said plainly, because the fault-audit line that follows
+            // can only see "VMA covers it but no PTE" and would
+            // otherwise read as a lost mapping.
+            serial_write_string("[vma] out of memory: demand fault at ");
+            serial_write_hex64(addr);
+            serial_write_string(" fails, nothing left to reclaim\n");
+            return VMA_FAULT_SIGSEGV;
+        }
+    }
     if (rc != VMA_FAULT_NEEDS_IO) { return rc; }
 
     // Nothing held from here to the re-acquire below.
     uint64_t frame = pmm_alloc(0);
+    if (!frame && vma_reclaim()) { frame = pmm_alloc(0); }
     if (!frame) { vnode_put(io.vn); return VMA_FAULT_SIGSEGV; }
     int frc = vma_fill_page_from_file(io.vn, io.file_off, frame);
     if (frc != 0) { pmm_free(frame, 0); vnode_put(io.vn); return VMA_FAULT_SIGSEGV; }
 
-    f = spin_lock_irqsave(&p->mm_lock);
+    uint64_t f = spin_lock_irqsave(&p->mm_lock);
     int installed = vma_install_faulted_page_locked(p, &io, frame);
     spin_unlock_irqrestore(&p->mm_lock, f);
 
