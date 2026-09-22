@@ -1026,6 +1026,12 @@ against Mesa and needs seconds to reach `listen()`. (Linux's own
 `connect(2)` never waits; this is `wmclient`'s policy, not a kernel
 divergence.)
 
+`wm_wait_event(c, timeout_ms)` blocks until an event is waiting (1),
+`timeout_ms` passes (0), or the compositor is gone (-1); a negative
+timeout waits indefinitely. It is the event loop's sleep: wait, then
+drain with `wm_poll_event`. The old pattern of sleeping on a fixed
+timer between drains delayed every click by up to that period.
+
 `wm_create_window` creates a `memfd`, sizes it, maps it, and passes the
 **descriptor** to the compositor over `SCM_RIGHTS`, so the compositor
 maps the same physical pages the application draws into. A commit costs
