@@ -1,6 +1,7 @@
 #include "drivers/block/ata.h"
 #include "arch/io.h"
 #include "drivers/char/serial.h"
+#include "time/ktime.h"
 
 #define ATA_DATA        0x1F0
 #define ATA_ERROR       0x1F1
@@ -21,27 +22,41 @@
 #define ATA_CMD_WRITE_SECTORS 0x30
 #define ATA_CMD_CACHE_FLUSH   0xE7
 
-#define ATA_POLL_MAX_ITERATIONS 100000
+// Status polls are bounded in TIME, not in loop iterations. An
+// iteration count measures how fast this CPU runs inb, which says
+// nothing about the drive: QEMU clears BSY only when the host-side
+// write of the backing file completes, and with a dozen VMs copying
+// disk images at once that took longer than 100000 polls -- the
+// gauntlet's recurring "[ata] write FAILED: BSY never cleared" on a
+// drive that was merely slow. 5 s is orders of magnitude above a
+// healthy PIO transition and still reports a dead drive promptly.
+#define ATA_POLL_TIMEOUT_NS       5000000000ULL
 // CACHE_FLUSH maps to a real host fsync() on the backing disk image --
 // orders of magnitude slower than the in-memory register transitions
-// every other wait in this file deals with, so it gets its own, much
-// larger, budget.
-#define ATA_POLL_MAX_ITERATIONS_FLUSH 100000000
+// every other wait in this file deals with, so it gets Linux's 30 s
+// command timeout.
+#define ATA_POLL_TIMEOUT_NS_FLUSH 30000000000ULL
 
 // Bounded poll -- a drive that never reaches the requested status
-// within this many reads is treated as a hardware failure, logged and
-// reported to the caller, rather than hanging forever.
-static int ata_wait_status_bounded(uint8_t mask, uint8_t value, uint32_t max_iterations) {
-    for (uint32_t i = 0; i < max_iterations; i++) {
+// within timeout_ns is treated as a hardware failure, logged and
+// reported to the caller, rather than hanging forever. Runs after
+// timer_init, so ktime is calibrated.
+static int ata_wait_status_bounded(uint8_t mask, uint8_t value, uint64_t timeout_ns) {
+    uint64_t deadline = ktime_after_ns(timeout_ns);
+    for (;;) {
         if ((inb(ATA_STATUS) & mask) == value) {
             return 1;
         }
+        if (ktime_get_ns() >= deadline) {
+            // One last look: the deadline may have passed while this
+            // CPU was not running at all.
+            return (inb(ATA_STATUS) & mask) == value;
+        }
     }
-    return 0;
 }
 
 static int ata_wait_status(uint8_t mask, uint8_t value) {
-    return ata_wait_status_bounded(mask, value, ATA_POLL_MAX_ITERATIONS);
+    return ata_wait_status_bounded(mask, value, ATA_POLL_TIMEOUT_NS);
 }
 
 // "ERR bit set" on its own says a command failed but not which command,
@@ -180,7 +195,7 @@ static int ata_write_sectors_locked(uint8_t drive, uint32_t lba, uint8_t count, 
     }
 
     outb(ATA_COMMAND, ATA_CMD_CACHE_FLUSH);
-    if (!ata_wait_status_bounded(ATA_STATUS_BSY, 0, ATA_POLL_MAX_ITERATIONS_FLUSH)) {
+    if (!ata_wait_status_bounded(ATA_STATUS_BSY, 0, ATA_POLL_TIMEOUT_NS_FLUSH)) {
         serial_write_string("[ata] write FAILED: cache flush BSY never cleared\n");
         return 0;
     }
