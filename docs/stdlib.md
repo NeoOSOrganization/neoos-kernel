@@ -1016,6 +1016,16 @@ wm_damage(c, 0, 0, 480, 240);
 wm_commit(c);
 ```
 
+`wm_connect()` waits for the compositor if it is still starting: while
+the connect attempt reports `ECONNREFUSED` (nothing bound to
+`@neoos-wm` yet) it retries every 50ms, for up to 60s, then returns 0.
+Any other error returns 0 at once. So a client can be started at the
+same time as the compositor, from an inittab or a shell, with no
+ordering or head-start delay. The compositor is dynamically linked
+against Mesa and needs seconds to reach `listen()`. (Linux's own
+`connect(2)` never waits; this is `wmclient`'s policy, not a kernel
+divergence.)
+
 `wm_create_window` creates a `memfd`, sizes it, maps it, and passes the
 **descriptor** to the compositor over `SCM_RIGHTS`, so the compositor
 maps the same physical pages the application draws into. A commit costs

@@ -187,6 +187,11 @@ targets: `WM.ELF`'s new dynamic-linking startup cost (loading
 `wmwait` userland binary (`userland/wmwait.c`, a bare 5-second
 `nanosleep`) inserted between spawning `wm.nex` and spawning its
 client buys the needed head start without touching client code.
+(Superseded 2026-09-22: `wmwait` is gone. `wm_connect()` now waits for
+the compositor's listener itself (see `docs/stdlib.md`), and the
+Start-click "flake" below turned out to be a harness bug: the
+`wm-taskbar` wait loop matched the *previous* run's stale serial log,
+so the clicks fired before the compositor was reading the mouse.)
 `wm-taskbar`'s separate Start-menu-click flake was investigated and
 confirmed pre-existing (reproduces identically against the old,
 pre-migration TinyGL-linked `WM.ELF`), not a regression from this
