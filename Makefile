@@ -332,7 +332,9 @@ $(DISK_IMG): $(BUILD_DIR)/embedfs_table.c $(USERLAND_BUILD)/TERM.ELF $(USERLAND_
 	@# so this is not gated on PORT_DIRS.
 	@if [ -d "$(MESA_DIR)/build-output-runtime-libs" ]; then \
 		mmd -i $(DISK_IMG) ::lib 2>/dev/null || true; \
-		for f in libOSMesa.so.8 libglapi.so.0 libstdc++.so.6 libgcc_s.so.1 libc.so ld-musl-x86_64.so.1; do \
+		mmd -i $(DISK_IMG) ::lib/dri 2>/dev/null || true; \
+		for f in libOSMesa.so.8 libglapi.so.0 libstdc++.so.6 libgcc_s.so.1 libc.so ld-musl-x86_64.so.1 \
+		         libEGL.so.1 libGL.so.1 dri/swrast_dri.so; do \
 			if [ -f "$(MESA_DIR)/build-output-runtime-libs/$$f" ]; then \
 				mcopy -o -i $(DISK_IMG) "$(MESA_DIR)/build-output-runtime-libs/$$f" "::lib/$$f"; \
 			else \
