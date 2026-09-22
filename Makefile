@@ -316,7 +316,11 @@ $(DISK_IMG): $(BUILD_DIR)/embedfs_table.c $(USERLAND_BUILD)/TERM.ELF $(USERLAND_
 		mmd -i $(DISK_IMG) ::usr/local/bin 2>/dev/null || true; \
 		./tools/nexify.sh $(WM_DIR)/build/WM.ELF $(BUILD_DIR)/wm.nex; \
 		mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/wm.nex ::usr/local/bin/wm.nex; \
-		echo "disk: neoos-wm found at $(WM_DIR) -- wm.nex installed"; \
+		mmd -i $(DISK_IMG) ::usr/share/icons 2>/dev/null || true; \
+		mmd -i $(DISK_IMG) ::usr/share/icons/gm_cursors 2>/dev/null || true; \
+		mmd -i $(DISK_IMG) ::usr/share/icons/gm_cursors/cursors 2>/dev/null || true; \
+		mcopy -o -i $(DISK_IMG) $(WM_DIR)/assets/icons/gm_cursors/cursors/default ::usr/share/icons/gm_cursors/cursors/default; \
+		echo "disk: neoos-wm found at $(WM_DIR) -- wm.nex and gm_cursors installed"; \
 	else \
 		echo "disk: no neoos-wm build at $(WM_DIR)/build/WM.ELF -- headless image, no compositor"; \
 	fi
