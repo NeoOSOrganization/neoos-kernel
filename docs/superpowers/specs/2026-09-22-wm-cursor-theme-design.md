@@ -137,16 +137,30 @@ size and sitting proportionally against the existing 18px title bar /
   the old `10`/`14` constants otherwise -- damage tracking must cover
   the real footprint either way.
 - `draw_cursor()` gains a themed path: for each pixel of `g_cursor.argb`,
-  alpha-blend `(src.rgb * src.a + dst.rgb * (255 - src.a)) / 255` into
-  `back` at `(cur_x - g_cursor.hot_x + col, cur_y - g_cursor.hot_y + row)`,
-  with the same on-screen bounds clipping `fill()`/the existing cursor
-  path already do. The old 1-bit path stays as the fallback branch,
-  not deleted.
+  alpha-blend into `back` at
+  `(cur_x - g_cursor.hot_x + col, cur_y - g_cursor.hot_y + row)`, with
+  the same on-screen bounds clipping `fill()`/the existing cursor path
+  already do. **Xcursor pixel data is premultiplied alpha** (confirmed
+  against the real `gm_cursors/cursors/default` file: every fully
+  transparent pixel has RGB bytes of zero) -- the blend is therefore
+  `dst.rgb = src.rgb + dst.rgb * (255 - src.a) / 255` per channel, NOT
+  the straight-alpha `src.rgb * src.a + ...` formula, since the file's
+  `src.rgb` is already scaled by its own alpha. Using the straight-alpha
+  formula against premultiplied data would double-darken every
+  partially-transparent pixel (the antialiased edges and the drop
+  shadow). The old 1-bit path stays as the fallback branch, not
+  deleted.
 
-### 4. Install path (`neoos-wm/Makefile`)
+### 4. Install path (`NeoOS/Makefile`)
 
-New disk-image install step, conditioned on `WM_DIR` the same way the
-`wm.nex` binary install already is:
+`neoos-wm/Makefile` only ever builds artifacts (`WM.ELF`,
+`libwmclient.a`, `WMDEMO.ELF`) -- disk-image assembly is NeoOS's job,
+the same division already documented at the top of
+`neoos-wm/Makefile`. So the new install step belongs in
+`NeoOS/Makefile`'s `$(DISK_IMG)` recipe, inside the existing
+`if [ -f "$(WM_DIR)/build/WM.ELF" ]` block that conditionally installs
+`wm.nex` (this block is the "you get what you built" signal -- no
+`WM.ELF`, no compositor, no cursor asset either):
 
 ```
 mmd -i $(DISK_IMG) ::usr/share/icons 2>/dev/null || true
@@ -157,11 +171,10 @@ mcopy -o -i $(DISK_IMG) $(WM_DIR)/assets/icons/gm_cursors/cursors/default \
 ```
 
 This follows the existing `mmd`/`mcopy` convention already used for
-`::usr/share/test/...` and the conditional `wm.nex` install in
-`NeoOS/Makefile`. The general `<theme>/cursors/<name>` shape (not a
-flat `default` file at the top level) is deliberate: it is the real
-Xcursor theme layout, so a later milestone that installs more cursor
-names, or a second theme, needs no path redesign.
+`::usr/share/test/...`. The general `<theme>/cursors/<name>` shape
+(not a flat `default` file at the top level) is deliberate: it is the
+real Xcursor theme layout, so a later milestone that installs more
+cursor names, or a second theme, needs no path redesign.
 
 ## Cross-repo scope
 
@@ -170,12 +183,14 @@ Implementation touches only **neoos-wm**:
 - `xcursor.h`, `xcursor.c` (new)
 - `wm.c` (`draw_cursor()` themed path, startup load, runtime
   `CURSOR_W`/`CURSOR_H`)
-- `Makefile` (disk-image install step)
 
-**NeoOS**: none expected -- `NeoOS/Makefile` builds `wm.nex` from a
-prebuilt `WM_DIR` and does not need to know about `wm`'s internal
-asset dependencies, same as the glass-lensing milestone's `TINYGL_DIR`
-did not require a NeoOS-side change.
+**NeoOS**: `Makefile`'s `$(DISK_IMG)` recipe, inside the existing
+conditional `WM.ELF`-found block, gains the `mmd`/`mcopy` steps from
+section 4 that install the cursor asset alongside `wm.nex`. Unlike the
+glass-lensing milestone's `TINYGL_DIR` (an internal build dependency
+of `wm` itself, invisible to NeoOS), a disk-image *data file* has to
+be installed by whichever Makefile actually assembles the disk image
+-- that is NeoOS's, not neoos-wm's.
 
 **docs/stdlib.md**: none -- this changes no client-visible protocol or
 syscall-adjacent surface. `wmproto.h` is untouched.
