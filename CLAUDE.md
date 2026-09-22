@@ -3,6 +3,13 @@
 A hobby x86_64 kernel built from scratch: Multiboot2 boot, interrupts,
 memory management, storage, and onward, one milestone at a time.
 
+## Current project goal
+
+As of 2026-09-22, the project's goal is **getting Gallium3D working on
+NeoOS**. See `docs/project-goal.md` for the research that led here and
+what it does and doesn't mean yet. Treat any graphics-stack work as
+subordinate to this goal unless the user directs otherwise.
+
 ## Project conventions
 
 - Development proceeds in milestones: brainstorm -> design spec
