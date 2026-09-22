@@ -398,6 +398,23 @@ void kmain(void *multiboot_info) {
     // work arrives afterwards.
     smp_start_aps();
     smp_online_selftest();
+    // The NIC's interrupt moves off the BSP now that there is somewhere
+    // else for it to go. Until the scheduler starts, the BSP is here in
+    // kmain with interrupts OFF -- for tens of seconds on a loaded host
+    // (vt_stress, waitq_churn) -- and a frame the BSP cannot take is a
+    // frame nobody receives: DHCP's 5 s fallback expired on a server
+    // that had answered long before. An AP is always taking interrupts.
+    // The RX ring is only ever touched by this handler, so which ONE CPU
+    // runs it does not matter.
+    if (virtio_net_present && smp_online_count() >= 2) {
+        int nic_cpu = smp_online_count() - 1;
+        ioapic_set_redirection(nic_pin, VECTOR_VIRTIO_NET,
+                               1 /* active-low */, 1 /* level */,
+                               (uint8_t)smp_lapic_for_index(nic_cpu));
+        serial_write_string("[ioapic] virtio-net rerouted to cpu ");
+        serial_write_hex64((uint64_t)nic_cpu);
+        serial_write_string("\n");
+    }
     syscall_msr_selftest();   // asserts every AP programmed its own MSRs
     smp_reschedule_ipi_selftest();
     tlb_shootdown_selftest();
