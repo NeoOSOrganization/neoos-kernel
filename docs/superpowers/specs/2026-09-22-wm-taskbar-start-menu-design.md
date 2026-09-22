@@ -197,6 +197,69 @@ if (c->glass_intensity < 100) {
 few lines above -- `dst[col*4+0]=R` etc. -- confirmed by reading that
 loop, not assumed.)
 
+### 3b. Per-pixel content alpha for glass surfaces (discovered during planning -- a real gap, not a nuance)
+
+**This corrects an implicit assumption in section 3 and in the
+original taskbar/start-menu goals.** `draw_window`'s content blit
+(the step that draws a surface's own pixels on top of whatever
+`draw_glass` just shaded) is today an unconditional opaque copy:
+`dst[col] = src[col]` for every pixel of the surface's rect, no
+exceptions. For a **chromeless** surface (`fixed_pos`, section 1 --
+the taskbar and start menu both are), the content rect is now the
+*exact same rect* `draw_glass` just shaded (section 3's whole premise
+depends on this exactness). The unavoidable consequence: the client's
+own content blit completely overwrites 100% of the shaded backdrop,
+every time, regardless of `glass_intensity` -- intensity controls how
+strongly the shaded area looks *before* it gets fully hidden again.
+"Mostly see-through, opaque only where there is an actual icon or
+line of text" -- what you asked for -- is not achievable with
+`glass_intensity` alone. It needs real per-pixel transparency in the
+content itself, which the protocol has no way to express today
+(`WM_FORMAT_XRGB8888` is the only defined pixel format, and it is
+opaque by construction).
+
+The fix reuses an extensibility point that already exists in the wire
+protocol (`wm_attach_buffer.format`) rather than inventing a new one:
+
+```c
+#define WM_FORMAT_XRGB8888 1   // existing -- opaque, top byte ignored
+#define WM_FORMAT_ARGB8888 2   // new -- top byte is real alpha, straight (non-premultiplied)
+```
+
+- `struct client` gains `uint32_t format`, set from `wm_attach_buffer.format`
+  in the `WM_ATTACH_BUFFER` handler (which currently rejects anything
+  but `WM_FORMAT_XRGB8888` outright -- now accepts both).
+- `draw_window`'s content-blit loop: when `c->format == WM_FORMAT_ARGB8888`,
+  alpha-blend each pixel (`dst = src.rgb*src.a/255 + dst.rgb*(255-src.a)/255`,
+  straight alpha, source pixel already whatever `draw_glass` +
+  section 3's intensity blend left in `back`) instead of the straight
+  copy. `WM_FORMAT_XRGB8888` surfaces are completely unaffected --
+  same unconditional opaque copy as today, zero behavior change.
+- `wm_create_surface_ex` (section 1) requests `WM_FORMAT_ARGB8888`
+  automatically whenever `WM_SURFACE_GLASS` is set, `WM_FORMAT_XRGB8888`
+  otherwise -- alpha compositing is only meaningful for glass surfaces,
+  so this needs no new flag bit; a client never chooses the format
+  directly.
+- **Regression fix required for the existing glass demo**: `wmdemo.c`'s
+  glass-mode fill (`px[y*stride+x] = 0x00FFFFFF`) relied on the top
+  byte being ignored under `WM_FORMAT_XRGB8888`. Under the new
+  automatic `WM_FORMAT_ARGB8888` for glass surfaces, that same value
+  means alpha=0 (fully transparent) -- the demo's content would
+  silently vanish. Must become `0xFFFFFFFF` (alpha=255, opaque) to
+  keep the `wm-glass` target's existing visual output unchanged.
+- **Taskbar/start-menu content**: fill the surface buffer's alpha
+  channel to 0 (fully transparent) everywhere by default -- the
+  frosted/lensed backdrop shows through the entire panel unless a
+  pixel is explicitly drawn opaque. The ring logo (already has its own
+  real alpha from the source PNG -- section 6) and the clock glyphs
+  (opaque ink pixels, alpha=255, transparent everywhere else in each
+  glyph's cell) are the only non-transparent pixels. This is what
+  actually produces "mostly bare-visible background, opaque UI
+  elements on top."
+
+Still no shader or `neoos-tinygl` VM change -- this is a compositor-
+side content-blit change only, same boundary section 3 already drew.
+
 ### 4. Taskbar client (`taskbar.nex`)
 
 New file in `neoos-wm`, **libneoos-linked** (like `wmdemo.c` -- crt0.o
@@ -216,20 +279,33 @@ minute digits directly. `pthread_create` (needed below) is already
 proven working on this exact plain libneoos+crt0.o toolchain, not just
 musl -- `userland/mmstress.c` uses it today. `taskbar.nex` does **not**
 link `neoos-tinygl` either way, since glass shading is entirely the
-compositor's job -- the client only ever draws opaque content into its
-own buffer.
+compositor's job -- the client only ever draws into its own buffer.
 
-- One surface: `wm_create_surface_ex(c, 0, screen_h - 40, screen_w, 40, WM_SURFACE_GLASS | WM_SURFACE_FIXED_POS, 50, "taskbar")`.
-- Draws, into its own pixel buffer, every time it redraws:
+- One surface: `wm_create_surface_ex(c, 0, screen_h - 40, screen_w, 40, WM_SURFACE_GLASS | WM_SURFACE_FIXED_POS, 50, "taskbar")`
+  -- per section 3b this transparently gets an `ARGB8888` buffer, not
+  `XRGB8888`.
+- Every redraw: first clear the whole buffer to alpha 0 (fully
+  transparent -- `memset` the buffer to 0 is exactly this, since
+  alpha is the top byte of each `0xAARRGGBB` word and RGB does not
+  matter when alpha is 0), then draw, opaque, on top of that:
   - The ring logo (see section 6) as the Start button, left-aligned
-    with a small margin, vertically centered in the 40px bar.
+    with a small margin, vertically centered in the 40px bar --
+    alpha-composited using the logo PNG's own real per-pixel alpha
+    (straight, not premultiplied -- section 6).
   - The clock, right-aligned, using the existing 12x24 bitmap font
     (`userland/term/font_term.c`'s `term_glyphs`, reused as-is -- see
     section 5): `clock_gettime(CLOCK_REALTIME, &ts)`, then
     `total = ts.tv_sec % 86400; hh = total/3600; mm = (total/60)%60;`,
     each of the 4 digits (plus the `:` glyph) looked up in
     `term_glyphs` directly by character code -- no string formatting
-    anywhere in this path.
+    anywhere in this path. Each glyph's "ink" pixels are drawn fully
+    opaque (alpha=255); every other pixel in the glyph's cell stays
+    transparent (untouched from the initial clear).
+  - Everywhere else in the 40px bar -- the vast majority of its area
+    -- stays fully transparent, so the frosted, lensed backdrop
+    (section 3) is what is actually seen there. This is the mechanism
+    behind "mostly bare-visible background, opaque only where there
+    is real UI."
 - Main loop: `poll()`s the wm connection's fd with a 1-second timeout
   (matching the redraw cadence the clock needs), drains
   `wm_poll_event` each wake, redraws+recommits when the minute value
@@ -299,9 +375,15 @@ New file in `neoos-wm`, libneoos-linked (like `wmdemo.c` -- no
 - One surface: `wm_create_surface_ex(c, 0, screen_h - 40 - 420, 320, 420, WM_SURFACE_GLASS | WM_SURFACE_FIXED_POS, 50, "start-menu")`
   (320x420, docked bottom-left, directly above the taskbar's 40px
   strip).
-- Fills its buffer with a single flat color (content is out of scope;
-  something has to be committed so the glass shader has real pixels
-  to shade -- an uncommitted surface never gets composited at all).
+- Fills its buffer entirely with alpha 0 (fully transparent -- a
+  `memset` to 0, same reasoning as the taskbar in section 4) and
+  commits that. Content is out of scope this round, but something
+  still has to be committed so the surface is `mapped` at all (an
+  uncommitted surface never gets composited -- `draw_window` and
+  `draw_glass` both gate on `c->mapped`). Being fully transparent
+  everywhere is not "no content" in a way that breaks anything -- it
+  is simply the correct empty state: a frosted 320x420 panel with
+  nothing drawn on it yet, exactly matching "empty for now."
 - Main loop: blocks in `wm_poll_event`-driven wait, and the instant a
   `WM_FOCUS{focused=0}` event arrives, calls `wm_disconnect` and
   `exit(0)`. No other logic. This is the entire "closes on outside
@@ -310,12 +392,18 @@ New file in `neoos-wm`, libneoos-linked (like `wmdemo.c` -- no
 ## Cross-repo scope
 
 Implementation touches only **neoos-wm**:
-- `wmproto.h` (`WM_SURFACE_FIXED_POS`, `wm_create_surface`'s new
-  fields)
-- `wm.c` (`set_focus` helper, `WM_CREATE_SURFACE` handling, `draw_glass`
-  intensity blend, `struct client.glass_intensity`)
+- `wmproto.h` (`WM_SURFACE_FIXED_POS`, `WM_FORMAT_ARGB8888`,
+  `wm_create_surface`'s new fields)
+- `wm.c` (`set_focus` helper, `WM_CREATE_SURFACE` handling, `WM_ATTACH_BUFFER`
+  accepting `WM_FORMAT_ARGB8888`, `draw_window`'s content-blit alpha
+  path, `draw_glass` intensity blend, `struct client.glass_intensity`/
+  `.fixed_pos`/`.format`)
 - `wmclient.h`/`.c` (`wm_create_surface_ex`, existing wrappers
-  refactored onto it)
+  refactored onto it, automatic `WM_FORMAT_ARGB8888` request when
+  `WM_SURFACE_GLASS` is set)
+- `wmdemo.c` (one-line fix: glass-mode fill `0x00FFFFFF` ->
+  `0xFFFFFFFF` so it stays opaque under the new automatic
+  `WM_FORMAT_ARGB8888` -- see section 3b)
 - `taskbar.c` (new), `startmenu.c` (new)
 - `assets/logo/` (new: the SVG, generated PNG, generated header)
 - `tools/png2c.py` (new, host-only)
@@ -352,6 +440,10 @@ needs a real entry, not just inline comments.
   runtime-loaded one like the cursor theme -- there is no meaningful
   "fallback" for a Start button with no icon at build time the way
   there was for a swappable cursor).
+- `WM_ATTACH_BUFFER` with a `format` that is neither `WM_FORMAT_XRGB8888`
+  nor `WM_FORMAT_ARGB8888`: rejected exactly as an unrecognized format
+  is today (`close(passed_fd); break;`) -- widening the accepted set
+  by one value does not change the "reject anything else" rule.
 
 ## Testing
 
@@ -368,6 +460,12 @@ this repo, plus a host-native piece where one exists:
   not required to match a third exact golden checksum -- the blend
   math is simple enough that "between the two extremes, closer to
   their midpoint" is a real, non-tautological check).
+- **Alpha-compositing regression**: confirm `wm-glass` (the existing
+  glass-demo smoke test) still passes after the `WM_FORMAT_ARGB8888`
+  change, with `wmdemo.c`'s one-line fix applied -- this is the
+  concrete check that the automatic-ARGB8888-for-glass change did not
+  silently break the one glass surface that already existed before
+  this milestone.
 - **Taskbar + start menu end-to-end**: a new target boots `wm.nex` +
   `taskbar.nex`, confirms (serial log) the taskbar surface mapped and
   drew without error, then drives a synthetic click at the Start
