@@ -312,13 +312,13 @@ $(DISK_IMG): $(BUILD_DIR)/embedfs_table.c $(USERLAND_BUILD)/TERM.ELF $(USERLAND_
 	@# actually been built at WM_DIR -- the same "you get what you
 	@# built" signal PORT_DIRS uses below -- not a separate flag.
 	@if [ -f "$(WM_DIR)/build/WM.ELF" ]; then \
-		mmd -i $(DISK_IMG) ::usr/local 2>/dev/null || true; \
-		mmd -i $(DISK_IMG) ::usr/local/bin 2>/dev/null || true; \
+		mmd -D s -i $(DISK_IMG) ::usr/local 2>/dev/null || true; \
+		mmd -D s -i $(DISK_IMG) ::usr/local/bin 2>/dev/null || true; \
 		./tools/nexify.sh $(WM_DIR)/build/WM.ELF $(BUILD_DIR)/wm.nex; \
 		mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/wm.nex ::usr/local/bin/wm.nex; \
-		mmd -i $(DISK_IMG) ::usr/share/icons 2>/dev/null || true; \
-		mmd -i $(DISK_IMG) ::usr/share/icons/gm_cursors 2>/dev/null || true; \
-		mmd -i $(DISK_IMG) ::usr/share/icons/gm_cursors/cursors 2>/dev/null || true; \
+		mmd -D s -i $(DISK_IMG) ::usr/share/icons 2>/dev/null || true; \
+		mmd -D s -i $(DISK_IMG) ::usr/share/icons/gm_cursors 2>/dev/null || true; \
+		mmd -D s -i $(DISK_IMG) ::usr/share/icons/gm_cursors/cursors 2>/dev/null || true; \
 	mcopy -o -i $(DISK_IMG) $(WM_DIR)/assets/icons/gm_cursors/cursors/default ::usr/share/icons/gm_cursors/cursors/default; \
 		echo "disk: neoos-wm found at $(WM_DIR) -- wm.nex and gm_cursors installed"; \
 	else \
@@ -331,8 +331,8 @@ $(DISK_IMG): $(BUILD_DIR)/embedfs_table.c $(USERLAND_BUILD)/TERM.ELF $(USERLAND_
 	@# WM_DIR/PORT_DIRS use above -- wm is not opt-in the way a port is,
 	@# so this is not gated on PORT_DIRS.
 	@if [ -d "$(MESA_DIR)/build-output-runtime-libs" ]; then \
-		mmd -i $(DISK_IMG) ::lib 2>/dev/null || true; \
-		mmd -i $(DISK_IMG) ::lib/dri 2>/dev/null || true; \
+		mmd -D s -i $(DISK_IMG) ::lib 2>/dev/null || true; \
+		mmd -D s -i $(DISK_IMG) ::lib/dri 2>/dev/null || true; \
 		for f in libOSMesa.so.8 libglapi.so.0 libstdc++.so.6 libgcc_s.so.1 libc.so ld-musl-x86_64.so.1 \
 		         libEGL.so.1 libGL.so.1 dri/swrast_dri.so; do \
 			if [ -f "$(MESA_DIR)/build-output-runtime-libs/$$f" ]; then \
@@ -346,8 +346,8 @@ $(DISK_IMG): $(BUILD_DIR)/embedfs_table.c $(USERLAND_BUILD)/TERM.ELF $(USERLAND_
 		echo "disk: no $(MESA_DIR)/build-output-runtime-libs -- if wm.nex is Mesa-linked, it will fail to start"; \
 	fi
 	@if [ -f "$(WM_DIR)/build/TASKBAR.ELF" ]; then \
-		mmd -i $(DISK_IMG) ::usr/local 2>/dev/null || true; \
-		mmd -i $(DISK_IMG) ::usr/local/bin 2>/dev/null || true; \
+		mmd -D s -i $(DISK_IMG) ::usr/local 2>/dev/null || true; \
+		mmd -D s -i $(DISK_IMG) ::usr/local/bin 2>/dev/null || true; \
 		./tools/nexify.sh $(WM_DIR)/build/TASKBAR.ELF $(BUILD_DIR)/taskbar.nex; \
 		./tools/nexify.sh $(WM_DIR)/build/STARTMENU.ELF $(BUILD_DIR)/startmenu.nex; \
 		mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/taskbar.nex ::usr/local/bin/taskbar.nex; \
@@ -359,16 +359,16 @@ $(DISK_IMG): $(BUILD_DIR)/embedfs_table.c $(USERLAND_BUILD)/TERM.ELF $(USERLAND_
 	@echo "disk: PORT_DIRS=$(PORT_DIRS)"
 	@for pair in $(PORT_DIRS); do \
 		name=$${pair%%=*}; path=$${pair#*=}; \
-		mmd -i $(DISK_IMG) ::usr/local 2>/dev/null || true; \
-		mmd -i $(DISK_IMG) ::usr/local/bin 2>/dev/null || true; \
+		mmd -D s -i $(DISK_IMG) ::usr/local 2>/dev/null || true; \
+		mmd -D s -i $(DISK_IMG) ::usr/local/bin 2>/dev/null || true; \
 		for f in "$$path"/*; do \
 			base=$$(basename "$$f"); \
 			case "$$base" in \
 				*.test.json|*.manifest.json) continue ;; \
 				*.nex) mcopy -i $(DISK_IMG) "$$f" "::usr/local/bin/$$base"; continue ;; \
 			esac; \
-			mmd -i $(DISK_IMG) ::opt 2>/dev/null || true; \
-			mmd -i $(DISK_IMG) "::opt/$$name" 2>/dev/null || true; \
+			mmd -D s -i $(DISK_IMG) ::opt 2>/dev/null || true; \
+			mmd -D s -i $(DISK_IMG) "::opt/$$name" 2>/dev/null || true; \
 			mcopy -i $(DISK_IMG) "$$f" "::opt/$$name/$$base"; \
 		done; \
 	done
@@ -428,7 +428,7 @@ $(DISK_IMG): $(BUILD_DIR)/embedfs_table.c $(USERLAND_BUILD)/TERM.ELF $(USERLAND_
 	  "neo:1000:1000:/home/neo:/bin/nsh.nex:$$(openssl passwd -6 -salt neoosusr neo)" \
 	  > $(DISK_SRC)/passwd
 	@mcopy -o -i $(DISK_IMG) $(DISK_SRC)/passwd ::etc/passwd
-	@mmd -i $(DISK_IMG) ::home/neo 2>/dev/null || true
+	@mmd -D s -i $(DISK_IMG) ::home/neo 2>/dev/null || true
 	@# /etc/resolv.conf -- 10.0.2.3 is slirp's own built-in DNS
 	@# resolver (QEMU_NETDEV's default), the same server
 	@# net/dnsprobe.c's boot-time selftest already queries directly.
@@ -1245,18 +1245,18 @@ desktop: iso disk-image
 	./tools/nexify.sh $(WM_ELF) $(BUILD_DIR)/wm.nex
 	./tools/nexify.sh $(TASKBAR_ELF) $(BUILD_DIR)/taskbar.nex
 	./tools/nexify.sh $(STARTMENU_ELF) $(BUILD_DIR)/startmenu.nex
-	mmd -i $(DISK_IMG) ::usr/local/bin 2>/dev/null || true
+	mmd -D s -i $(DISK_IMG) ::usr/local/bin 2>/dev/null || true
 	mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/wm.nex ::usr/local/bin/wm.nex
 	mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/taskbar.nex ::usr/local/bin/taskbar.nex
 	mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/startmenu.nex ::usr/local/bin/startmenu.nex
-	mmd -i $(DISK_IMG) ::lib 2>/dev/null || true
-	mmd -i $(DISK_IMG) ::lib/dri 2>/dev/null || true
+	mmd -D s -i $(DISK_IMG) ::lib 2>/dev/null || true
+	mmd -D s -i $(DISK_IMG) ::lib/dri 2>/dev/null || true
 	@for f in libOSMesa.so.8 libglapi.so.0 libstdc++.so.6 libgcc_s.so.1 libc.so ld-musl-x86_64.so.1 \
 	         libEGL.so.1 libGL.so.1 dri/swrast_dri.so; do \
 		mcopy -o -i $(DISK_IMG) "$(MESA_DIR)/build-output-runtime-libs/$$f" "::lib/$$f" || exit 1; \
 	done
 	@for d in usr/share usr/share/icons usr/share/icons/gm_cursors usr/share/icons/gm_cursors/cursors; do \
-		mmd -i $(DISK_IMG) ::$$d 2>/dev/null || true; done
+		mmd -D s -i $(DISK_IMG) ::$$d 2>/dev/null || true; done
 	mcopy -o -i $(DISK_IMG) $(WM_DIR)/assets/icons/gm_cursors/cursors/default ::usr/share/icons/gm_cursors/cursors/default
 	@printf '%s\n' \
 	  '# generated by `make desktop`' \
@@ -1347,7 +1347,7 @@ dyntest: iso disk-image $(BUILD_DIR)/dyntest.elf $(BUILD_DIR)/dynlib.so
 	mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/dyntest.nex ::dyntest.nex
 	@# musl's libc.so IS the dynamic linker. The path is the one the
 	@# executable recorded in PT_INTERP.
-	mmd -i $(DISK_IMG) ::lib 2>/dev/null || true
+	mmd -D s -i $(DISK_IMG) ::lib 2>/dev/null || true
 	mcopy -o -i $(DISK_IMG) $(NEOOS_SYSROOT)/lib/libc.so ::lib/ld-musl-x86_64.so.1
 	mcopy -o -i $(DISK_IMG) $(BUILD_DIR)/dynlib.so ::lib/dynlib.so
 	@printf '%s\n' \
