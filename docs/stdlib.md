@@ -1028,9 +1028,32 @@ draw cycle -- except the compositor composites the resulting surface
 through its built-in Liquid-Glass shader (`WM_SURFACE_GLASS` in
 `wmproto.h`): it snapshots whatever is behind the surface's screen
 rect, refracts and tints it, and draws the client's own content on top
-of that lensed backdrop instead of a flat opaque blit. This is purely
-a compositor-side rendering choice; the wire protocol carries no extra
-message or field for it.
+of that lensed backdrop instead of a flat opaque blit.
+
+`wm_create_surface_ex(c, x, y, w, h, flags, glass_intensity, title)` is
+the general entry point `wm_create_window`/`wm_create_glass_window`/
+`wm_create_shell` are thin wrappers over:
+
+- `x, y` are honored only when `flags` includes `WM_SURFACE_FIXED_POS`
+  -- the compositor positions the surface exactly there instead of its
+  usual cascade placement. Meant for docked desktop chrome (a taskbar,
+  a popup menu), not ordinary application windows.
+- `glass_intensity` (0-100) is honored only when `flags` includes
+  `WM_SURFACE_GLASS`: 100 (the default every existing caller gets) is
+  the shader's full, unmodified refraction+tint effect; lower values
+  blend the shaded result back toward the original unshaded backdrop,
+  for a lighter frost that leaves more of what is behind the surface
+  recognizable.
+- Any `WM_SURFACE_GLASS` surface's pixel buffer is automatically
+  `WM_FORMAT_ARGB8888` (real, straight, per-pixel alpha in the top
+  byte) rather than the opaque `WM_FORMAT_XRGB8888` every other
+  surface uses -- a client never requests this directly. A fully
+  transparent pixel (alpha 0) leaves the shaded backdrop showing
+  through; alpha 255 is fully opaque; anything between blends. This is
+  what makes a mostly-see-through glass panel with a few fully-opaque
+  UI elements on it possible -- `glass_intensity` alone only controls
+  how strong the lensing looks *underneath* whatever is opaque, not
+  how much of the surface is opaque in the first place.
 
 Events arrive through `wm_poll_event`, which never blocks: pointer
 motion (surface-relative), pointer buttons, keys, focus changes, and
