@@ -19,6 +19,7 @@
 #include "drivers/pci/pci.h"
 #include "drivers/char/timer.h"
 #include "time/hrtimer.h"
+#include "time/wheel.h"
 #include "drivers/char/rtc.h"
 #include "tty/tty.h"
 #include "drivers/input/keyboard.h"
@@ -381,6 +382,8 @@ void kmain(void *multiboot_info) {
     // AFTER process_init: it starts a kernel thread. The queue would
     // simply fill and drop without one, which is why the driver may be
     // brought up first.
+    wheel_init();          // before anything arms a timer_list (TCP, ARP)
+    wheel_selftest();
     netrx_start();
     tcp_timer_start();
     dhcp_start(net_device());
@@ -472,6 +475,7 @@ void kmain(void *multiboot_info) {
     // After the spawns so the selftest's own kernel threads draw ids
     // above the real processes', keeping pids stable across boots.
     waitq_selftest_start();
+    wheel_selftest_start();
     signal_selftest_start();
     futex_selftest();
     smp_parallel_selftest_start();
