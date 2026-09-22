@@ -1,6 +1,5 @@
 #include "drivers/char/timer.h"
 #include "drivers/char/pit.h"
-#include "drivers/irq/lapic.h"
 #include "drivers/char/serial.h"
 #include "arch/cpu.h"
 #include "sync/waitq.h"
@@ -9,51 +8,27 @@
 #include "sched/rq.h"
 #include "time/ktime.h"
 #include "time/clockevent.h"
+#include "time/hrtimer.h"
 
-#define TICKS_PER_LOG 100          // 100Hz wall clock -> log once per second
-#define HOUSE_NS      10000000ULL  // 10 ms: wall-clock cadence + max one-shot
+#define TICKS_PER_LOG 100          // 100Hz tick -> log once per second
+#define HOUSE_NS      10000000ULL  // 10 ms: the housekeeping tick's period
 
-// SCH-1 Task 4: the LAPIC timer now runs in ONE-SHOT mode. timer_handler
-// re-arms it on every interrupt for the running task's remaining slice
-// (fair_slice_remaining_ns), capped at HOUSE_NS so the wall clock never
-// goes more than 10 ms without an update. Preemption is therefore
-// event-driven -- a 0.7 ms base slice actually means 0.7 ms, not the old
-// fixed 50 ms -- while an idle CPU still only wakes at 100 Hz.
-//
-// DEBUG_HZ (kernel build knob) is now a no-op: preemption granularity is
-// the per-task slice, tunable at runtime via sched_setattr.
-
-// The floor and ceiling the LAPIC one-shot is armed within. The floor
-// is an interrupt-storm guard; the ceiling keeps the BSP's housekeeping
-// (the once-a-second log, expiring timed sleeps) running every tick.
-#define MIN_ARM_NS (HOUSE_NS / 20)   // 500 us
+// The timer vector is hrtimer_interrupt (kernel/time/hrtimer.c): every
+// CPU's LAPIC timer is armed for the earliest of its hrtimers. The old
+// 10 ms tick survives as one of them -- tick_fn below, periodic, per
+// CPU -- until tickless idle removes it.
 
 // Both clocks are derived from ktime (the TSC) now, so neither can
 // drift the way the old armed-interval accumulator did.
 uint64_t timer_ticks(void) { return ktime_get_ns() / TICK_NS; }
 uint64_t sched_clock_ns(void) { return ktime_get_ns(); }
 
-// Arms this CPU's one-shot for the running task's remaining slice,
-// clamped to the range the LAPIC is actually programmed within.
-static void timer_arm_next(struct cpu *c) {
-    uint64_t next_ns = HOUSE_NS;
-    if (c->current) {
-        uint64_t rem = sched_slice_remaining_ns(&c->rq);
-        if (rem < next_ns) { next_ns = rem; }
-    }
-    if (next_ns < MIN_ARM_NS) { next_ns = MIN_ARM_NS; }
-    if (next_ns > HOUSE_NS)   { next_ns = HOUSE_NS; }
-    clockevent_program(ktime_get_ns() + next_ns);
-}
-
-// EVERY CPU takes this from its own LAPIC one-shot. Only the BSP runs
-// the shared per-tick housekeeping (see timer_handler).
 // System-wide CPU accounting, in timer ticks, summed across CPUs.
 //
-// Sampled here because this is the one place that runs regardless of
-// what the CPU is doing: whatever thread the tick interrupted is what
-// that CPU was running for the interval just elapsed. The idle thread
-// is the marker -- a CPU running it had nothing else to do.
+// Sampled by the tick because it runs regardless of what the CPU is
+// doing: whatever thread the tick interrupted is what that CPU was
+// running for the interval just elapsed. The idle thread is the marker
+// -- a CPU running it had nothing else to do.
 static volatile uint64_t cpu_busy_ticks, cpu_idle_ticks;
 
 void cpu_usage_ticks(uint64_t *busy, uint64_t *idle) {
@@ -61,7 +36,12 @@ void cpu_usage_ticks(uint64_t *busy, uint64_t *idle) {
     if (idle) { *idle = cpu_idle_ticks; }
 }
 
-void timer_handler(void) {
+// The legacy 10 ms housekeeping tick, now just a periodic hrtimer per
+// CPU. Its body is the old timer_handler minus the clock bookkeeping
+// ktime made unnecessary.
+static struct hrtimer tick_timer[MAX_CPUS];
+
+static enum hrtimer_restart tick_fn(struct hrtimer *t) {
     struct cpu *c = this_cpu();
     c->timer_ticks_local++;
 
@@ -76,7 +56,7 @@ void timer_handler(void) {
     }
 
     // The BSP runs the per-tick housekeeping once for every 10 ms of
-    // real (TSC) time that has passed, however the one-shots fell.
+    // real (TSC) time that has passed, however the interrupts fell.
     if (c == &cpus[0]) {
         static uint64_t last_tick;
         uint64_t now_tick = timer_ticks();
@@ -98,29 +78,13 @@ void timer_handler(void) {
     // the BSP, ap_main on an AP) with no thread to save that context
     // into. tlb_shootdown enables interrupts while waiting for acks, and
     // a tick landing in that window would strand the BSP mid-kmain.
-    int resched = c->current ? sched_tick(&c->rq) : 0;
+    if (c->current && sched_tick(&c->rq)) { hrtimer_request_resched(); }
 
-    // ARM THE NEXT ONE-SHOT BEFORE schedule(), not after.
-    //
-    // A one-shot that is not re-armed is a timer that has stopped, and
-    // schedule() does not come back here in the ordinary sense: it
-    // switches stacks, and this frame resumes only when the task we just
-    // preempted is picked again -- which, on a CPU whose timer we just
-    // let die, may be never. The BSP would take its first mid-handler
-    // preemption and stop ticking for the rest of the boot, taking the
-    // shared wall clock (above) with it and hanging every timed sleep in
-    // the system. Measured before this: fewer than 500 BSP timer
-    // interrupts across a two-minute boot, and a 100 ms epoll_wait that
-    // never returned.
-    //
-    // The interval is computed for the task being preempted rather than
-    // the one about to be picked, which is the price for arming first:
-    // the next task may be interrupted up to one HOUSE_NS early and get
-    // the rest of its slice on the following one-shot.
-    timer_arm_next(c);
-
-    if (resched) { schedule(); }
+    hrtimer_forward_now(t, HOUSE_NS);
+    return HRTIMER_RESTART;
 }
+
+void timer_handler(void) { hrtimer_interrupt(); }
 
 void timer_init(void) {
     uint64_t tsc_per_10ms;
@@ -140,6 +104,9 @@ void timer_init(void) {
 // never preempted. Calibration is not repeated -- the count is the same
 // on every core.
 void timer_init_this_cpu(void) {
+    int idx = (int)(this_cpu() - &cpus[0]);
+    hrtimer_cpu_init();
     clockevent_init_this_cpu();
-    clockevent_program(ktime_get_ns() + HOUSE_NS);
+    hrtimer_init(&tick_timer[idx], tick_fn);
+    hrtimer_start(&tick_timer[idx], ktime_get_ns() + HOUSE_NS);
 }

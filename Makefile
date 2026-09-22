@@ -597,6 +597,7 @@ BOOT_MARKER  ?= NeoOS: interrupts enabled, starting scheduler
 # see docs/superpowers/specs/2026-09-05-embedded-test-and-app-architecture.md.
 CORE_REQUIRED_MARKERS := \
 	"[hrtimer] clockevent: " \
+	"[hrtimer] selftest passed" \
 	"[pci] ALL PASSED" \
 	"[virtio-net] ALL PASSED" \
 	"[route] ALL PASSED" \

@@ -18,6 +18,7 @@
 #include "drivers/irq/ioapic.h"
 #include "drivers/pci/pci.h"
 #include "drivers/char/timer.h"
+#include "time/hrtimer.h"
 #include "drivers/char/rtc.h"
 #include "tty/tty.h"
 #include "drivers/input/keyboard.h"
@@ -169,6 +170,7 @@ void kmain(void *multiboot_info) {
     serial_write_string("[ioapic] initialized\n");
 
     timer_init();
+    hrtimer_selftest();   // opens interrupts only while it waits
     // AFTER timer_init: the RTC anchor is stored as "epoch at tick
     // zero", so it needs a tick counter that already means something.
     tty_init();
