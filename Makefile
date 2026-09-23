@@ -53,7 +53,7 @@ ISO_DIR := iso
 # act: a stray .c file in a new folder should fail to link, not get
 # picked up silently.
 KERNEL_DIRS := kernel kernel/arch kernel/drivers/video kernel/drivers/input \
-	kernel/drivers/block kernel/block kernel/drivers/char kernel/drivers/irq kernel/drivers/acpi \
+	kernel/drivers/block kernel/drivers/block/ahci kernel/block kernel/drivers/char kernel/drivers/irq kernel/drivers/acpi \
 	kernel/drivers/pci kernel/drivers/virtio kernel/drivers/net kernel/drivers/audio \
 	kernel/tty kernel/ipc kernel/smp \
 	kernel/syscall kernel/mm kernel/fs kernel/sched kernel/sync kernel/net kernel/lib \
@@ -482,13 +482,27 @@ endif
 QEMU_NETDEV ?= user,id=net0
 QEMU_NET := -netdev $(QEMU_NETDEV) -device virtio-net-pci,netdev=net0
 
+# storage-02: disk.img is the first disk on an AHCI controller (sda, /);
+# the boot ISO also sits on its second port as a SATA CD-ROM (sr0, read
+# only -- both opens share a read lock). disk2.img stays the plain first
+# IDE -drive (primary master, sdb) until storage-03 moves it to NVMe.
+# The controller is pinned at slot 7 and named LAST: auto-assignment
+# must never take AC97's slot 6 or move virtio-net's, whose IRQ reroute
+# depends on where it is. See
+# docs/superpowers/specs/2026-09-23-storage-02-ahci-design.md section 6.
+QEMU_AHCI = -device ahci,id=sata,addr=0x7 \
+	-drive file=$(DISK_IMG),format=raw,if=none,id=sata0 -device ide-hd,drive=sata0,bus=sata.0 \
+	-drive file=$(BUILD_DIR)/neoos.iso,format=raw,if=none,id=sata1,media=cdrom,readonly=on \
+	-device ide-cd,drive=sata1,bus=sata.1
+
 QEMU_COMMON := $(QEMU_MACHINE) -smp $(SMP_CPUS) -boot order=d \
 	-cdrom $(BUILD_DIR)/neoos.iso \
-	-drive file=$(DISK_IMG),format=raw -drive file=$(DISK2_IMG),format=raw \
+	-drive file=$(DISK2_IMG),format=raw \
 	-vga std \
 	$(QEMU_NET) \
 	-audiodev wav,id=ac97wav,path=$(BUILD_DIR)/ac97-test.wav \
 	-device AC97,audiodev=ac97wav,addr=0x6 \
+	$(QEMU_AHCI) \
 	-no-reboot
 
 # -vga std: the plain Bochs-VBE standard VGA -- a dumb linear
@@ -619,6 +633,8 @@ CORE_REQUIRED_MARKERS := \
 	"[blkcache] selftest passed" \
 	"[mmio] selftest passed" \
 	"[ata_id] selftest passed" \
+	"[ahci] port 0: sda " \
+	"[boot] root: sda via ahci" \
 	"[blockdev] sda: sectors=" \
 	"[tty] selftest passed" \
 	"[wxorx] kernel selftest passed" \
@@ -861,11 +877,12 @@ epolltcp: iso disk-image $(USERLAND_BUILD)/EPOLLTCP.ELF
 	@# rather than for a fixed sleep.
 	@timeout $(BOOT_TIMEOUT) qemu-system-x86_64 $(QEMU_MACHINE) -smp $(SMP_CPUS) \
 		-boot order=d -cdrom $(BUILD_DIR)/neoos.iso \
-		-drive file=$(DISK_IMG),format=raw -drive file=$(DISK2_IMG),format=raw \
+		-drive file=$(DISK2_IMG),format=raw \
 		-vga std \
 		-netdev user,id=net0,hostfwd=tcp::$(EPOLLTCP_PORT)-:30000 \
 		-device virtio-net-pci,netdev=net0 \
 		-audiodev none,id=ac97null -device AC97,audiodev=ac97null,addr=0x6 \
+		$(QEMU_AHCI) \
 		-no-reboot -display none -serial file:$(BUILD_DIR)/epolltcp.log \
 		> /dev/null 2>&1 & echo $$! > $(BUILD_DIR)/epolltcp.qemu.pid
 	@tools/epolltcp-drive.sh $(EPOLLTCP_PORT) $(EPOLLTCP_CONC) $(EPOLLTCP_REQS) \
@@ -1159,10 +1176,11 @@ wm-taskbar: iso disk-image
 	@SOCK=$$(mktemp -u /tmp/neoos-qmon-XXXX.sock); \
 	LOG=$(BUILD_DIR)/wm-taskbar.log; \
 	qemu-system-x86_64 -cpu Nehalem -smp 4 -m $(DESKTOP_MEM) -boot order=d \
-	  -cdrom build/neoos.iso -drive file=$(DISK_IMG),format=raw \
+	  -cdrom build/neoos.iso \
 	  -drive file=$(DISK2_IMG),format=raw -vga std \
 	  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
 	  -audiodev none,id=a0 -device AC97,audiodev=a0,addr=0x6 \
+	  $(QEMU_AHCI) \
 	  -no-reboot -display none -serial file:$$LOG \
 	  -monitor "unix:$$SOCK,server,nowait" & \
 	QPID=$$!; \

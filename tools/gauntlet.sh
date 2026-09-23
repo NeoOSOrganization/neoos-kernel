@@ -126,9 +126,13 @@ boot_one() {   # $1 = tag
   # TCG/Nehalem -- the flake signatures below are tuned for it.
   timeout $TIMEOUT qemu-system-x86_64 $GAUNTLET_MACHINE -smp 4 -boot order=d -vga std \
     -cdrom build/neoos.iso \
-    -drive file="$WORK/d1.$t",format=raw -drive file="$WORK/d2.$t",format=raw \
+    -drive file="$WORK/d2.$t",format=raw \
     -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
     -audiodev none,id=ac97null -device AC97,audiodev=ac97null,addr=0x6 \
+    -device ahci,id=sata,addr=0x7 \
+    -drive file="$WORK/d1.$t",format=raw,if=none,id=sata0 -device ide-hd,drive=sata0,bus=sata.0 \
+    -drive file=build/neoos.iso,format=raw,if=none,id=sata1,media=cdrom,readonly=on \
+    -device ide-cd,drive=sata1,bus=sata.1 \
     -no-reboot -display none -serial file:"$WORK/serial.$t" \
     > /dev/null 2>"$WORK/qemu.err.$t"
   rm -f "$WORK/d1.$t" "$WORK/d2.$t"

@@ -27,10 +27,14 @@ rm -f "$OUT"
 rm -f "$LOG"
 
 qemu-system-x86_64 -cpu Nehalem -smp 4 -m "${DESKTOP_MEM:-512}" -boot order=d \
-  -cdrom build/neoos.iso -drive file=build/disk.img,format=raw \
+  -cdrom build/neoos.iso \
   -drive file=build/disk2.img,format=raw -vga std \
   -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
   -audiodev none,id=a0 -device AC97,audiodev=a0,addr=0x6 \
+  -device ahci,id=sata,addr=0x7 \
+  -drive file=build/disk.img,format=raw,if=none,id=sata0 -device ide-hd,drive=sata0,bus=sata.0 \
+  -drive file=build/neoos.iso,format=raw,if=none,id=sata1,media=cdrom,readonly=on \
+  -device ide-cd,drive=sata1,bus=sata.1 \
   -no-reboot -display none -serial file:$LOG \
   -monitor "unix:$SOCK,server,nowait" &
 QPID=$!

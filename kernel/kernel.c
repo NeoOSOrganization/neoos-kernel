@@ -21,6 +21,7 @@
 #include "drivers/pci/pci.h"
 #include "mm/mmio.h"
 #include "drivers/block/ata_id.h"
+#include "drivers/block/ahci/ahci.h"
 #include "drivers/char/timer.h"
 #include "time/hrtimer.h"
 #include "time/wheel.h"
@@ -254,6 +255,7 @@ void kmain(void *multiboot_info) {
     blkcache_selftest();
     // Controller probes register disks and, through the partition scan,
     // their partitions. (AHCI and NVMe will probe before legacy ATA.)
+    ahci_probe();
     ata_probe();
 
     fat16_mount();
