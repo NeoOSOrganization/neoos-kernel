@@ -210,6 +210,8 @@ void ahci_req_init(struct ahci_req *r);
 
 // Most commands in flight on this port at once since boot.
 uint32_t ahci_port_max_inflight(struct ahci_port *p);
+// Error-recovery rounds run on this port since boot.
+uint32_t ahci_port_recoveries(struct ahci_port *p);
 
 void ahci_log_port(struct ahci_port *p);          // "[ahci] port N: " (+ "hbaH " if H > 0)
 void ahci_log_dec(uint64_t v);

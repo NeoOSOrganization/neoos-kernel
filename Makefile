@@ -1429,6 +1429,25 @@ blkdevtest: iso disk-image $(BUILD_DIR)/blkdevtest.elf
 	@grep -aE '^blkdevtest:|^PASS blkdevtest|PANIC|\[exception\]' $(BUILD_DIR)/blkdevtest.log || true
 	@grep -aq '^PASS blkdevtest' $(BUILD_DIR)/blkdevtest.log || { echo "BLKDEVTEST FAILED"; exit 1; }
 
+# ahcitest -- AHCI error recovery (storage-02). A third SATA disk,
+# zeroed and marked serial=NEOOSSCRATCH, sits behind QEMU's blkdebug
+# driver, which fails every read covering its sector 4096
+# (tools/ahci-blkdebug.conf). The kernel finds it by serial and checks
+# that queued writes round-trip and that one bad read among concurrent
+# queued reads fails alone -- the NCQ recovery path, which no healthy
+# boot reaches. Solo: its scratch disk becomes sdb, so /mnt does not
+# mount the usual image and this is no substitute for `make test`.
+AHCI_SCRATCH := $(BUILD_DIR)/ahci-scratch.img
+.PHONY: ahcitest
+ahcitest: iso disk-image
+	@rm -f $(AHCI_SCRATCH); truncate -s 8M $(AHCI_SCRATCH)
+	@tools/boot_until.sh $(BUILD_DIR)/ahcitest.log '^\[ahci\] scratch selftest (passed|FAILED)' $(BOOT_TIMEOUT) -- $(QEMU_COMMON) -display none \
+		-drive driver=raw,file.driver=blkdebug,file.config=tools/ahci-blkdebug.conf,file.image.driver=file,file.image.filename=$(AHCI_SCRATCH),if=none,id=sata2 \
+		-device ide-hd,drive=sata2,bus=sata.2,serial=NEOOSSCRATCH
+	@grep '^\[ahci\]' $(BUILD_DIR)/ahcitest.log
+	@grep -q '^\[ahci\] scratch selftest passed' $(BUILD_DIR)/ahcitest.log || { echo "ahcitest: FAILED"; exit 1; }
+	@echo "PASS ahcitest"
+
 # powertest / powertest-reboot -- init's signal-driven shutdown (desktop
 # M0 task 6): SIGUSR2 -> power off, SIGTERM -> reboot, with a child that
 # ignores SIGTERM to exercise the SIGKILL fallback. Success is init's log

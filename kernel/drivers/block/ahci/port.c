@@ -27,6 +27,7 @@ static inline void cpu_pause(void) { __asm__ volatile("pause" ::: "memory"); }
 static inline void dma_wmb(void) { __asm__ volatile("sfence" ::: "memory"); }
 
 static uint32_t max_inflight[AHCI_MAX_HBAS][AHCI_MAX_PORTS];
+static uint32_t recoveries[AHCI_MAX_HBAS][AHCI_MAX_PORTS];
 
 // ---- logging ----------------------------------------------------------
 
@@ -62,6 +63,7 @@ void ahci_log_regs(struct ahci_port *p) {
 }
 
 uint32_t ahci_port_max_inflight(struct ahci_port *p) { return max_inflight[p->hba->index][p->num]; }
+uint32_t ahci_port_recoveries(struct ahci_port *p) { return recoveries[p->hba->index][p->num]; }
 
 // ---- lifecycle --------------------------------------------------------
 
@@ -286,8 +288,10 @@ int ahci_build_prdt(uint8_t *table, const void *buf, uint32_t len, int s64a) {
 
 void ahci_req_init(struct ahci_req *r) { zero(r, sizeof *r); r->slot = -1; }
 
-// Caller holds the lock. Finishes one slot's request.
-static void complete_slot(struct ahci_port *p, int s, int status) {
+// Caller holds the lock. Finishes one slot's request, recording `tfd`
+// (the task file as the command left it -- an ATAPI sense key lives in
+// its error byte).
+static void complete_slot_tfd(struct ahci_port *p, int s, int status, uint32_t tfd) {
     struct ahci_req *r = p->slot_req[s];
     uint32_t bit = 1u << s;
     p->slot_req[s] = 0;
@@ -296,7 +300,6 @@ static void complete_slot(struct ahci_port *p, int s, int status) {
     if (r && !r->ncq) { p->exclusive = 0; }
     if (!p->busy) { p->active_pmp = -1; }
     if (r) {
-        uint32_t tfd = px_r32(p, PX_TFD);
         r->tfd_status = (uint8_t)tfd;
         r->tfd_error = (uint8_t)(tfd >> 8);
         r->status = status;
@@ -304,6 +307,10 @@ static void complete_slot(struct ahci_port *p, int s, int status) {
         __asm__ volatile("" ::: "memory");
         r->done = 1;
     }
+}
+
+static void complete_slot(struct ahci_port *p, int s, int status) {
+    complete_slot_tfd(p, s, status, px_r32(p, PX_TFD));
 }
 
 // Caller holds the lock; the request has been checked issuable. Builds
@@ -344,18 +351,29 @@ static int issue_locked(struct ahci_port *p, struct ahci_req *r, int s) {
 }
 
 static void ahci_recover_locked(struct ahci_port *p);
+static int can_issue(struct ahci_port *p, struct ahci_req *r);
+static int free_slot(struct ahci_port *p);
 
-// Caller holds the lock. Completes finished slots; runs recovery first
-// when the port has stopped on an error.
+// Caller holds the lock. Completes finished slots, runs recovery first
+// when the port has stopped on an error, and reissues requests that
+// recovery set aside as innocent.
 static void port_poll_locked(struct ahci_port *p) {
-    if (!p->busy) { return; }
-    if (px_r32(p, PX_IS) & PX_IS_ERRORS) {
-        ahci_recover_locked(p);
-        return;
+    if (p->busy) {
+        if (px_r32(p, PX_IS) & PX_IS_ERRORS) {
+            ahci_recover_locked(p);
+        } else {
+            uint32_t pending = px_r32(p, PX_CI) | px_r32(p, PX_SACT);
+            for (uint32_t b = p->busy & ~pending; b; b &= b - 1) {
+                complete_slot(p, __builtin_ctz(b), 0);
+            }
+        }
     }
-    uint32_t pending = px_r32(p, PX_CI) | px_r32(p, PX_SACT);
-    for (uint32_t b = p->busy & ~pending; b; b &= b - 1) {
-        complete_slot(p, __builtin_ctz(b), 0);
+    while (p->requeue && !p->dead && can_issue(p, p->requeue)) {
+        struct ahci_req *r = p->requeue;
+        p->requeue = r->next;
+        r->next = 0;
+        int rc = issue_locked(p, r, free_slot(p));
+        if (rc) { r->status = rc; r->done = 1; }
     }
 }
 
@@ -462,35 +480,222 @@ int ahci_exec(struct ahci_link *l, struct ahci_req *r) {
 }
 
 // ---- error recovery ---------------------------------------------------
+//
+// AHCI 1.3.1 section 6.2.2, with libata's NCQ analysis
+// (ata_eh_analyze_ncq_error). Runs under the port lock from
+// port_poll_locked, so a recovery command is issued and polled right
+// here with interrupts off: bounded (RECOVERY_CMD_NS) and only on the
+// error path, where holding off the tick for the milliseconds a READ LOG
+// takes is the price of never letting an ordinary submitter in between.
 
-// AHCI 1.3.1 section 6.2.2. Caller holds the lock. For now every request
-// in flight fails; NCQ tag analysis and reissue come with the error
-// recovery task.
+#define RECOVERY_CMD_NS 5000000000ULL
+
+// Stop, clear, un-hang, restart. Returns 0, or -EIO when the port could
+// not be brought back (the caller then marks it dead).
+static int port_restart(struct ahci_port *p, uint32_t is) {
+    px_w32(p, PX_CMD, px_r32(p, PX_CMD) & ~PX_CMD_ST);
+    int ok = ahci_wait_reg(p, PX_CMD, PX_CMD_CR, 0, 500000000ULL);
+    px_w32(p, PX_SERR, 0xFFFFFFFFu);
+    px_w32(p, PX_IS, is | px_r32(p, PX_IS));
+    if (ok && (px_r32(p, PX_TFD) & (TFD_BSY | TFD_DRQ))) {
+        ok = 0;
+        if (p->hba->sclo) {
+            px_w32(p, PX_CMD, px_r32(p, PX_CMD) | PX_CMD_CLO);
+            ok = ahci_wait_reg(p, PX_CMD, PX_CMD_CLO, 0, 500000000ULL) &&
+                 !(px_r32(p, PX_TFD) & (TFD_BSY | TFD_DRQ));
+        }
+    }
+    if (!ok) {
+        ahci_log_port(p);
+        serial_write_string("recovery: COMRESET\n");
+        if (ahci_port_comreset(p) != 1) { return -EIO; }
+    }
+    return ahci_port_start(p);
+}
+
+// Caller holds the lock and the port is idle. Issues one non-queued
+// command in slot 0 and polls it to completion. Returns 0 or -EIO (the
+// port is restarted after an error).
+static int exec_locked(struct ahci_port *p, struct ahci_req *r) {
+    r->slot = -1;
+    r->done = 0;
+    int rc = issue_locked(p, r, 0);
+    if (rc) { p->exclusive = 0; p->active_pmp = -1; return rc; }
+    uint64_t deadline = ktime_after_ns(RECOVERY_CMD_NS);
+    for (;;) {
+        uint32_t is = px_r32(p, PX_IS);
+        if (is & PX_IS_ERRORS) {
+            uint32_t tfd = px_r32(p, PX_TFD);
+            if (port_restart(p, is) != 0) { p->dead = 1; }
+            complete_slot_tfd(p, 0, -EIO, tfd);
+            return -EIO;
+        }
+        if (!(px_r32(p, PX_CI) & 1u)) { complete_slot(p, 0, 0); return 0; }
+        if (ktime_get_ns() >= deadline) {
+            if (port_restart(p, is) != 0) { p->dead = 1; }
+            complete_slot(p, 0, -ETIMEDOUT);
+            return -ETIMEDOUT;
+        }
+        cpu_pause();
+    }
+}
+
+// The NCQ Command Error log (page 10h): byte 0 bit 7 (NQ) set means the
+// error was not in a queued command; otherwise bits 4:0 are the failed
+// tag. Reading it also clears the device's NCQ error state. The 512-byte
+// buffer is the free kilobyte between the command list and the received
+// FIS in the port's own page.
+static int read_ncq_error_tag(struct ahci_port *p, uint8_t pmp) {
+    uint8_t *log = p->cl + 0x400;
+    struct ahci_req r;
+    ahci_req_init(&r);
+    ahci_fis_rw(r.fis, ATA_READ_LOG_EXT, 0x10, 1, pmp);
+    r.fis[7] = 0;
+    r.buf = log;
+    r.len = 512;
+    struct ahci_link l = { p, pmp, 0 };
+    r.link = &l;
+    if (exec_locked(p, &r) != 0) { return -1; }
+    if (log[0] & 0x80) { return -1; }
+    return log[0] & 0x1F;
+}
+
+// The NCQ request, reissued alone as READ/WRITE DMA (FUA) EXT --
+// libata's fallback when the log cannot name the culprit.
+static int single_step(struct ahci_port *p, struct ahci_req *q) {
+    const uint8_t *f = q->fis;
+    uint64_t lba = (uint64_t)f[4] | (uint64_t)f[5] << 8 | (uint64_t)f[6] << 16 |
+                   (uint64_t)f[8] << 24 | (uint64_t)f[9] << 32 | (uint64_t)f[10] << 40;
+    uint32_t count = (uint32_t)f[3] | (uint32_t)f[11] << 8;
+    if (!count) { count = 65536; }
+    int fua = (f[7] & 0x80) != 0;
+    struct ahci_req r;
+    ahci_req_init(&r);
+    uint8_t cmd = q->write ? (fua ? ATA_WRITE_DMA_FUA_EXT : ATA_WRITE_DMA_EXT) : ATA_READ_DMA_EXT;
+    ahci_fis_rw(r.fis, cmd, lba, count, (uint8_t)(f[1] & 0xF));
+    r.buf = q->buf;
+    r.len = q->len;
+    r.write = q->write;
+    r.link = q->link;
+    return exec_locked(p, &r);
+}
+
+static void finish(struct ahci_req *r, int status) {
+    r->status = status;
+    r->slot = -1;
+    __asm__ volatile("" ::: "memory");
+    r->done = 1;
+}
+
 static void ahci_recover_locked(struct ahci_port *p) {
-    uint32_t is = px_r32(p, PX_IS);
+    uint32_t is = px_r32(p, PX_IS), ci = px_r32(p, PX_CI), sact = px_r32(p, PX_SACT);
+    uint32_t tfd = px_r32(p, PX_TFD), cmd = px_r32(p, PX_CMD);
+    recoveries[p->hba->index][p->num]++;
     ahci_log_port(p);
     serial_write_string("error, recovering:");
     ahci_log_regs(p);
-    ahci_port_stop(p);
-    px_w32(p, PX_SERR, 0xFFFFFFFFu);
-    px_w32(p, PX_IS, is);
-    int ok = 1;
-    if (px_r32(p, PX_TFD) & (TFD_BSY | TFD_DRQ)) {
-        if (p->hba->sclo) {
-            px_w32(p, PX_CMD, px_r32(p, PX_CMD) | PX_CMD_CLO);
-            ok = ahci_wait_reg(p, PX_CMD, PX_CMD_CLO, 0, 500000000ULL);
-        } else {
-            ok = 0;
-        }
-        if (!ok) { ok = ahci_port_comreset(p) == 1; }
+
+    // 1. Anything whose bits already cleared completed successfully
+    // before the error: it must not share the failure.
+    for (uint32_t b = p->busy & ~(ci | sact); b; b &= b - 1) {
+        complete_slot_tfd(p, __builtin_ctz(b), 0, tfd);
     }
+
+    // 2. Take the rest off their slots; the port is restarted under them.
+    struct ahci_req *out[32];
+    int nout = 0, ncq = 0;
+    struct ahci_req *failed = 0;
+    int ccs = (int)PX_CMD_CCS(cmd);
     for (int s = 0; s < 32; s++) {
-        if (p->busy & (1u << s)) { complete_slot(p, s, -EIO); }
+        struct ahci_req *r = p->slot_req[s];
+        if (!(p->busy & (1u << s))) { continue; }
+        if (r && !r->ncq) { failed = r; }        // non-queued: it runs alone
+        else if (r) { out[nout++] = r; ncq = 1; }
+        p->slot_req[s] = 0;
     }
+    (void)ccs;
+    p->busy = 0;
+    p->ncq_busy = 0;
     p->exclusive = 0;
-    if (!ok || ahci_port_start(p) != 0) {
+    p->active_pmp = -1;
+
+    if (port_restart(p, is) != 0) {
         ahci_log_port(p);
         serial_write_string("recovery did not restart the port -- FAILED\n");
         p->dead = 1;
+        if (failed) { failed->tfd_status = (uint8_t)tfd; failed->tfd_error = (uint8_t)(tfd >> 8); finish(failed, -EIO); }
+        for (int i = 0; i < nout; i++) { finish(out[i], -EIO); }
+        return;
+    }
+
+    // 3. A non-queued command fails alone.
+    if (failed) {
+        failed->tfd_status = (uint8_t)tfd;
+        failed->tfd_error = (uint8_t)(tfd >> 8);
+        finish(failed, -EIO);
+    }
+    if (!ncq) { return; }
+
+    // 4. NCQ: the device aborted every queued command. The error log
+    // names the one that failed; the rest go back in the queue.
+    uint8_t pmp = out[0]->link ? out[0]->link->pmp : 0;
+    int tag = read_ncq_error_tag(p, pmp);
+    struct ahci_req *culprit = 0;
+    if (tag >= 0) {
+        for (int i = 0; i < nout; i++) {
+            if (out[i]->fis[12] >> 3 == tag) { culprit = out[i]; }
+        }
+    }
+    if (culprit) {
+        ahci_log_port(p);
+        serial_write_string("ncq error: tag ");
+        ahci_log_dec((uint64_t)tag);
+        serial_write_string(" from log 10h, requeueing ");
+        ahci_log_dec((uint64_t)(nout - 1));
+        serial_write_string("\n");
+        for (int i = 0; i < nout; i++) {
+            if (out[i] == culprit) { finish(culprit, -EIO); continue; }
+            out[i]->deadline = ktime_after_ns(AHCI_CMD_TIMEOUT_NS);
+            out[i]->next = p->requeue;
+            p->requeue = out[i];
+        }
+        return;
+    }
+
+    // 5. No usable log. Reading page 10h is what clears a device's NCQ
+    // error state; without it the device must be reset, or the next
+    // queued command fails too (QEMU does exactly that). Then reissue
+    // each one alone: only a command that fails on its own fails.
+    ahci_log_port(p);
+    serial_write_string("ncq error: log unavailable, resetting and single-stepping ");
+    ahci_log_dec((uint64_t)nout);
+    serial_write_string("\n");
+    ahci_port_stop(p);
+    if (ahci_port_comreset(p) != 1 || ahci_port_start(p) != 0) {
+        ahci_log_port(p);
+        serial_write_string("did not come back after reset -- FAILED\n");
+        p->dead = 1;
+    }
+    for (int i = 0; i < nout; i++) {
+        int rc = p->dead ? -EIO : single_step(p, out[i]);
+        finish(out[i], rc);
+    }
+
+    // 6. Revalidate, as libata's EH does: one non-queued command that
+    // succeeds. A failed single-step leaves ERR in the device's status,
+    // and a device may report that stale status with its next queued
+    // completion (QEMU does), failing an innocent command.
+    if (!p->dead) {
+        struct ahci_req r;
+        ahci_req_init(&r);
+        ahci_fis_rw(r.fis, ATA_IDENTIFY, 0, 0, pmp);
+        r.fis[7] = 0;
+        r.buf = p->cl + 0x400;
+        r.len = 512;
+        r.link = out[0]->link;
+        if (exec_locked(p, &r) != 0) {
+            ahci_log_port(p);
+            serial_write_string("revalidation after recovery FAILED\n");
+        }
     }
 }

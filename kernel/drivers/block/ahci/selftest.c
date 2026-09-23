@@ -109,6 +109,67 @@ static const char *ncq_checks(struct blockdev *d) {
     return why;
 }
 
+// make ahcitest only: a zeroed scratch disk whose sector 4096 fails
+// every read (QEMU blkdebug). Queued writes round-trip; then one bad
+// read among four concurrent ones must fail ALONE, and the port must
+// work afterwards.
+#define SCRATCH_BAD 4096
+static uint8_t scratch_buf[AHCI_BATCH][64 * 1024];
+
+static const char *scratch_checks(struct ahci_link *l, struct blockdev *d) {
+    struct ahci_req r[AHCI_BATCH];
+    uint64_t ref = pmm_alloc(4);
+    if (!ref) { return "pmm"; }
+    uint8_t *rb = (uint8_t *)phys_to_virt(ref);
+    const char *why = 0;
+
+    // 1. Eight queued 64 KiB writes (FUA or flushed), read back.
+    for (int i = 0; i < AHCI_BATCH; i++) {
+        for (int k = 0; k < 64 * 1024; k++) { scratch_buf[i][k] = (uint8_t)(i * 31 + k * 7); }
+    }
+    int n = 0;
+    for (; n < AHCI_BATCH; n++) {
+        ahci_disk_build(d, &r[n], (uint64_t)n * 512, 128, scratch_buf[n], 1);
+        if (ahci_submit(l, &r[n]) != 0) { why = "write submit"; break; }
+    }
+    for (int i = 0; i < n; i++) { if (ahci_wait(l, &r[i]) != 0 && !why) { why = "queued write"; } }
+    if (!why && blockdev_flush(d) != 0) { why = "flush"; }
+    for (int i = 0; i < AHCI_BATCH && !why; i++) {
+        if (blockdev_read(d, (uint64_t)i * 512, 128, rb) != 0 ||
+            !bytes_eq(rb, scratch_buf[i], 64 * 1024))            { why = "write read-back"; }
+    }
+
+    uint32_t rec0 = ahci_port_recoveries(l->port);
+    // 2. Four concurrent reads; only the one covering the bad sector
+    // may fail.
+    static const uint64_t lbas[4] = { 1000, SCRATCH_BAD - 6, 0, 2048 };
+    if (!why) {
+        for (n = 0; n < 4; n++) {
+            ahci_disk_build(d, &r[n], lbas[n], 16, scratch_buf[n], 0);
+            if (ahci_submit(l, &r[n]) != 0) { why = "read submit"; break; }
+        }
+        int st[4] = { 0, 0, 0, 0 };
+        for (int i = 0; i < n; i++) { st[i] = ahci_wait(l, &r[i]); }
+        if (!why) {
+            if (st[1] != -EIO)                                   { why = "bad sector read did not fail with EIO"; }
+            else if (st[0] || st[2] || st[3])                    { why = "an innocent queued read failed"; }
+        }
+        for (int i = 0; i < 4 && !why; i++) {
+            if (i == 1) { continue; }
+            if (blockdev_read(d, lbas[i], 16, rb) != 0 ||
+                !bytes_eq(rb, scratch_buf[i], 16 * 512))         { why = "innocent read returned wrong data"; }
+        }
+    }
+
+    // One bad sector is one error: an innocent command must not trip over
+    // the device's leftover NCQ error state afterwards.
+    if (!why && ahci_port_recoveries(l->port) != rec0 + 1)       { why = "more than one recovery for one bad read"; }
+    // 3. The port survived.
+    if (!why && blockdev_read(d, 100, 8, rb) != 0)               { why = "port dead after recovery"; }
+    pmm_free(ref, 4);
+    return why;
+}
+
 static struct blockdev *first_ahci_disk;
 static void find_disk(struct blockdev *d, void *arg) {
     (void)arg;
@@ -127,7 +188,13 @@ void ahci_selftest(void) {
         serial_write_string("[ahci] selftest FAILED: ");
         serial_write_string(why);
         serial_write_string("\n");
-        return;
+    } else {
+        serial_write_string("[ahci] selftest passed\n");
     }
-    serial_write_string("[ahci] selftest passed\n");
+    if (scratch_dev) {
+        why = scratch_checks(scratch_link, scratch_dev);
+        serial_write_string(why ? "[ahci] scratch selftest FAILED: " : "[ahci] scratch selftest passed");
+        serial_write_string(why ? why : "");
+        serial_write_string("\n");
+    }
 }
