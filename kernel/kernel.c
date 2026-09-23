@@ -20,6 +20,7 @@
 #include "drivers/char/timer.h"
 #include "time/hrtimer.h"
 #include "time/wheel.h"
+#include "fs/flock.h"
 #include "drivers/char/rtc.h"
 #include "tty/tty.h"
 #include "drivers/input/keyboard.h"
@@ -249,6 +250,7 @@ void kmain(void *multiboot_info) {
     fat16_write_selftest();
 
     vfs_init();
+    flock_init();          // POSIX record locks (fcntl F_SETLK)
     vfs_mount_fs("hd0", "/",    "fat");
     vfs_mount_fs(0,     "/dev", "devfs");
     vfs_mount_fs(0,     "/tmp", "ramfs");

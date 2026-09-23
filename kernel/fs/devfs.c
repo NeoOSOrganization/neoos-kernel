@@ -544,6 +544,8 @@ static int devfs_rename(struct vnode *od, const char *on, struct vnode *nd, cons
     (void)od; (void)on; (void)nd; (void)nn; return -EPERM;
 }
 
+static int devfs_rmdir(struct vnode *d, const char *n) { (void)d; (void)n; return -EPERM; }
+
 const struct vfs_ops devfs_ops = {
     .mount      = devfs_mount_op,
     .umount     = devfs_umount_op,
@@ -559,6 +561,7 @@ const struct vfs_ops devfs_ops = {
     .truncate_to = devfs_truncate_to,
     .readdir    = devfs_readdir,
     .rename     = devfs_rename,
+    .rmdir      = devfs_rmdir,
 };
 
 void devfs_selftest(void) {

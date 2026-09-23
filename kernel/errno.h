@@ -50,6 +50,7 @@
 #define EROFS   30
 #define EXDEV   18
 #define ENOTEMPTY 39
+#define ENOLCK  37
 #define ENETUNREACH 101
 #define ENETDOWN 100
 #define EADDRNOTAVAIL 99

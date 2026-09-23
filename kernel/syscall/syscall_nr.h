@@ -364,8 +364,9 @@
 // Desktop M0 (docs/superpowers/plans/2026-09-23-desktop-m0-kernel-prereqs.md).
 #define SYS_PWRITE          138
 #define SYS_RENAMEAT2       139
+#define SYS_RMDIR           140
 
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX              140
+#define SYS_MAX              141
 
 #endif

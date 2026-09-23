@@ -261,6 +261,18 @@ static int ramfs_rename(struct vnode *olddir, const char *oldname,
     return 0;
 }
 
+static int ramfs_rmdir(struct vnode *dir, const char *name) {
+    uint64_t id;
+    int rc = ramfs_lookup(dir, name, &id);
+    if (rc != 0) { return rc; }
+    if (nodes[id].type != VNODE_DIR) { return -ENOTDIR; }
+    for (int i = 0; i < RAMFS_MAX_NODES; i++) {
+        if (nodes[i].in_use && nodes[i].parent == (uint32_t)id && (uint64_t)i != id) { return -ENOTEMPTY; }
+    }
+    nodes[id].in_use = 0;
+    return 0;
+}
+
 // Enumerates the dir's children by ordinal. `index` counts only
 // matching children, so callers can walk 0,1,2,... until -ENOENT
 // without knowing anything about the pool's internal layout.
@@ -299,4 +311,5 @@ const struct vfs_ops ramfs_ops = {
     .truncate_to = ramfs_truncate_to,
     .readdir    = ramfs_readdir,
     .rename     = ramfs_rename,
+    .rmdir      = ramfs_rmdir,
 };

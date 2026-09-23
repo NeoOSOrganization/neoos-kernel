@@ -147,6 +147,7 @@
 #define NEO_CLOCK_GETRES       137
 #define NEO_PWRITE             138
 #define NEO_RENAMEAT2          139
+#define NEO_RMDIR              140
 #define NEO_ACCESS             132
 #define NEO_FACCESSAT          133
 
@@ -277,6 +278,7 @@
 #define LX_CLOCK_GETRES    229
 #define LX_PWRITE64         18
 #define LX_RENAME           82
+#define LX_RMDIR            84
 #define LX_RENAMEAT        264
 #define LX_RENAMEAT2       316
 #define LX_ACCESS           21
@@ -417,6 +419,8 @@ long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a
         return neo(NEO_MKDIR, a1, neo_strlen((const char *)a1), 0, 0, 0, 0);
     case LX_UNLINK:
         return neo(NEO_UNLINK, a1, neo_strlen((const char *)a1), 0, 0, 0, 0);
+    case LX_RMDIR:
+        return neo(NEO_RMDIR, a1, neo_strlen((const char *)a1), 0, 0, 0, 0);
     case LX_CHDIR:
         return neo(NEO_CHDIR, a1, neo_strlen((const char *)a1), 0, 0, 0, 0);
     case LX_EXECVE:

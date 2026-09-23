@@ -111,6 +111,8 @@ struct vfs_ops {
     // rename return -EPERM / -EROFS.
     int     (*rename)(struct vnode *olddir, const char *oldname,
                       struct vnode *newdir, const char *newname);
+    // Remove an EMPTY directory (-ENOTEMPTY otherwise, -ENOTDIR for a file).
+    int     (*rmdir)(struct vnode *dir, const char *name);
 };
 
 struct vfs_mount {

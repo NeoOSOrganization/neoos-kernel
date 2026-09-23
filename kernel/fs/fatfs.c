@@ -2402,6 +2402,21 @@ static int fatfs_rename_op(struct vnode *odir, const char *oname,
     return 0;
 }
 
+static int fatfs_rmdir_op(struct vnode *dir, const char *name) {
+    struct fat_volume *v = (struct fat_volume *)dir->mount->fs_private;
+    struct fatfs_inode *d = (struct fatfs_inode *)dir->fs_private;
+    int in_root = (dir->inode_id == FATFS_ROOT_INODE) && (v->variant == FAT_16);
+    if (fat_name_eq(name, ".") || fat_name_eq(name, "..")) { return -EINVAL; }
+
+    struct fat_entry e;
+    if (!fat_dir_find(v, in_root, d->first_cluster, name, &e)) { return -ENOENT; }
+    if (!(e.de.attr & FAT_ATTR_DIRECTORY)) { return -ENOTDIR; }
+    uint32_t cluster = dirent_cluster(v, &e.de);
+    if (cluster && !fat_dir_is_empty(v, cluster)) { return -ENOTEMPTY; }
+    if (cluster) { fat16_free_chain(v, cluster); }
+    return fat_erase_run(v, in_root, d->first_cluster, &e);
+}
+
 const struct vfs_ops fatfs_ops = {
     .mount      = fatfs_mount_op,
     .umount     = fatfs_umount_op,
@@ -2417,4 +2432,5 @@ const struct vfs_ops fatfs_ops = {
     .truncate_to = fatfs_truncate_to,
     .readdir    = fatfs_readdir_op,
     .rename     = fatfs_rename_op,
+    .rmdir      = fatfs_rmdir_op,
 };

@@ -355,6 +355,8 @@ static int procfs_rename(struct vnode *od, const char *on, struct vnode *nd, con
     (void)od; (void)on; (void)nd; (void)nn; return -EPERM;
 }
 
+static int procfs_rmdir(struct vnode *d, const char *n) { (void)d; (void)n; return -EPERM; }
+
 const struct vfs_ops procfs_ops = {
     .mount      = procfs_mount_op,
     .umount     = procfs_umount_op,
@@ -370,4 +372,5 @@ const struct vfs_ops procfs_ops = {
     .truncate_to = procfs_truncate_to,
     .readdir    = procfs_readdir,
     .rename     = procfs_rename,
+    .rmdir      = procfs_rmdir,
 };

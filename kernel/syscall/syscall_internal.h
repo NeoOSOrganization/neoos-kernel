@@ -230,6 +230,7 @@ int64_t sys_pread(struct syscall_args *a);
 int64_t sys_clock_getres(struct syscall_args *a);
 int64_t sys_pwrite(struct syscall_args *a);
 int64_t sys_renameat2(struct syscall_args *a);
+int64_t sys_rmdir(struct syscall_args *a);
 int64_t sys_memfd_create(struct syscall_args *a);
 int64_t sys_access(struct syscall_args *a);
 int64_t sys_faccessat(struct syscall_args *a);

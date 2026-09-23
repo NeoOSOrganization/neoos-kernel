@@ -2,6 +2,7 @@
 // teardown and reaping. Split out of the former kernel/process.c; the
 // code is unchanged, only relocated.
 
+#include "fs/flock.h"
 #include "kernel.h"
 #include "sched/sched.h"
 #include "sched/proc_table.h"
@@ -1275,6 +1276,9 @@ void proc_put_live(struct process *p) {
         p->pml4_phys = 0;
     }
 
+    // Its record locks first (kernel/fs/flock.c): they belong to the
+    // process, not to any one descriptor.
+    flock_release_pid(p->pid);
     // Release the process's file descriptors. With refcounted vnodes,
     // leaving these open would pin them permanently and make umount
     // report -EBUSY forever.

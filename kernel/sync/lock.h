@@ -50,6 +50,9 @@
 // treats equal ranks as an inversion; no two of them are ever held at
 // once, so the order between them is arbitrary.
 #define LOCK_RANK_FUTEX       9
+// POSIX record locks (kernel/fs/flock.c): same pattern, same slot --
+// never held together with a futex bucket.
+#define LOCK_RANK_FLOCK       LOCK_RANK_FUTEX
 #define LOCK_RANK_PIPE       10
 #define LOCK_RANK_EVENTFD    LOCK_RANK_PIPE  // same shape as a pipe: leaf
                                              // IPC object, taken before

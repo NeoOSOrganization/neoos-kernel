@@ -10,6 +10,7 @@
 #include "sched/fd_table.h"
 #include "fs/vfs.h"
 #include "fs/stat.h"
+#include "fs/flock.h"
 #include "tty/tty.h"
 #include "fs/devfs.h"
 #include "fs/file.h"
@@ -134,6 +135,12 @@ int64_t sys_open(struct syscall_args *a) {
         if (!vn) { fs_lock_release(); fd_close(task, slot); return -ENFILE; }
     }
     if (!vn) { fs_lock_release(); fd_close(task, slot); return err; }
+    // O_DIRECTORY: "fail unless this is a directory". musl's opendir
+    // passes it and relies on ENOTDIR for a file, as Linux answers --
+    // ignoring it made opendir() "succeed" on regular files.
+    if ((flags & O_DIRECTORY) && vn->type != VNODE_DIR) {
+        vnode_put(vn); fs_lock_release(); fd_close(task, slot); return -ENOTDIR;
+    }
     if (vn->type == VNODE_DIR && (flags & (O_WRONLY | O_RDWR))) {
         vnode_put(vn);
         fs_lock_release();
@@ -241,6 +248,29 @@ int64_t sys_unlink(struct syscall_args *a) {
     return rc;
 }
 
+// rmdir(path): an empty directory, not a mount point (-EBUSY, as Linux).
+int64_t sys_rmdir(struct syscall_args *a) {
+    char path_buf[VFS_MAX_PATH];
+    int prc = copy_user_path_at(a->a1, a->a2, path_buf);
+    if (prc != 0) { return prc; }
+    char name[VFS_NAME_MAX];
+    int err = 0;
+    fs_lock_acquire();
+    struct vnode *vn = vfs_resolve(path_buf, &err);
+    if (!vn) { fs_lock_release(); return err; }
+    int busy = vn == vn->mount->root;
+    int isdir = vn->type == VNODE_DIR;
+    vnode_put(vn);
+    if (busy)   { fs_lock_release(); return -EBUSY; }
+    if (!isdir) { fs_lock_release(); return -ENOTDIR; }
+    struct vnode *dir = vfs_resolve_parent(path_buf, name, &err);
+    if (!dir) { fs_lock_release(); return err; }
+    int rc = dir->mount->ops->rmdir(dir, name);
+    vnode_put(dir);
+    fs_lock_release();
+    return rc;
+}
+
 int64_t sys_lseek(struct syscall_args *a) {
     struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
     if (!f) { return -EBADF; }
@@ -315,8 +345,20 @@ int64_t sys_fcntl(struct syscall_args *a) {
         if (rc < 0) { fd_table_close(current_proc()->fd_table, newfd); }
         return rc;
     }
+    case F_GETLK:
+    case F_SETLK:
+    case F_SETLKW: {
+        // POSIX record locks (kernel/fs/flock.c). F_OFD_* and flock(2)
+        // are not implemented and fall through to -EINVAL.
+        struct k_flock fl;
+        if (copy_from_user(&fl, (const void *)(uintptr_t)a->a3, sizeof fl) != 0) { return -EFAULT; }
+        int rc = flock_fcntl(f, (int)a->a2, &fl);
+        if (rc == 0 && (int)a->a2 == F_GETLK &&
+            copy_to_user((void *)(uintptr_t)a->a3, &fl, sizeof fl) != 0) { return -EFAULT; }
+        return rc;
+    }
     default:
-        // The locking commands and everything else. Refusing is right:
+        // OFD locks and everything else. Refusing is right:
         // a caller that asked for something and got a silent success
         // would act on a result it never received.
         return -EINVAL;

@@ -126,6 +126,8 @@ static int embedfs_rename(struct vnode *od, const char *on, struct vnode *nd, co
     (void)od; (void)on; (void)nd; (void)nn; return -EROFS;
 }
 
+static int embedfs_rmdir(struct vnode *d, const char *n) { (void)d; (void)n; return -EROFS; }
+
 const struct vfs_ops embedfs_ops = {
     .mount      = embedfs_mount_op,
     .umount     = embedfs_umount_op,
@@ -141,4 +143,5 @@ const struct vfs_ops embedfs_ops = {
     .truncate_to = embedfs_truncate_to,
     .readdir    = embedfs_readdir,
     .rename     = embedfs_rename,
+    .rmdir      = embedfs_rmdir,
 };

@@ -1,3 +1,4 @@
+#include "fs/flock.h"
 #include "sched/fd_table.h"
 #include "sched/proc.h"
 #include "mm/heap.h"
@@ -209,6 +210,9 @@ void fd_table_close(struct fd_table *table, int fd) {
         // epoll_ctl(ADD) on the reused number would hit EEXIST against
         // the stale entry.
         epoll_forget_fd(table, fd);
+        // POSIX: closing ANY descriptor for a file drops every record
+        // lock this process holds on it (kernel/fs/flock.c).
+        if (closing.vn && current_proc()) { flock_release_vnode(closing.vn, current_proc()->pid); }
         file_close(&closing);
     }
 }
@@ -296,7 +300,11 @@ int fd_table_dup2(struct fd_table *table, int oldfd, int newfd) {
     spin_unlock_irqrestore(&nb->lock, nf);
 
     file_dup(&src);                 // the new slot's reference on the object
-    if (had) { epoll_forget_fd(table, newfd); file_close(&closing); }
+    if (had) {
+        epoll_forget_fd(table, newfd);
+        if (closing.vn && current_proc()) { flock_release_vnode(closing.vn, current_proc()->pid); }
+        file_close(&closing);
+    }
     return newfd;
 }
 
