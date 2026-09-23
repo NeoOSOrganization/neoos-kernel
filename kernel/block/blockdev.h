@@ -37,6 +37,7 @@ struct blockdev {
     uint32_t flags;                     // BLOCKDEV_HIDDEN
     uint32_t partno;                    // 0 for a whole disk
     uint32_t claims;                    // mounted filesystems using it
+    const char *driver;                 // "ahci", "ata", "ram"; partitions inherit the disk's
 };
 
 void blockdev_init(void);

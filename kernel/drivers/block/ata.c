@@ -1,4 +1,5 @@
 #include "drivers/block/ata.h"
+#include "drivers/block/ata_id.h"
 #include "arch/io.h"
 #include "drivers/char/serial.h"
 #include "time/ktime.h"
@@ -91,8 +92,23 @@ static void ata_report_error(const char *what, uint8_t drive, uint32_t lba,
     serial_write_string("\n");
 }
 
+static void ata_log_drive(uint8_t drive, const char *what) {
+    serial_write_string("[ata] drive ");
+    serial_write_hex64(drive);
+    serial_write_string(what);
+}
+
 static int ata_identify_locked(uint8_t drive, struct ata_identify_info *info) {
     outb(ATA_DRIVE_HEAD, 0xA0 | ((drive & 1) << 4));
+    // A channel with no devices at all floats high (0xFF) on real
+    // hardware; QEMU answers 0. Either way there is nothing to ask, and
+    // an empty slot is normal (the disks may be on AHCI or NVMe), so this
+    // is not a failure.
+    uint8_t st = inb(ATA_STATUS);
+    if (st == 0xFF || st == 0) {
+        ata_log_drive(drive, " not present\n");
+        return 0;
+    }
     outb(ATA_SECCOUNT, 0);
     outb(ATA_LBA_LOW, 0);
     outb(ATA_LBA_MID, 0);
@@ -100,15 +116,23 @@ static int ata_identify_locked(uint8_t drive, struct ata_identify_info *info) {
     outb(ATA_COMMAND, ATA_CMD_IDENTIFY);
 
     if (inb(ATA_STATUS) == 0) {
-        // An empty slot is normal (the disks may be on AHCI or NVMe), so
-        // this is not a failure.
-        serial_write_string("[ata] drive ");
-        serial_write_hex64(drive);
-        serial_write_string(" not present\n");
+        ata_log_drive(drive, " not present\n");
         return 0;
     }
     if (!ata_wait_status(ATA_STATUS_BSY, 0)) {
         serial_write_string("[ata] identify FAILED: BSY never cleared\n");
+        return 0;
+    }
+    // A packet (ATAPI) device, or a SATA device behind a bridge, aborts
+    // IDENTIFY DEVICE and leaves its signature in the LBA registers. It
+    // is not a disk this driver can use -- not a failure either.
+    uint8_t mid = inb(ATA_LBA_MID), high = inb(ATA_LBA_HIGH);
+    if ((inb(ATA_STATUS) & ATA_STATUS_ERR) || mid || high) {
+        ata_log_drive(drive, ": not an ATA disk (sig ");
+        serial_write_hex64(mid);
+        serial_write_string("/");
+        serial_write_hex64(high);
+        serial_write_string("), skipped\n");
         return 0;
     }
     if (!ata_wait_status(ATA_STATUS_DRQ, ATA_STATUS_DRQ)) {
@@ -120,8 +144,10 @@ static int ata_identify_locked(uint8_t drive, struct ata_identify_info *info) {
     for (int i = 0; i < 256; i++) {
         identify_data[i] = inw(ATA_DATA);
     }
-
-    info->sector_count = (uint32_t)identify_data[61] << 16 | identify_data[60];
+    struct ata_id id;
+    ata_id_parse(identify_data, &id);
+    // PIO here is LBA28, whatever the drive supports.
+    info->sector_count = (uint32_t)(id.sectors > 0x0FFFFFFF ? 0x0FFFFFFF : id.sectors);
 
     serial_write_string("[ata] drive identified, drive=");
     serial_write_hex64(drive);
@@ -129,7 +155,9 @@ static int ata_identify_locked(uint8_t drive, struct ata_identify_info *info) {
     serial_write_hex64(info->sector_count);
     serial_write_string(" (");
     serial_write_hex64((uint64_t)info->sector_count * ATA_SECTOR_SIZE / (1024 * 1024));
-    serial_write_string(" MiB)\n");
+    serial_write_string(" MiB) model \"");
+    serial_write_string(id.model);
+    serial_write_string("\"\n");
     return 1;
 }
 
@@ -292,6 +320,7 @@ void ata_probe(void) {
         ad->bdev.sector_size = ATA_SECTOR_SIZE;
         ad->bdev.sector_count = info.sector_count;
         ad->bdev.ops = &ata_ops;
+        ad->bdev.driver = "ata";
         ad->bdev.priv = ad;
         blockdev_register_disk(&ad->bdev);
     }

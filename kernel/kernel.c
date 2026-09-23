@@ -20,6 +20,7 @@
 #include "drivers/irq/ioapic.h"
 #include "drivers/pci/pci.h"
 #include "mm/mmio.h"
+#include "drivers/block/ata_id.h"
 #include "drivers/char/timer.h"
 #include "time/hrtimer.h"
 #include "time/wheel.h"
@@ -248,6 +249,7 @@ void kmain(void *multiboot_info) {
     blkcache_init();
     blockdev_init();
     blockdev_selftest();
+    ata_id_selftest();
     part_selftest();
     blkcache_selftest();
     // Controller probes register disks and, through the partition scan,

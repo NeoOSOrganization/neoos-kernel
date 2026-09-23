@@ -618,6 +618,7 @@ CORE_REQUIRED_MARKERS := \
 	"[part] selftest passed" \
 	"[blkcache] selftest passed" \
 	"[mmio] selftest passed" \
+	"[ata_id] selftest passed" \
 	"[blockdev] sda: sectors=" \
 	"[tty] selftest passed" \
 	"[wxorx] kernel selftest passed" \
