@@ -112,13 +112,14 @@ Terminal window (nui_window + nui_tabs)
   (`vt_take_dirty`).
 - **Rendering**: a custom LVGL object with a draw callback that paints
   dirty rows only: background runs, then glyphs from the UI kit's
-  monospace font (Spleen 12×24 as an LVGL font), cursor as a block/
+  monospace font (DejaVu Sans Mono via `tiny_ttf`, Persian runs shaped
+  as in libvt change 5), cursor as a block/
   underline, selection highlight. Palette = xterm-256, with the 16 base
   colours taken from UI-kit tokens (light/dark).
 - **Input**: WM key events (evdev codes + modifiers tracked by the UI
   kit) → byte sequences written to the master: printable characters as
-  UTF-8 (US layout in v1 — keyboard layouts are an open question
-  system-wide), Enter `\r`, Backspace `\x7f`, Tab, arrows (`ESC[A` or
+  UTF-8 through the UI kit's layout table (`us`/`fa`, Alt+Shift),
+  Enter `\r`, Backspace `\x7f`, Tab, arrows (`ESC[A` or
   `ESC OA` in application-cursor mode), Home/End/PgUp/PgDn/Delete/
   Insert/F1–F12 (xterm encodings), Ctrl+letter → control codes, Alt
   → ESC prefix.
