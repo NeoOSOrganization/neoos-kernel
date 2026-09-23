@@ -60,7 +60,7 @@ struct vfs_dirent {
     uint8_t  type;
 };
 
-enum vnode_type { VNODE_FILE, VNODE_DIR, VNODE_DEVICE };
+enum vnode_type { VNODE_FILE, VNODE_DIR, VNODE_DEVICE, VNODE_BLOCK };
 
 struct vfs_mount;
 struct process; // opened into by vfs_open_into; process.h includes this header

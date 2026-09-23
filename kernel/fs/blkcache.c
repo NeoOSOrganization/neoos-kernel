@@ -228,3 +228,5 @@ void blkcache_selftest(void) {
 
     serial_write_string("[blkcache] selftest passed\n");
 }
+
+void blkcache_invalidate(struct blockdev *d) { (void)d; }   // storage-01 task 4

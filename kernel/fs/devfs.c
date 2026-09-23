@@ -267,6 +267,7 @@ static struct {
     void *priv;
     int (*open)(struct file_descriptor *f);
     struct devfs_dev dev;                // synthesized; fs_private points here
+    uint64_t rdev;                       // block nodes only
     int   used;
 } dyn[DEVFS_DYN_MAX];
 static struct spinlock dyn_lock;
@@ -298,9 +299,31 @@ int devfs_register(const char *path, const struct file_ops *ops, void *priv,
     dyn[free_slot].priv = priv;
     dyn[free_slot].open = open;
     dyn[free_slot].dev  = (struct devfs_dev){ dyn[free_slot].path, VNODE_DEVICE, ops, dyn_open };
+    dyn[free_slot].rdev = 0;
     dyn[free_slot].used = 1;
     spin_unlock_irqrestore(&dyn_lock, fl);
     return 0;
+}
+
+int devfs_register_blk(const char *name, const struct file_ops *ops, void *priv, uint64_t rdev) {
+    int rc = devfs_register(name, ops, priv, 0);
+    if (rc != 0) { return rc; }
+    uint64_t fl = spin_lock_irqsave(&dyn_lock);
+    for (int i = 0; i < DEVFS_DYN_MAX; i++) {
+        if (dyn[i].used && name_eq(dyn[i].path, name)) {
+            dyn[i].dev.type = VNODE_BLOCK;
+            dyn[i].rdev = rdev;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&dyn_lock, fl);
+    return 0;
+}
+
+uint64_t devfs_vnode_rdev(const struct vnode *vn) {
+    if (!vn || vn->inode_id < DEVFS_DYN_BASE) { return 0; }
+    uint64_t slot = vn->inode_id - DEVFS_DYN_BASE;
+    return slot < DEVFS_DYN_MAX ? dyn[slot].rdev : 0;
 }
 
 void devfs_unregister(const char *path) {

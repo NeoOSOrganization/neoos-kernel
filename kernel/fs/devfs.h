@@ -25,6 +25,11 @@ struct devfs_dev {
 int  devfs_register(const char *path, const struct file_ops *ops, void *priv,
                     int (*open)(struct file_descriptor *f));
 void devfs_unregister(const char *path);
+// A block node at the ROOT of /dev ("sda", "sda1"): same dynamic table
+// as /dev/pts/N, with VNODE_BLOCK and its dev_t. Returns as devfs_register.
+int  devfs_register_blk(const char *name, const struct file_ops *ops, void *priv, uint64_t rdev);
+// st_rdev for a devfs vnode: a block node's dev_t, 0 for everything else.
+uint64_t devfs_vnode_rdev(const struct vnode *vn);
 
 void devfs_selftest(void);
 

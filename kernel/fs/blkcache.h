@@ -44,6 +44,10 @@ void blkcache_invalidate_drive(uint8_t drive);
 // Cumulative counters since boot, for the mount-time log line.
 void blkcache_stats(uint64_t *out_hits, uint64_t *out_misses);
 
+struct blockdev;
+// Placeholder until the cache is keyed by blockdev (storage-01 task 4).
+void blkcache_invalidate(struct blockdev *d);
+
 void blkcache_selftest(void);
 
 #endif

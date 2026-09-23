@@ -53,7 +53,7 @@ ISO_DIR := iso
 # act: a stray .c file in a new folder should fail to link, not get
 # picked up silently.
 KERNEL_DIRS := kernel kernel/arch kernel/drivers/video kernel/drivers/input \
-	kernel/drivers/block kernel/drivers/char kernel/drivers/irq kernel/drivers/acpi \
+	kernel/drivers/block kernel/block kernel/drivers/char kernel/drivers/irq kernel/drivers/acpi \
 	kernel/drivers/pci kernel/drivers/virtio kernel/drivers/net kernel/drivers/audio \
 	kernel/tty kernel/ipc kernel/smp \
 	kernel/syscall kernel/mm kernel/fs kernel/sched kernel/sync kernel/net kernel/lib \
@@ -614,6 +614,7 @@ CORE_REQUIRED_MARKERS := \
 	"[init] all entries exited -- powering off" \
 	"[devfs] selftest passed" \
 	"[fpos64] selftest passed" \
+	"[blockdev] selftest passed" \
 	"[tty] selftest passed" \
 	"[wxorx] kernel selftest passed" \
 	"[rbtree] selftest passed" \
