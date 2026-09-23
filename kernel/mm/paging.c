@@ -295,6 +295,14 @@ uint64_t paging_translate(uint64_t virt) {
     return (pt[PT_INDEX(virt)] & PAGE_ADDR_MASK) | (virt & 0xFFF);
 }
 
+uint64_t paging_leaf_flags(uint64_t virt) {
+    uint64_t *pdpt = table_entry(paging_kernel_pml4(), PML4_INDEX(virt), 0, 0);
+    uint64_t *pd   = pdpt ? table_entry(pdpt, PDPT_INDEX(virt), 0, 0) : 0;
+    uint64_t *pt   = pd ? table_entry(pd, PD_INDEX(virt), 0, 0) : 0;
+    if (!pt || !(pt[PT_INDEX(virt)] & PAGE_PRESENT)) { return 0; }
+    return pt[PT_INDEX(virt)] & ~PAGE_ADDR_MASK;
+}
+
 void paging_init(void) {
     uint64_t pdpt_phys = alloc_table_frame();
     uint64_t *pdpt = (uint64_t *)(uintptr_t)pdpt_phys;

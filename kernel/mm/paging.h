@@ -8,6 +8,10 @@
 #define PAGE_PRESENT     (1ULL << 0)
 #define PAGE_WRITABLE    (1ULL << 1)
 #define PAGE_USER        (1ULL << 2)
+// Write-through and cache-disable: with the default PAT, PWT|PCD selects
+// entry 3, UC -- what device registers need (mm/mmio.c).
+#define PAGE_PWT         (1ULL << 3)
+#define PAGE_PCD         (1ULL << 4)
 #define PAGE_NO_EXECUTE  (1ULL << 63)
 
 // Bit 9 is one of the three PTE bits (9-11) the CPU ignores and leaves
@@ -76,6 +80,10 @@ void paging_selftest(void);
 int paging_map(uint64_t virt, uint64_t phys, uint64_t flags);
 void paging_unmap(uint64_t virt);
 uint64_t paging_translate(uint64_t virt); // returns the mapped physical address, or 0 if unmapped
+// The flag bits of the 4 KiB leaf entry mapping `virt` in the kernel
+// PML4 (entry & ~PAGE_ADDR_MASK), or 0 if unmapped. Same 4 KiB-only walk
+// as paging_translate.
+uint64_t paging_leaf_flags(uint64_t virt);
 
 // Translates through an ARBITRARY address space -- necessary to write
 // into a process's memory before its PML4 has ever been loaded into

@@ -19,6 +19,7 @@
 #include "drivers/irq/lapic.h"
 #include "drivers/irq/ioapic.h"
 #include "drivers/pci/pci.h"
+#include "mm/mmio.h"
 #include "drivers/char/timer.h"
 #include "time/hrtimer.h"
 #include "time/wheel.h"
@@ -237,6 +238,8 @@ void kmain(void *multiboot_info) {
     // serial port -- enumeration itself allocates nothing.
     pci_init();
     pci_selftest();
+    mmio_init();
+    mmio_selftest();
 
     ata_init();   // before ata_probe
 
