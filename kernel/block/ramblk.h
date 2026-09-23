@@ -14,5 +14,8 @@ uint8_t *ramblk_data(struct blockdev *d);
 // Device-level read commands issued so far -- lets a cache test tell a
 // hit from a miss.
 uint64_t ramblk_reads(struct blockdev *d);
+// Called at the end of every device read, after the data is copied out
+// -- lets a cache test put a write inside a read miss's unlocked window.
+void ramblk_set_read_hook(struct blockdev *d, void (*fn)(struct blockdev *, uint64_t lba, void *arg), void *arg);
 
 #endif

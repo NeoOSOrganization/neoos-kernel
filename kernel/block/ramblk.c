@@ -14,6 +14,8 @@ struct ramblk {
     unsigned order;
     uint8_t *data;
     uint64_t reads;
+    void   (*hook)(struct blockdev *, uint64_t, void *);
+    void    *hook_arg;
 };
 
 static void copy(uint8_t *d, const uint8_t *s, uint64_t n) { for (uint64_t i = 0; i < n; i++) { d[i] = s[i]; } }
@@ -22,6 +24,9 @@ static int rb_read(struct blockdev *d, uint64_t lba, uint32_t count, void *buf) 
     struct ramblk *r = (struct ramblk *)d;
     r->reads++;
     copy((uint8_t *)buf, r->data + lba * d->sector_size, (uint64_t)count * d->sector_size);
+    // After the copy-out: the caller now holds the old bytes, which is
+    // exactly the window a racing writer lands in.
+    if (r->hook) { r->hook(d, lba, r->hook_arg); }
     return 0;
 }
 
@@ -54,6 +59,7 @@ struct blockdev *ramblk_create(const char *name, uint32_t sector_size, uint64_t 
     r->bdev.sector_count = sectors;
     r->bdev.ops = &rb_ops;
     r->bdev.flags = BLOCKDEV_HIDDEN;
+    r->bdev.driver = "ram";
     return &r->bdev;
 }
 
@@ -67,3 +73,9 @@ void ramblk_destroy(struct blockdev *d) {
 
 uint8_t *ramblk_data(struct blockdev *d) { return ((struct ramblk *)d)->data; }
 uint64_t ramblk_reads(struct blockdev *d) { return ((struct ramblk *)d)->reads; }
+
+void ramblk_set_read_hook(struct blockdev *d, void (*fn)(struct blockdev *, uint64_t, void *), void *arg) {
+    struct ramblk *r = (struct ramblk *)d;
+    r->hook = fn;
+    r->hook_arg = arg;
+}

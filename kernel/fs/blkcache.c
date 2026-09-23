@@ -20,6 +20,14 @@ static struct blk_buf  entries[BLKCACHE_ENTRIES];
 static struct blk_buf *buckets[BLKCACHE_BUCKETS];
 static uint64_t        clock_tick;
 static uint64_t        hits, misses;
+// Bumped under cache_lock by every write and invalidate, before AND after
+// the device write. A read miss notes it before its unlocked device read
+// and installs what it read only if it has not moved: otherwise a write
+// that landed in between (device and cache both updated) would be
+// overwritten in the cache by the bytes the miss read before it. Global,
+// not per-LBA -- a racing write anywhere costs the reader its install,
+// never correctness.
+static uint64_t        write_gen;
 
 // Rank BLOCKDEV: taken below the filesystem's mount/vnode locks and
 // above nothing, since the device access itself happens with the lock
@@ -126,17 +134,23 @@ int blkcache_read(struct blockdev *d, uint64_t lba, void *out) {
         return 0;
     }
     misses++;
+    uint64_t gen = write_gen;
     spin_unlock_irqrestore(&cache_lock, flags);
 
     // The device transfer runs with the lock DROPPED: for PIO it is
     // thousands of cycles of busy-waiting, and holding a spinlock with
-    // interrupts off across it would stall the timer. Two callers
-    // racing on the same sector both read it and both install the same
-    // bytes, which is wasteful but never wrong.
+    // interrupts off across it would stall the timer. Two readers racing
+    // on the same sector both read it and both install the same bytes,
+    // which is wasteful but never wrong; a WRITER racing it is what
+    // write_gen is for.
     rc = blockdev_read(w, dl, 1, out);
     if (rc) { return rc; }
 
     flags = spin_lock_irqsave(&cache_lock);
+    if (write_gen != gen) {
+        spin_unlock_irqrestore(&cache_lock, flags);
+        return 0;
+    }
     b = claim(w, dl);
     mem_copy(b->data, out, ss);
     b->last_used = ++clock_tick;
@@ -162,10 +176,14 @@ int blkcache_write_multi(struct blockdev *d, uint64_t lba, uint32_t count, const
     if (rc) { return rc; }
     // Disk first, then cache: a failed write must not leave the cache
     // holding bytes the disk never received.
+    uint64_t flags = spin_lock_irqsave(&cache_lock);
+    write_gen++;
+    spin_unlock_irqrestore(&cache_lock, flags);
     rc = blockdev_write(w, dl, count, in);
     uint32_t ss = w->sector_size;
 
-    uint64_t flags = spin_lock_irqsave(&cache_lock);
+    flags = spin_lock_irqsave(&cache_lock);
+    write_gen++;
     if (count == 1 && rc == 0) {
         struct blk_buf *b = claim(w, dl);
         mem_copy(b->data, in, ss);
@@ -186,6 +204,7 @@ int blkcache_write_multi(struct blockdev *d, uint64_t lba, uint32_t count, const
 void blkcache_invalidate(struct blockdev *d) {
     struct blockdev *w = blockdev_whole(d);
     uint64_t flags = spin_lock_irqsave(&cache_lock);
+    write_gen++;
     for (int i = 0; i < BLKCACHE_ENTRIES; i++) {
         if (entries[i].valid && entries[i].dev == w) { unlink_buf(&entries[i]); }
     }
@@ -197,6 +216,16 @@ void blkcache_stats(uint64_t *out_hits, uint64_t *out_misses) {
     if (out_hits)   { *out_hits = hits; }
     if (out_misses) { *out_misses = misses; }
     spin_unlock_irqrestore(&cache_lock, flags);
+}
+
+// The racing writer for the read-miss test: runs once, inside the
+// device read, while blkcache_read holds the OLD bytes with its lock
+// dropped.
+static int race_ran;
+static void race_write(struct blockdev *d, uint64_t lba, void *arg) {
+    ramblk_set_read_hook(d, 0, 0);
+    race_ran = 1;
+    blkcache_write(d, lba, arg);
 }
 
 // Hermetic: RAM disks only, so it proves the cache's own rules --
@@ -246,6 +275,16 @@ void blkcache_selftest(void) {
     r1 = ramblk_reads(d);
     if (blkcache_read(d, 70, b) != 0 || b[0] != 0x3C)     { why = "reread after eviction"; goto out; }
     if (ramblk_reads(d) != r1 + 1)                        { why = "evicted sector served from cache"; goto out; }
+
+    // A write that lands between a miss's device read and its install
+    // must win: the miss may return either version, but must not cache
+    // the old one over the new.
+    for (int i = 0; i < 512; i++) { a[i] = 0x77; }
+    // LBA 250: outside the eviction sweep above, so this is a real miss.
+    race_ran = 0;
+    ramblk_set_read_hook(d, race_write, a);
+    if (blkcache_read(d, 250, b) != 0 || !race_ran)       { why = "racing read did not miss"; goto out; }
+    if (blkcache_read(d, 250, b) != 0 || b[0] != 0x77)    { why = "stale read-miss install"; goto out; }
 
     // A 4 KiB-sector device round-trips whole sectors.
     for (int i = 0; i < 4096; i++) { a[i] = (uint8_t)(i * 7); }
