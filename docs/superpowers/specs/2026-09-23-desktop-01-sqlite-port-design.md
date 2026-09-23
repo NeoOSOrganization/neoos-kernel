@@ -34,12 +34,18 @@ prerequisite K1 (M0).
 
 ## Upstream and version
 
-The **amalgamation** (`sqlite3.c`, `sqlite3.h`, `shell.c`) of the latest
-3.x release available when M1 starts — a ~9 MB source tarball, which
-fits the restricted-bandwidth rule (no multi-hundred-MB downloads). The
-amalgamation needs no `configure`, no Tcl, no autotools: one `cc`
-invocation per file. It is vendored under `upstream/` like every other
-port, with its version in `upstream/VERSION`.
+Like every other NeoOS port, `upstream/` is the project's own source
+tree as a **git submodule pinned at a release tag**: SQLite's official
+GitHub mirror, `https://github.com/sqlite/sqlite.git`, tag
+`version-3.46.1` (a 2024 release, not the newest — restricted-bandwidth
+rule), fetched with `--depth 1`. The amalgamation (`sqlite3.c`,
+`shell.c`) is **generated** from it by SQLite's own
+`configure && make sqlite3.c` on the build host (needs `tclsh`); the
+result is byte-identical to the amalgamation sqlite.org publishes for
+3.46.1 (SHA3-256 `186a1baa…a7dad`, checked against the release log).
+
+(An earlier draft of this spec vendored the published amalgamation zip
+instead; changed on your review to match the other ports.)
 
 ## Build
 
@@ -290,6 +296,6 @@ CREATE TABLE settings (
 | Stock `unix` VFS + kernel K1 | custom NeoOS VFS; `unix-none` (no locking); `unix-dotfile` | a custom VFS is emulation in the port; no-locking corrupts under the first accidental second writer; dotfile needs `O_EXCL` anyway and gives no shared locks. Record locks are the Linux-shaped primitive. |
 | Rollback journal, no WAL | WAL | WAL needs shared file mappings + shm locks: much more kernel surface for no v1 benefit (one writer) |
 | Static `libsqlite3.a` | shared `.so` | roadmap convention; NativeAOT `DirectPInvoke` wants static |
-| Amalgamation | autoconf tarball | no configure step, smaller download |
+| Upstream git submodule at a release tag, amalgamation generated from it | vendored amalgamation zip | same shape as every other port; the generated file is byte-identical to the published one |
 | One DB file per owning app | one system DB | contention and blast radius both stay per-app |
 | `PRAGMA user_version` migrations in `nsql` | per-app ad-hoc | one implementation shared by C and C# |
