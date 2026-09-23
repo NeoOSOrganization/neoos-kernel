@@ -1452,12 +1452,13 @@ details in `docs/stdlib.md` "SATA (AHCI) disks and optical drives".
 | error recovery | libata-style: completed commands reaped first, NCQ error log (page 10h) names the failed tag, else device reset + single-stepping + IDENTIFY revalidation; one bad sector fails only its own request (`make ahcitest`) |
 | optical drives | `srN`, major 11, read-only (`EROFS` on write-open), 2048-byte blocks, no partition scan, listed in `/proc/partitions` |
 | `BLKROGET` | Linux number and type |
-| `ENOMEDIUM` | 123, for a read from an empty drive |
+| `ENOMEDIUM` | 123, when the drive reports NOT READY on a read |
 
 ### Stubbed / diverging
 
-- `sr` capacity fixed at boot (no media-change detection); CD-ROM
-  ioctls and `SG_IO`: `ENOTTY`.
+- `sr` capacity fixed at boot (no media-change detection); an empty
+  drive opens as a 0-byte device where Linux fails `open` with
+  `ENOMEDIUM`; CD-ROM ioctls and `SG_IO`: `ENOTTY`.
 - No hot-plug; no interrupts (completion is polled — roadmap D4); no
   power management; no TRIM.
 - **Port multipliers: built, UNVERIFIED.** The code

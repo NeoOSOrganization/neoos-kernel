@@ -964,8 +964,8 @@ they do on Linux.
   is `-EROFS`, and a write that reaches the block layer is `-EROFS`
   too. `BLKSSZGET` reports the medium's block size (2048 for a CD or
   DVD), and they are **never scanned for partitions** (Linux's `sr`
-  has one minor). A drive with no disc has a 0-byte node; a read then
-  is `-ENOMEDIUM` (123).
+  has one minor). A drive with no disc has a 0-byte node (see the
+  divergence below).
 - **`BLKROGET`** (`0x125E`, `int`): 1 for a read-only device (`srN`), 0
   otherwise.
 - **Writes are durable when they complete**, on SATA as on IDE: a disk
@@ -978,6 +978,10 @@ they do on Linux.
 - **An `sr` device's capacity is read once, at boot.** There is no
   media-change detection: swapping the disc is invisible until reboot,
   and an empty drive stays empty.
+- **An empty drive opens.** Linux's `cdrom_open` refuses `open(2)` on a
+  drive with no disc with `ENOMEDIUM`; NeoOS opens it as a 0-byte
+  device, so a read returns end-of-file. (`ENOMEDIUM`, 123, is what a
+  read gets if the disc disappears under a device that had one.)
 - **No CD-ROM ioctls and no `SG_IO`** (`CDROMEJECT`, `CDROM_GET_CAPABILITY`,
   …): `-ENOTTY`. `eject`, `cdrecord` and similar tools do not work.
 - **No hot-plug.** The set of SATA disks is fixed at boot.
