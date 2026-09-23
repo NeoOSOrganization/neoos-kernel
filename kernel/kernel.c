@@ -256,6 +256,7 @@ void kmain(void *multiboot_info) {
     // Controller probes register disks and, through the partition scan,
     // their partitions. (AHCI and NVMe will probe before legacy ATA.)
     ahci_probe();
+    ahci_selftest();
     ata_probe();
 
     fat16_mount();

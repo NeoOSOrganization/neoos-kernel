@@ -218,6 +218,11 @@ void ahci_log_regs(struct ahci_port *p);          // CMD TFD SSTS SERR IS CI SAC
 // ---- device classes ---------------------------------------------------
 
 int  ahci_disk_attach(struct ahci_link *l);
+// For the selftests: the link behind an AHCI disk's blockdev (0 if `d`
+// is not one), and a disk read/write request built exactly as the block
+// ops build theirs.
+struct ahci_link *ahci_disk_link(struct blockdev *d);
+void ahci_disk_build(struct blockdev *d, struct ahci_req *r, uint64_t lba, uint32_t n, void *buf, int wr);
 int  ahci_atapi_attach(struct ahci_link *l);
 int  ahci_pmp_attach(struct ahci_port *p);
 

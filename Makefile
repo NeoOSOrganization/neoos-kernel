@@ -635,6 +635,7 @@ CORE_REQUIRED_MARKERS := \
 	"[ata_id] selftest passed" \
 	"[ahci] port 0: sda " \
 	"[boot] root: sda via ahci" \
+	"[ahci] selftest passed" \
 	"[blockdev] sda: sectors=" \
 	"[tty] selftest passed" \
 	"[wxorx] kernel selftest passed" \

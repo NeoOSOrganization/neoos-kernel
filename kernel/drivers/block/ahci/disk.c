@@ -37,6 +37,15 @@ static void build(struct ahci_disk *ad, struct ahci_req *r, uint64_t lba, uint32
     }
 }
 
+struct ahci_link *ahci_disk_link(struct blockdev *d) {
+    for (int i = 0; i < ndisks; i++) { if (&disks[i].bdev == d) { return disks[i].link; } }
+    return 0;
+}
+
+void ahci_disk_build(struct blockdev *d, struct ahci_req *r, uint64_t lba, uint32_t n, void *buf, int wr) {
+    build((struct ahci_disk *)d, r, lba, n, buf, wr);
+}
+
 static int flush_cache(struct ahci_disk *ad) {
     struct ahci_req r;
     ahci_req_init(&r);
@@ -108,15 +117,19 @@ int ahci_disk_attach(struct ahci_link *l) {
     }
     ad->link = l;
     struct ahci_hba *h = l->port->hba;
-    ad->use_ncq = 0;
-    l->ncq_depth = 0;
+    // NCQ needs both ends. Tags are slots, so the queue is as deep as the
+    // shallower of the device's queue and the HBA's command list.
+    ad->use_ncq = h->sncq && ad->id.ncq && ad->id.lba48;
+    l->ncq_depth = ad->use_ncq ? (ad->id.queue_depth < h->nslots ? ad->id.queue_depth : h->nslots) : 0;
+    // FUA (per-command write-through) is only worth using with a volatile
+    // cache to bypass; NCQ writes carry it in the device register, DMA EXT
+    // writes use WRITE DMA FUA EXT.
     ad->use_fua = ad->id.fua && ad->id.write_cache && ad->id.lba48;
     ad->bdev.sector_size = ad->id.logical_sector;
     ad->bdev.sector_count = ad->id.sectors;
     ad->bdev.ops = &disk_ops;
     ad->bdev.priv = ad;
     ad->bdev.driver = "ahci";
-    (void)h;
     if (blockdev_alloc_name("sd", ad->bdev.name) != 0) { return -ENOSPC; }
     ndisks++;
 
