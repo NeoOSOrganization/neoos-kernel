@@ -1436,3 +1436,44 @@ details in `docs/stdlib.md` "Block devices (storage-01)".
   filesystem other than FAT to mount yet (ext2 is storage-05).
 - Disks are still on legacy IDE only (AHCI and NVMe: storage-02/03);
   mounts are still fixed in the kernel (`root=` and fstab: storage-04).
+
+## Refresh — storage-02: AHCI (SATA) disks and optical drives (2026-09-23)
+
+Spec: `docs/superpowers/specs/2026-09-23-storage-02-ahci-design.md`;
+details in `docs/stdlib.md` "SATA (AHCI) disks and optical drives".
+
+### Implemented
+
+| Linux facility | state on NeoOS |
+|---|---|
+| SATA disks on AHCI | `sdX`, sharing libata's probe-order naming with legacy IDE; `/` is on `sda` via AHCI in every launcher |
+| NCQ | READ/WRITE FPDMA QUEUED, up to min(device depth, HBA slots) in flight; zero-copy scatter-gather |
+| write durability | FUA writes, or a cache flush after each write — a completed `write` is on the media, as with IDE |
+| error recovery | libata-style: completed commands reaped first, NCQ error log (page 10h) names the failed tag, else device reset + single-stepping + IDENTIFY revalidation; one bad sector fails only its own request (`make ahcitest`) |
+| optical drives | `srN`, major 11, read-only (`EROFS` on write-open), 2048-byte blocks, no partition scan, listed in `/proc/partitions` |
+| `BLKROGET` | Linux number and type |
+| `ENOMEDIUM` | 123, for a read from an empty drive |
+
+### Stubbed / diverging
+
+- `sr` capacity fixed at boot (no media-change detection); CD-ROM
+  ioctls and `SG_IO`: `ENOTTY`.
+- No hot-plug; no interrupts (completion is polled — roadmap D4); no
+  power management; no TRIM.
+- **Port multipliers: built, UNVERIFIED.** The code
+  (`kernel/drivers/block/ahci/pmp.c`, command-based switching) follows
+  AHCI 1.3.1 §9 / SATA PM 1.2 but no emulator available here has a
+  port multiplier, so it has never run. FIS-based switching is not
+  implemented.
+- **NCQ error log path: unexercised.** QEMU rejects READ LOG EXT page
+  10h, so `make ahcitest` covers only the reset-and-single-step
+  fallback; the path that requeues innocents after reading the log runs
+  only on real disks.
+
+### What a ported application would still hit
+
+- `eject`, `cdrecord`, `wodim`, and anything using `SG_IO` fail with
+  `ENOTTY`.
+- `udev`-style hot-plug expectations: nothing appears after boot.
+- NVMe disks (storage-03) and the filesystem registry, `root=` and
+  fstab (storage-04) are still to come; `/mnt` is still on legacy IDE.

@@ -953,6 +953,35 @@ they do on Linux.
 - **`0660` is reported, not enforced**: NeoOS has no permission model
   yet (storage-06).
 
+### SATA (AHCI) disks and optical drives (storage-02)
+
+- **Probe order names the disks.** AHCI controllers are probed before
+  legacy IDE, and every `sd` name goes to whichever disk registers
+  first — libata's rule. In the standard QEMU layout `sda` is the
+  first SATA disk (`/`) and `sdb` the IDE primary master (`/mnt`).
+- **Optical drives are `srN`**: major 11, minor N, as Linux's `sr`
+  driver. They are **read-only**: `open` with `O_WRONLY` or `O_RDWR`
+  is `-EROFS`, and a write that reaches the block layer is `-EROFS`
+  too. `BLKSSZGET` reports the medium's block size (2048 for a CD or
+  DVD), and they are **never scanned for partitions** (Linux's `sr`
+  has one minor). A drive with no disc has a 0-byte node; a read then
+  is `-ENOMEDIUM` (123).
+- **`BLKROGET`** (`0x125E`, `int`): 1 for a read-only device (`srN`), 0
+  otherwise.
+- **Writes are durable when they complete**, on SATA as on IDE: a disk
+  with a volatile write cache gets FUA writes where it supports them,
+  and a cache flush after each write where it does not. `fsync` on the
+  node still issues a flush.
+
+### DIVERGENCES (storage-02)
+
+- **An `sr` device's capacity is read once, at boot.** There is no
+  media-change detection: swapping the disc is invisible until reboot,
+  and an empty drive stays empty.
+- **No CD-ROM ioctls and no `SG_IO`** (`CDROMEJECT`, `CDROM_GET_CAPABILITY`,
+  …): `-ENOTTY`. `eject`, `cdrecord` and similar tools do not work.
+- **No hot-plug.** The set of SATA disks is fixed at boot.
+
 ### File sizes and positions are 64-bit
 
 File positions, `lseek` results, `pread`/`pwrite` offsets and file
