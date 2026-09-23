@@ -1,4 +1,5 @@
 #include "block/blockdev.h"
+#include "block/part.h"
 #include "kernel.h"
 #include "drivers/video/fb.h"
 #include "drivers/video/fb_device.h"
@@ -247,6 +248,7 @@ void kmain(void *multiboot_info) {
     blkcache_selftest();
     blockdev_init();
     blockdev_selftest();
+    part_selftest();
 
     fat16_mount();
     fat16_selftest();
