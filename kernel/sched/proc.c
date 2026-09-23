@@ -1133,6 +1133,9 @@ static void kill_one(struct process *p, void *v) {
     struct kill_ctx *c = (struct kill_ctx *)v;
     if (p->state == PROC_ZOMBIE) { return; }
     if (c->pid != -1 && p->pgid != c->target_pgid) { return; }
+    // kill(-1, ...) is "everyone EXCEPT init and the caller", as on
+    // Linux -- init's shutdown sends it, and must not signal itself.
+    if (c->pid == -1 && (p->pid == 1 || p == current_proc())) { return; }
     // A broadcast skips what it may not signal rather than failing: that
     // is what `kill -1` means, and reporting EPERM because some
     // untouchable process exists would make it useless.

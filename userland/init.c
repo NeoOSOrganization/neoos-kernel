@@ -11,6 +11,13 @@
 //   wait     launch and block until it exits before the next entry
 //   respawn  launch, and relaunch whenever it exits
 //
+// Shutdown by signal, BusyBox init's convention (so its poweroff and
+// reboot applets work too): SIGUSR2 powers off, SIGTERM reboots. init
+// stops respawning, SIGTERMs everything, gives it a grace period to
+// exit, SIGKILLs what is left, reaps, and calls reboot(2). This is how
+// the desktop shell's Shut down / Restart reach a machine whose
+// reboot(2) only root may call (desktop spec 06).
+//
 // Arguments after the path are passed to the program as argv[1..].
 // Without them an entry can only ever run a program that needs no
 // configuration, which is why `make shell` needs them: it launches the
@@ -28,6 +35,10 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <sys/reboot.h>
+#include <signal.h>
+#include <time.h>
+
+#define NEG_EINTR  (-4)
 
 #define MAX_ENTRIES 64
 #define MODE_SPAWN   0
@@ -159,7 +170,54 @@ static int launch(int e) {
     return pid;
 }
 
+static volatile int shutdown_req;              // 0, or LINUX_REBOOT_CMD_*
+static void on_poweroff(int s) { (void)s; shutdown_req = LINUX_REBOOT_CMD_POWER_OFF; }
+static void on_reboot(int s)   { (void)s; shutdown_req = LINUX_REBOOT_CMD_RESTART; }
+
+static uint64_t now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+#define SHUTDOWN_GRACE_MS 5000
+
+static void shutdown_now(int cmd) {
+    const char *what = cmd == LINUX_REBOOT_CMD_RESTART ? "reboot" : "power off";
+    printf("[init] %s requested -- stopping all processes\n", what);
+    nrp = 0;                                    // nothing respawns from here on
+    kill(-1, SIGTERM);
+    // The grace period IS the requirement here (a program gets a chance
+    // to save), so this one wait is on the clock: reap whatever exits,
+    // until nothing is left or the deadline passes.
+    uint64_t deadline = now_ms() + SHUTDOWN_GRACE_MS;
+    for (;;) {
+        int st;
+        int pid = wait4(-1, &st, WNOHANG, 0);
+        if (pid > 0) { continue; }
+        if (pid < 0) { break; }                 // -ECHILD: everyone is gone
+        if (now_ms() >= deadline) { break; }
+        struct timespec d = { 0, 20000000 };
+        nanosleep(&d, 0);
+    }
+    kill(-1, SIGKILL);
+    for (;;) {
+        int st;
+        int pid = wait4(-1, &st, 0, 0);
+        if (pid < 0 && pid != NEG_EINTR) { break; }
+    }
+    printf("[init] %s\n", cmd == LINUX_REBOOT_CMD_RESTART ? "restarting" : "powering off");
+    reboot(cmd);
+    for (;;) { }
+}
+
 int main(void) {
+    struct sigaction sa = { 0 };
+    sa.sa_handler = on_poweroff;
+    sigaction(SIGUSR2, &sa, 0);
+    sa.sa_handler = on_reboot;
+    sigaction(SIGTERM, &sa, 0);
+
     parse_inittab();
     if (nents == 0) {
         printf("[init] empty inittab -- powering off\n");
@@ -181,6 +239,8 @@ int main(void) {
             while (pid > 0) {
                 int st;
                 int got = wait4(-1, &st, 0, 0);
+                if (shutdown_req) { shutdown_now(shutdown_req); }
+                if (got == NEG_EINTR) { continue; }
                 if (got < 0 || got == pid) { break; }
             }
         } else if (launch(e) > 0) {
@@ -193,6 +253,8 @@ int main(void) {
     for (;;) {
         int st;
         int pid = wait4(-1, &st, 0, 0);
+        if (shutdown_req) { shutdown_now(shutdown_req); }
+        if (pid == NEG_EINTR) { continue; }
         if (pid < 0) { break; }             // -ECHILD: nothing left
         for (int k = 0; k < nrp; k++) {
             if (rp_pid[k] == pid) { rp_pid[k] = launch(rp_ent[k]); break; }
