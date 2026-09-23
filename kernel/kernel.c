@@ -263,6 +263,17 @@ void kmain(void *multiboot_info) {
     vfs_init();
     flock_init();          // POSIX record locks (fcntl F_SETLK)
     vfs_mount_fs("/dev/sda", "/",    "fat");
+    // Which controller / really came from: `make test` requires "via
+    // ahci", so a silent fall-back to the legacy IDE disk fails the test
+    // instead of passing it.
+    {
+        struct blockdev *root = blockdev_find("sda");
+        serial_write_string("[boot] root: ");
+        serial_write_string(root ? root->name : "(none)");
+        serial_write_string(" via ");
+        serial_write_string(root && root->driver ? root->driver : "(unknown)");
+        serial_write_string("\n");
+    }
     vfs_mount_fs(0,     "/dev", "devfs");
     vfs_mount_fs(0,     "/tmp", "ramfs");
     // BB5: synthetic, read-only, and mounted unconditionally -- `ps`

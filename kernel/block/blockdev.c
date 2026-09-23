@@ -58,6 +58,31 @@ static void publish(struct blockdev *d) {
     }
 }
 
+static int is_sr_name(const char *n) {
+    return n[0] == 's' && n[1] == 'r' && n[2] >= '0' && n[2] <= '9' && n[3] == 0;
+}
+
+// Caller holds reg_lock (the 259 branch consumes a minor).
+static void numbering_locked(const char *name, uint32_t *major, uint32_t *minor) {
+    if (name[0] == 's' && name[1] == 'd' && name_len(name) == 3) {
+        *major = 8;  *minor = (uint32_t)(name[2] - 'a') * 16;
+    } else if (is_sr_name(name)) {
+        *major = 11; *minor = (uint32_t)(name[2] - '0');
+    } else {
+        *major = 259; *minor = blkext_next_minor++;
+    }
+}
+
+void blockdev_major_minor_for(const char *name, uint32_t *major, uint32_t *minor) {
+    // Asking must not consume a blkext minor, so a would-be 259 answer
+    // reports the NEXT minor without taking it.
+    uint64_t fl = spin_lock_irqsave(&reg_lock);
+    uint32_t saved = blkext_next_minor;
+    numbering_locked(name, major, minor);
+    blkext_next_minor = saved;
+    spin_unlock_irqrestore(&reg_lock, fl);
+}
+
 int blockdev_register_disk(struct blockdev *d) {
     uint64_t fl = spin_lock_irqsave(&reg_lock);
     int slot = insert_locked(d);
@@ -65,10 +90,8 @@ int blockdev_register_disk(struct blockdev *d) {
     d->parent = 0; d->start_lba = 0; d->partno = 0;
     if (d->flags & BLOCKDEV_HIDDEN) {
         d->major = 0; d->minor = 0;
-    } else if (d->name[0] == 's' && d->name[1] == 'd' && name_len(d->name) == 3) {
-        d->major = 8; d->minor = (uint32_t)(d->name[2] - 'a') * 16;
     } else {
-        d->major = 259; d->minor = blkext_next_minor++;
+        numbering_locked(d->name, &d->major, &d->minor);
     }
     spin_unlock_irqrestore(&reg_lock, fl);
 
@@ -82,7 +105,7 @@ int blockdev_register_disk(struct blockdev *d) {
         serial_write_hex64(d->sector_size);
         serial_write_string("\n");
     }
-    part_scan(d);
+    if (!(d->flags & BLOCKDEV_NOPART)) { part_scan(d); }
     return 0;
 }
 
@@ -128,6 +151,7 @@ int blockdev_register_part(struct blockdev *disk, uint32_t partno, uint64_t star
     p->start_lba = start_lba;
     p->partno = partno;
     p->flags = disk->flags;
+    p->driver = disk->driver;
     for (int i = 0; i < 16; i++) {
         p->part_type[i] = type ? type[i] : 0;
         p->part_uuid[i] = uuid ? uuid[i] : 0;
@@ -173,10 +197,13 @@ void blockdev_unregister_disk(struct blockdev *d) {
 }
 
 int blockdev_alloc_name(const char *prefix, char out[BLOCKDEV_NAME_MAX]) {
-    if (!(prefix[0] == 's' && prefix[1] == 'd' && prefix[2] == 0)) { return -EINVAL; }
+    char first, last;
+    if (prefix[0] == 's' && prefix[1] == 'd' && prefix[2] == 0)      { first = 'a'; last = 'z'; }
+    else if (prefix[0] == 's' && prefix[1] == 'r' && prefix[2] == 0) { first = '0'; last = '9'; }
+    else { return -EINVAL; }
     uint64_t fl = spin_lock_irqsave(&reg_lock);
-    for (char c = 'a'; c <= 'z'; c++) {
-        char cand[4] = { 's', 'd', c, 0 };
+    for (char c = first; c <= last; c++) {
+        char cand[4] = { prefix[0], prefix[1], c, 0 };
         if (!find_locked(cand)) {
             for (int i = 0; i < 4; i++) { out[i] = cand[i]; }
             spin_unlock_irqrestore(&reg_lock, fl);
@@ -226,6 +253,7 @@ int blockdev_read(struct blockdev *d, uint64_t lba, uint32_t count, void *buf) {
 }
 
 int blockdev_write(struct blockdev *d, uint64_t lba, uint32_t count, const void *buf) {
+    if (d->flags & BLOCKDEV_RO) { return -EROFS; }
     if (count == 0) { return 0; }
     if (!in_range(d, lba, count)) { return -EIO; }
     return d->ops->write(d, lba, count, buf);
@@ -290,6 +318,25 @@ void blockdev_selftest(void) {
         else if (blockdev_read(a, 256, 1, buf) != -EIO)                    { why = "read past disk end"; }
         else if (blockdev_register_part(a, 2, 250, 32, t, t) != -EINVAL)   { why = "part past disk accepted"; }
     }
+    // A read-only, unpartitioned device (what an optical drive is).
+    struct blockdev *r = ramblk_create("tsr", 2048, 64);
+    if (!why && !r)                                                        { why = "ramblk_create tsr"; }
+    if (!why) {
+        uint8_t *raw = ramblk_data(r);
+        raw[446 + 4] = 0x83; raw[446 + 8] = 8; raw[446 + 12] = 8; raw[510] = 0x55; raw[511] = 0xAA;
+        r->flags |= BLOCKDEV_RO | BLOCKDEV_NOPART;
+        uint8_t sec[2048];
+        uint32_t ma, mi;
+        if (blockdev_register_disk(r) != 0)                                { why = "register tsr"; }
+        else if (blockdev_find("tsr1"))                                    { why = "NOPART device was scanned"; }
+        else if (blockdev_write(r, 0, 1, sec) != -EROFS)                   { why = "write to RO device"; }
+        else if (blockdev_read(r, 0, 1, sec) != 0 || sec[510] != 0x55)     { why = "read from RO device"; }
+        else if (blockdev_alloc_name("sr", nm) != 0 || nm[0] != 's' || nm[1] != 'r' ||
+                 nm[2] != '0' || nm[3] != 0)                               { why = "alloc_name sr"; }
+        else if ((blockdev_major_minor_for("sr3", &ma, &mi), ma != 11 || mi != 3))  { why = "sr3 numbering"; }
+        else if ((blockdev_major_minor_for("sdb", &ma, &mi), ma != 8 || mi != 16))  { why = "sdb numbering"; }
+    }
+    ramblk_destroy(r);
     ramblk_destroy(a);
     ramblk_destroy(b);
     if (!why && (blockdev_find("tsta") || blockdev_find("tsta1")))         { why = "unregister left entries"; }

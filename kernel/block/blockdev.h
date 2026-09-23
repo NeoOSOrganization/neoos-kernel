@@ -13,6 +13,11 @@
 #define BLOCKDEV_NAME_MAX  16
 // Selftest RAM disks: no /dev node, not in /proc/partitions.
 #define BLOCKDEV_HIDDEN    0x1u
+// Read-only medium (an optical drive): writes are -EROFS, and so is
+// opening the node for writing.
+#define BLOCKDEV_RO        0x2u
+// Never scanned for partitions -- Linux's sr devices have one minor.
+#define BLOCKDEV_NOPART    0x4u
 
 struct blockdev;
 
@@ -53,9 +58,13 @@ void blockdev_unregister_disk(struct blockdev *d);
 int  blockdev_register_part(struct blockdev *disk, uint32_t partno,
                             uint64_t start_lba, uint64_t sector_count,
                             const uint8_t type[16], const uint8_t uuid[16]);
-// Next free "sdX" name. Only the "sd" prefix is allocated here; NVMe
-// names come from the controller/namespace numbers.
+// Next free name for a prefix: "sd" gives sda..sdz, "sr" gives sr0..sr9.
+// Whoever registers first gets the first name -- libata's probe-order
+// rule. NVMe names come from the controller/namespace numbers.
 int  blockdev_alloc_name(const char *prefix, char out[BLOCKDEV_NAME_MAX]);
+// Linux's numbering for a whole-disk name: sdX is 8/(16*index), srN is
+// 11/N (SCSI_CDROM_MAJOR), anything else 259 with the next free minor.
+void blockdev_major_minor_for(const char *name, uint32_t *major, uint32_t *minor);
 
 struct blockdev *blockdev_find(const char *name);
 struct blockdev *blockdev_find_path(const char *path);   // "/dev/sda1" or "sda1"
