@@ -518,11 +518,14 @@ static int devfs_unlink(struct vnode *dir, const char *name) {
 static int devfs_truncate(struct vnode *vn) { (void)vn; return -EPERM; }
 
 static int devfs_readdir(struct vnode *dir, uint32_t index, struct vfs_dirent *out) {
-    // /dev/pts: the used dynamic slots, in slot order.
+    // /dev/pts: the used "pts/N" dynamic slots, in slot order. The same
+    // table holds root-level block nodes ("sda"), which are not listed.
     if (dir && dir->inode_id == DEVFS_PTS_INODE) {
         uint32_t seen = 0;
         for (int i = 0; i < DEVFS_DYN_MAX; i++) {
             if (!dyn[i].used) { continue; }
+            const char *dp = dyn[i].path;
+            if (!(dp[0] == 'p' && dp[1] == 't' && dp[2] == 's' && dp[3] == '/')) { continue; }
             if (seen == index) {
                 devfs_copy_name(out, dyn[i].path + 4);   // skip "pts/"
                 out->type = DT_CHR;
@@ -630,6 +633,22 @@ void devfs_selftest(void) {
         serial_write_string("[devfs] selftest FAILED: lookup\n");
         devfs_unregister("pts/7"); return;
     }
+    // A root-level block node shares the dynamic table with /dev/pts/N;
+    // listing /dev/pts must show only the pts entries.
+    if (devfs_register_blk("zzblk", &dummy, 0, 1) != 0) {
+        serial_write_string("[devfs] selftest FAILED: register_blk\n");
+        devfs_unregister("pts/7"); return;
+    }
+    {
+        struct vfs_dirent de;
+        for (uint32_t i = 0; devfs_readdir(&d, i, &de) == 0; i++) {
+            if (!name_eq(de.name, "7")) {
+                serial_write_string("[devfs] selftest FAILED: /dev/pts lists a non-pts entry\n");
+                devfs_unregister("zzblk"); devfs_unregister("pts/7"); return;
+            }
+        }
+    }
+    devfs_unregister("zzblk");
     devfs_unregister("pts/7");
     if (devfs_lookup(&d, "7", &id) == 0) {
         serial_write_string("[devfs] selftest FAILED: resolves after unregister\n"); return;

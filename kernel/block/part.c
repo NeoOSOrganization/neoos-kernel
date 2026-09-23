@@ -73,6 +73,24 @@ static int gpt_load(struct blockdev *d, uint64_t lba, uint8_t *hdr, uint8_t *ent
     return crc32(0, ents, bytes) == get32(hdr + 88);
 }
 
+// Linux's rule (block/partitions/efi.c, without the "gpt" boot option):
+// a GPT is only trusted when the MBR says the disk is GPT -- a protective
+// 0xEE entry -- or the primary header at LBA 1 carries the signature. A
+// valid backup GPT alone is not enough: a disk re-imaged with an MBR over
+// an old GPT disk keeps a stale backup at its end.
+static int gpt_expected(struct blockdev *d, uint8_t *sec) {
+    if (blockdev_read(d, 0, 1, sec) == 0 && sec[510] == 0x55 && sec[511] == 0xAA) {
+        for (int i = 0; i < 4; i++) { if (sec[446 + 16 * i + 4] == 0xEE) { return 1; } }
+    }
+    if (blockdev_read(d, 1, 1, sec) == 0) {
+        static const char sig[8] = { 'E','F','I',' ','P','A','R','T' };
+        int ok = 1;
+        for (int i = 0; i < 8; i++) { if (sec[i] != (uint8_t)sig[i]) { ok = 0; break; } }
+        if (ok) { return 1; }
+    }
+    return 0;
+}
+
 static int scan_gpt(struct blockdev *d, uint8_t *sec, uint8_t *ents) {
     uint64_t backup_lba = d->sector_count - 1;
     int ok = gpt_load(d, 1, sec, ents);
@@ -140,7 +158,11 @@ void part_scan(struct blockdev *disk) {
     }
     uint8_t *sec = (uint8_t *)phys_to_virt(sec_phys);
     uint8_t *ents = (uint8_t *)phys_to_virt(ent_phys);
-    if (disk->sector_count >= 3 && !scan_gpt(disk, sec, ents)) { scan_mbr(disk, sec); }
+    if (disk->sector_count >= 3 && gpt_expected(disk, sec) && scan_gpt(disk, sec, ents)) {
+        // GPT found and registered.
+    } else {
+        scan_mbr(disk, sec);
+    }
     pmm_free(sec_phys, 0);
     pmm_free(ent_phys, 2);
 }
@@ -274,6 +296,28 @@ void part_selftest(void) {
         blockdev_register_disk(d);
         if (blockdev_find("pfa1")) { why = "boot-code sector taken for an MBR"; }
     } else { why = "ramblk pfa"; }
+    ramblk_destroy(d);
+    if (why) { goto done; }
+
+    // A disk re-imaged with an MBR over an old GPT disk: the backup GPT
+    // at the end is still valid, but LBA 1 has no signature and the MBR
+    // has no protective entry. The MBR is the real table (Linux's rule).
+    d = ramblk_create("pgs", T_SS, T_SECT);
+    if (d) {
+        struct mcase mm = { { 0x83, 0, 0, 0 }, { 300, 0, 0, 0 }, { 100, 0, 0, 0 } };
+        uint8_t *raw = ramblk_data(d);
+        gpt_build(raw, two, 2);
+        // Replace the protective MBR with a real one and wipe the primary
+        // header; the backup GPT at the end stays valid.
+        for (int i = 0; i < 4; i++) {
+            uint8_t *p = raw + 446 + 16 * i;
+            for (int k = 0; k < 16; k++) { p[k] = 0; }
+            if (mm.t[i]) { p[4] = mm.t[i]; put32(p + 8, mm.s[i]); put32(p + 12, mm.c[i]); }
+        }
+        for (int i = 0; i < T_SS; i++) { raw[1 * T_SS + i] = 0; }      // no primary header
+        blockdev_register_disk(d);
+        if (!has("pgs1", 300, 100) || blockdev_find("pgs3")) { why = "stale backup GPT beat a real MBR"; }
+    } else { why = "ramblk pgs"; }
     ramblk_destroy(d);
     if (why) { goto done; }
 
