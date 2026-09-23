@@ -43,7 +43,7 @@ struct file_descriptor {
     const struct file_ops *ops;
     void *priv;
     struct vnode *vn;   // reference held; released by close/process exit
-    uint32_t position;  // per-fd, NOT shared across fork -- see docs/stdlib.md
+    uint64_t position;  // per-fd, NOT shared across fork -- see docs/stdlib.md
     int writable;
     // Split out from `writable` for pipes, where the two ends of one
     // object differ. A vnode-backed fd is readable regardless of its

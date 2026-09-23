@@ -88,7 +88,7 @@ static int64_t mfd_read(struct file_descriptor *f, void *buf, uint64_t len) {
         for (uint64_t k = 0; k < chunk; k++) { dst[done + k] = src[k]; }
         done += chunk;
     }
-    f->position += (uint32_t)len;
+    f->position += len;
     spin_unlock_irqrestore(&m->lock, f_);
     return (int64_t)len;
 }
@@ -108,7 +108,7 @@ static int64_t mfd_write(struct file_descriptor *f, const void *buf, uint64_t le
         for (uint64_t k = 0; k < chunk; k++) { dst[k] = src[done + k]; }
         done += chunk;
     }
-    f->position += (uint32_t)len;
+    f->position += len;
     spin_unlock_irqrestore(&m->lock, f_);
     return (int64_t)len;
 }
@@ -119,7 +119,7 @@ static int64_t mfd_lseek(struct file_descriptor *f, int64_t off, int whence) {
                  : whence == 2 ? (int64_t)m->size : 0;
     int64_t pos = base + off;
     if (pos < 0) { return -EINVAL; }
-    f->position = (uint32_t)pos;
+    f->position = (uint64_t)pos;
     return pos;
 }
 

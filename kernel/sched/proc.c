@@ -235,7 +235,14 @@ static int build_user_address_space(const char *path, uint64_t *out_pml4_phys,
         serial_write_string("\n");
         return 0;
     }
-    uint32_t size = vn->size;
+    // An ELF image is loaded whole into one kmalloc; nothing near 4 GiB
+    // can be, and the read below takes a 32-bit length.
+    if (vn->size > 0xFFFFFFFFULL) {
+        serial_write_string("[process] FAILED: ELF image larger than 4 GiB\n");
+        vnode_put(vn);
+        return 0;
+    }
+    uint32_t size = (uint32_t)vn->size;
 
     uint8_t *image = (uint8_t *)kmalloc(size);
     if (!image) {
@@ -288,7 +295,12 @@ static int build_user_address_space(const char *path, uint64_t *out_pml4_phys,
             free_address_space(pml4_phys);
             return 0;
         }
-        uint32_t isize = ivn->size;
+        if (ivn->size > 0xFFFFFFFFULL) {
+            vnode_put(ivn);
+            free_address_space(pml4_phys);
+            return 0;
+        }
+        uint32_t isize = (uint32_t)ivn->size;
         uint8_t *iimage = (uint8_t *)kmalloc(isize);
         if (!iimage) {
             vnode_put(ivn);

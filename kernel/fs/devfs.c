@@ -458,12 +458,12 @@ static int devfs_lookup(struct vnode *dir, const char *name, uint64_t *out_inode
 
 // devfs devices now use file_ops for read/write, handled through the file descriptor.
 // These VFS operations are no longer used for device files.
-static int64_t devfs_read(struct vnode *vn, uint32_t pos, void *buf, uint32_t len) {
+static int64_t devfs_read(struct vnode *vn, uint64_t pos, void *buf, uint32_t len) {
     (void)vn; (void)pos; (void)buf; (void)len;
     return -EINVAL;  // Devices must be opened through a file descriptor
 }
 
-static int64_t devfs_write(struct vnode *vn, uint32_t pos, const void *buf, uint32_t len) {
+static int64_t devfs_write(struct vnode *vn, uint64_t pos, const void *buf, uint32_t len) {
     (void)vn; (void)pos; (void)buf; (void)len;
     return -EINVAL;  // Devices must be opened through a file descriptor
 }

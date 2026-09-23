@@ -388,7 +388,7 @@ static int render_uptime(char *out, int cap) {
     return at;
 }
 
-static int64_t procfs_read(struct vnode *vn, uint32_t pos, void *buf,
+static int64_t procfs_read(struct vnode *vn, uint64_t pos, void *buf,
                            uint32_t len) {
     if (vn->inode_id == PROC_INO_SYSSTAT || vn->inode_id == PROC_INO_MEMINFO ||
         vn->inode_id == PROC_INO_UPTIME) {
@@ -396,8 +396,8 @@ static int64_t procfs_read(struct vnode *vn, uint32_t pos, void *buf,
         int n = vn->inode_id == PROC_INO_SYSSTAT ? render_sysstat(tmp, (int)sizeof tmp)
               : vn->inode_id == PROC_INO_MEMINFO ? render_meminfo(tmp, (int)sizeof tmp)
               :                                    render_uptime(tmp, (int)sizeof tmp);
-        if (pos >= (uint32_t)n) { return 0; }
-        uint32_t k = (uint32_t)n - pos;
+        if (pos >= (uint64_t)n) { return 0; }
+        uint32_t k = (uint32_t)((uint64_t)n - pos);
         if (k > len) { k = len; }
         for (uint32_t i = 0; i < k; i++) { ((char *)buf)[i] = tmp[pos + i]; }
         return (int64_t)k;
@@ -409,9 +409,9 @@ static int64_t procfs_read(struct vnode *vn, uint32_t pos, void *buf,
                           .kind = kind };
     proc_table_for_each_ref(render_one, &f);
     if (!f.found) { return 0; }          // the process went away: EOF
-    if (pos >= (uint32_t)f.len) { return 0; }
+    if (pos >= (uint64_t)f.len) { return 0; }
 
-    uint32_t n = (uint32_t)f.len - pos;
+    uint32_t n = (uint32_t)((uint64_t)f.len - pos);
     if (n > len) { n = len; }
     uint8_t *dst = (uint8_t *)buf;
     for (uint32_t i = 0; i < n; i++) { dst[i] = (uint8_t)f.buf[pos + i]; }
@@ -420,7 +420,7 @@ static int64_t procfs_read(struct vnode *vn, uint32_t pos, void *buf,
 
 // Everything that would MODIFY the filesystem. /proc is synthetic and
 // read-only, and saying so is better than a silent success.
-static int64_t procfs_write(struct vnode *vn, uint32_t pos, const void *buf,
+static int64_t procfs_write(struct vnode *vn, uint64_t pos, const void *buf,
                             uint32_t len) {
     (void)vn; (void)pos; (void)buf; (void)len; return -EPERM;
 }

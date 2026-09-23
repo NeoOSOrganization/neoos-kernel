@@ -2140,25 +2140,28 @@ static int fatfs_lookup(struct vnode *dir, const char *name, uint64_t *out_inode
     return 0;
 }
 
-static int64_t fatfs_read(struct vnode *vn, uint32_t pos, void *buf, uint32_t len) {
+static int64_t fatfs_read(struct vnode *vn, uint64_t pos, void *buf, uint32_t len) {
     struct fat_volume *v = (struct fat_volume *)vn->mount->fs_private;
     struct fatfs_inode *n = (struct fatfs_inode *)vn->fs_private;
     if (pos >= vn->size) { return 0; }
-    if (pos + len > vn->size) { len = vn->size - pos; }
-    uint32_t got = fat16_read_at_v(v, n->first_cluster, pos, buf, len);
+    if (pos + len > vn->size) { len = (uint32_t)(vn->size - pos); }
+    uint32_t got = fat16_read_at_v(v, n->first_cluster, (uint32_t)pos, buf, len);
     // Report what was actually read. Claiming `len` after a failed
     // sector is what let corrupt data reach an ELF image undetected.
     if (got == 0 && len > 0) { return -EIO; }
     return (int64_t)got;
 }
 
-static int64_t fatfs_write(struct vnode *vn, uint32_t pos, const void *buf, uint32_t len) {
+static int64_t fatfs_write(struct vnode *vn, uint64_t pos, const void *buf, uint32_t len) {
+    // FAT stores a file's size in 32 bits: 4 GiB - 1 is the largest file
+    // it can describe. Linux's vfat answers EFBIG past it; so does this.
+    if (pos + (uint64_t)len > 0xFFFFFFFFULL) { return -EFBIG; }
     struct fat_volume *v = (struct fat_volume *)vn->mount->fs_private;
     struct fatfs_inode *n = (struct fatfs_inode *)vn->fs_private;
 
     uint32_t new_cluster;
     uint32_t new_size;
-    int rc = fat16_write_file_v(v, n->first_cluster, vn->size, pos, buf, len,
+    int rc = fat16_write_file_v(v, n->first_cluster, (uint32_t)vn->size, (uint32_t)pos, buf, len,
                                 &new_cluster, &new_size);
     if (rc < 0) { return rc; }
 

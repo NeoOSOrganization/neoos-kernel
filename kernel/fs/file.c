@@ -27,7 +27,7 @@ static int64_t vnode_read(struct file_descriptor *f, void *buf, uint64_t len) {
     // unbounded time -- never holds it.
     vfs_lock();
     int64_t n = f->vn->mount->ops->read(f->vn, f->position, buf, (uint32_t)len);
-    if (n > 0) { f->position += (uint32_t)n; }
+    if (n > 0) { f->position += (uint64_t)n; }
     vfs_unlock();
     return n;
 }
@@ -36,7 +36,7 @@ static int64_t vnode_write(struct file_descriptor *f, const void *buf, uint64_t 
     if (!f->vn) { return -EBADF; }
     vfs_lock();
     int64_t n = f->vn->mount->ops->write(f->vn, f->position, buf, (uint32_t)len);
-    if (n > 0) { f->position += (uint32_t)n; }
+    if (n > 0) { f->position += (uint64_t)n; }
     vfs_unlock();
     return n;
 }
@@ -51,7 +51,7 @@ static int64_t vnode_lseek(struct file_descriptor *f, int64_t offset, int whence
 
     int64_t pos = base + offset;
     if (pos < 0) { return -EINVAL; }
-    f->position = (uint32_t)pos;
+    f->position = (uint64_t)pos;
     return pos;
 }
 
@@ -87,7 +87,7 @@ static int64_t vnode_getdents(struct file_descriptor *f, void *buf, int bytes) {
         // repeated calls walk forward exactly like read() does.
         struct vfs_dirent de;
         de.ino = 0; de.type = DT_UNKNOWN; de.name[0] = '\0';
-        if (f->vn->mount->ops->readdir(f->vn, f->position, &de) != 0) {
+        if (f->vn->mount->ops->readdir(f->vn, (uint32_t)f->position, &de) != 0) {
             break;  // past the last entry
         }
 

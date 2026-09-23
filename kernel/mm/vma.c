@@ -471,7 +471,7 @@ int vma_fill_page_from_file(struct vnode *vn, uint64_t off, uint64_t frame) {
     uint8_t *dst = (uint8_t *)phys_to_virt(frame);
     for (unsigned i = 0; i < PMM_FRAME_SIZE; i++) { dst[i] = 0; }
     if (!vn || !vn->mount || !vn->mount->ops->read) { return -EIO; }
-    int64_t n = vn->mount->ops->read(vn, (uint32_t)off, dst, PMM_FRAME_SIZE);
+    int64_t n = vn->mount->ops->read(vn, off, dst, PMM_FRAME_SIZE);
     return n < 0 ? (int)n : 0;
 }
 

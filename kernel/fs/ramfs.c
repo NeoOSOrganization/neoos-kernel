@@ -8,7 +8,7 @@ struct ramfs_node {
     char            name[VFS_NAME_MAX];
     uint32_t        parent;                  // node index; node 0 is the root
     enum vnode_type type;
-    uint32_t        size;
+    uint64_t        size;
     uint64_t        pages[RAMFS_MAX_PAGES];  // physical frames, 0 = unallocated
 };
 
@@ -86,15 +86,15 @@ static int ramfs_lookup(struct vnode *dir, const char *name, uint64_t *out_inode
     return -ENOENT;
 }
 
-static int64_t ramfs_read(struct vnode *vn, uint32_t pos, void *buf, uint32_t len) {
+static int64_t ramfs_read(struct vnode *vn, uint64_t pos, void *buf, uint32_t len) {
     struct ramfs_node *n = (struct ramfs_node *)vn->fs_private;
     if (pos >= n->size) { return 0; }
-    if (pos + len > n->size) { len = n->size - pos; }
+    if (pos + len > n->size) { len = (uint32_t)(n->size - pos); }
 
     uint8_t *dst = (uint8_t *)buf;
     for (uint32_t done = 0; done < len; ) {
-        uint32_t off = pos + done;
-        uint32_t page = off / PMM_FRAME_SIZE;
+        uint64_t off = pos + done;
+        uint32_t page = (uint32_t)(off / PMM_FRAME_SIZE);
         uint32_t in_page = off % PMM_FRAME_SIZE;
         uint32_t chunk = PMM_FRAME_SIZE - in_page;
         if (chunk > len - done) { chunk = len - done; }
@@ -115,14 +115,16 @@ static int64_t ramfs_read(struct vnode *vn, uint32_t pos, void *buf, uint32_t le
     return (int64_t)len;
 }
 
-static int64_t ramfs_write(struct vnode *vn, uint32_t pos, const void *buf, uint32_t len) {
+static int64_t ramfs_write(struct vnode *vn, uint64_t pos, const void *buf, uint32_t len) {
     struct ramfs_node *n = (struct ramfs_node *)vn->fs_private;
-    if (pos + len > RAMFS_MAX_PAGES * PMM_FRAME_SIZE) { return -ENOSPC; }
+    // The per-file cap is a file-SIZE limit, which Linux reports as EFBIG;
+    // ENOSPC stays for a failed page allocation below.
+    if (pos + len > (uint64_t)RAMFS_MAX_PAGES * PMM_FRAME_SIZE) { return -EFBIG; }
 
     const uint8_t *src = (const uint8_t *)buf;
     for (uint32_t done = 0; done < len; ) {
-        uint32_t off = pos + done;
-        uint32_t page = off / PMM_FRAME_SIZE;
+        uint64_t off = pos + done;
+        uint32_t page = (uint32_t)(off / PMM_FRAME_SIZE);
         uint32_t in_page = off % PMM_FRAME_SIZE;
         uint32_t chunk = PMM_FRAME_SIZE - in_page;
         if (chunk > len - done) { chunk = len - done; }
@@ -198,8 +200,8 @@ static int ramfs_truncate_to(struct vnode *vn, uint64_t len) {
         }
     }
 
-    n->size  = (uint32_t)len;
-    vn->size = (uint32_t)len;
+    n->size  = len;
+    vn->size = len;
     return 0;
 }
 

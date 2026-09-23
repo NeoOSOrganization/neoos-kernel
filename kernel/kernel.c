@@ -267,6 +267,7 @@ void kmain(void *multiboot_info) {
     vfs_mount_fs("tests", "/usr/tests", "embedfs");
     vfs_selftest();
     devfs_selftest();
+    fpos64_selftest();
 
     // Hits are sector reads the drive never saw. The ratio is the whole
     // point of the cache, so it goes in the boot log where a regression

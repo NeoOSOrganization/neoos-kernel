@@ -272,7 +272,7 @@ static int64_t fb_read(struct file_descriptor *f, void *buf, uint64_t n) {
     uint64_t k = fb.size - (uint64_t)f->position;
     if (k > n) { k = n; }
     for (uint64_t i = 0; i < k; i++) { ((uint8_t *)buf)[i] = fb.virt[f->position + i]; }
-    f->position += (uint32_t)k;
+    f->position += k;
     return (int64_t)k;
 }
 
@@ -283,7 +283,7 @@ static int64_t fb_write(struct file_descriptor *f, const void *buf, uint64_t n) 
     uint64_t k = fb.size - (uint64_t)f->position;
     if (k > n) { k = n; }
     for (uint64_t i = 0; i < k; i++) { fb.virt[f->position + i] = ((const uint8_t *)buf)[i]; }
-    f->position += (uint32_t)k;
+    f->position += k;
     return (int64_t)k;
 }
 
@@ -293,7 +293,7 @@ static int64_t fb_lseek(struct file_descriptor *f, int64_t off, int whence) {
     int64_t pos = base + off;
     if (pos < 0) { return -EINVAL; }
     if (pos > (int64_t)fb.size) { pos = (int64_t)fb.size; }
-    f->position = (uint32_t)pos;
+    f->position = (uint64_t)pos;
     return pos;
 }
 

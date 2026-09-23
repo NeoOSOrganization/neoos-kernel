@@ -67,11 +67,11 @@ static int embedfs_lookup(struct vnode *dir, const char *name, uint64_t *out_ino
     return -ENOENT;
 }
 
-static int64_t embedfs_read(struct vnode *vn, uint32_t pos, void *buf, uint32_t len) {
+static int64_t embedfs_read(struct vnode *vn, uint64_t pos, void *buf, uint32_t len) {
     const struct embedfs_entry *e = (const struct embedfs_entry *)vn->fs_private;
-    uint32_t size = (uint32_t)((const char *)e->end - (const char *)e->data);
+    uint64_t size = (uint64_t)((const char *)e->end - (const char *)e->data);
     if (pos >= size) { return 0; }
-    if (pos + len > size) { len = size - pos; }
+    if (pos + len > size) { len = (uint32_t)(size - pos); }
     const uint8_t *src = (const uint8_t *)e->data + pos;
     uint8_t *dst = (uint8_t *)buf;
     for (uint32_t i = 0; i < len; i++) { dst[i] = src[i]; }
@@ -80,7 +80,7 @@ static int64_t embedfs_read(struct vnode *vn, uint32_t pos, void *buf, uint32_t 
 
 // Read-only: every mutating op returns -EROFS, never NULL (per the
 // vfs_ops convention: "no op pointer is ever NULL").
-static int64_t embedfs_write(struct vnode *vn, uint32_t pos, const void *buf, uint32_t len) {
+static int64_t embedfs_write(struct vnode *vn, uint64_t pos, const void *buf, uint32_t len) {
     (void)vn; (void)pos; (void)buf; (void)len;
     return -EROFS;
 }

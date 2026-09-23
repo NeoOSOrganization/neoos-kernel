@@ -613,6 +613,7 @@ CORE_REQUIRED_MARKERS := \
 	"[term] render ALL PASSED" \
 	"[init] all entries exited -- powering off" \
 	"[devfs] selftest passed" \
+	"[fpos64] selftest passed" \
 	"[tty] selftest passed" \
 	"[wxorx] kernel selftest passed" \
 	"[rbtree] selftest passed" \

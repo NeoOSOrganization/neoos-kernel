@@ -69,7 +69,7 @@ struct vnode {
     struct vfs_mount *mount;
     uint64_t          inode_id;   // driver-defined, unique within the mount
     enum vnode_type   type;
-    uint32_t          size;
+    uint64_t          size;
     // Seconds since the Unix epoch, as the filesystem records them. 0
     // means "this filesystem does not keep one" -- ramfs and devfs
     // have nowhere to store it, and stat reports 0 there rather than
@@ -92,8 +92,8 @@ struct vfs_ops {
     int     (*read_inode)(struct vfs_mount *m, uint64_t inode_id, struct vnode *out);
     int     (*sync_inode)(struct vnode *vn);
     int     (*lookup)(struct vnode *dir, const char *name, uint64_t *out_inode_id);
-    int64_t (*read)(struct vnode *vn, uint32_t pos, void *buf, uint32_t len);
-    int64_t (*write)(struct vnode *vn, uint32_t pos, const void *buf, uint32_t len);
+    int64_t (*read)(struct vnode *vn, uint64_t pos, void *buf, uint32_t len);
+    int64_t (*write)(struct vnode *vn, uint64_t pos, const void *buf, uint32_t len);
     int     (*create)(struct vnode *dir, const char *name, uint64_t *out_inode_id);
     int     (*mkdir)(struct vnode *dir, const char *name);
     int     (*unlink)(struct vnode *dir, const char *name);
@@ -133,6 +133,7 @@ void vfs_init(void);
 void vfs_lock(void);
 void vfs_unlock(void);
 void vfs_selftest(void);
+void fpos64_selftest(void);   // kernel/fs/fpos64_selftest.c
 
 // Number of vnode pool slots currently claimed. A quiesced system
 // reads exactly one per mount (each mount holds its own root).

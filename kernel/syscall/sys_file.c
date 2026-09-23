@@ -837,9 +837,11 @@ int64_t sys_pread(struct syscall_args *a) {
     if (!f->vn) { return -ESPIPE; }          // pipe, socket, tty: no position
     if (f->vn->type == VNODE_DIR) { return -EISDIR; }
 
-    uint32_t saved = f->position;
-    f->position = (uint32_t)a->a4;
-    int64_t rc = file_read(f, (void *)(uintptr_t)a->a2, a->a3);
+    // Staged through a kernel buffer like read(2): a filesystem must
+    // never write user memory without the fault-tolerant copy.
+    uint64_t saved = f->position;
+    f->position = (uint64_t)a->a4;
+    int64_t rc = read_to_user(f, (uint64_t)a->a2, (uint64_t)a->a3);
     f->position = saved;
     return rc;
 }
@@ -853,9 +855,9 @@ int64_t sys_pwrite(struct syscall_args *a) {
     if (!f->vn) { return -ESPIPE; }          // pipe, socket, tty: no position
     if (f->vn->type == VNODE_DIR) { return -EISDIR; }
 
-    uint32_t saved = f->position;
-    f->position = (uint32_t)a->a4;
-    int64_t rc = file_write(f, (const void *)(uintptr_t)a->a2, a->a3);
+    uint64_t saved = f->position;
+    f->position = (uint64_t)a->a4;
+    int64_t rc = write_from_user(f, (uint64_t)a->a2, (uint64_t)a->a3);
     f->position = saved;
     return rc;
 }
