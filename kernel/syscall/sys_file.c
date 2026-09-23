@@ -566,6 +566,9 @@ int64_t sys_statx(struct syscall_args *a) {
     sx.stx_uid      = st.st_uid;
     sx.stx_gid      = st.st_gid;
     sx.stx_mode     = (uint16_t)st.st_mode;
+    // Linux splits st_rdev into major/minor for statx.
+    sx.stx_rdev_major = (uint32_t)(((st.st_rdev >> 32) & 0xfffff000u) | ((st.st_rdev >> 8) & 0xfffu));
+    sx.stx_rdev_minor = (uint32_t)(((st.st_rdev >> 12) & 0xffffff00u) | (st.st_rdev & 0xffu));
     sx.stx_ino      = st.st_ino;
     sx.stx_size     = (uint64_t)st.st_size;
     sx.stx_blocks   = (uint64_t)st.st_blocks;
@@ -891,6 +894,9 @@ int64_t sys_renameat2(struct syscall_args *a) {
 int64_t sys_fsync(struct syscall_args *a) {
     struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
     if (!f) { return -EBADF; }
+    // A block device node flushes the drive's write cache; everything
+    // else has nothing beyond the write-through cache to flush.
+    if (f->ops && f->ops->fsync) { return f->ops->fsync(f); }
     return 0;
 }
 

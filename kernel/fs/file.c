@@ -170,7 +170,7 @@ const struct file_ops vnode_file_ops = {
 // Returns 0, or a negative errno if dev->open failed.
 int64_t file_bind_vnode_ops(struct file_descriptor *f) {
     f->ops = &vnode_file_ops;
-    if (f->vn && f->vn->type == VNODE_DEVICE) {
+    if (f->vn && (f->vn->type == VNODE_DEVICE || f->vn->type == VNODE_BLOCK)) {
         const struct devfs_dev *dev = (const struct devfs_dev *)f->vn->fs_private;
         if (dev) {
             if (dev->fops) { f->ops = dev->fops; }

@@ -495,6 +495,14 @@ void vfs_stat_vnode(struct vnode *vn, struct stat *out) {
         out->st_mode  = S_IFCHR | 0666;
         out->st_nlink = 1;
         break;
+    case VNODE_BLOCK:
+        // Linux reports st_size 0 for a block node; the size comes from
+        // BLKGETSIZE64. 0660 is reported, not enforced -- NeoOS has no
+        // permission model yet (docs/stdlib.md).
+        out->st_mode  = S_IFBLK | 0660;
+        out->st_nlink = 1;
+        out->st_rdev  = devfs_vnode_rdev(vn);
+        break;
     default:
         out->st_mode  = S_IFREG | 0644;
         out->st_nlink = 1;

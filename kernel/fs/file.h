@@ -91,6 +91,10 @@ struct file_ops {
     // implementation frees the object when its last reference goes.
     void (*dup)(struct file_descriptor *f);
     void (*close)(struct file_descriptor *f);
+    // Optional (nullable). fsync/fdatasync on this fd. NULL means the
+    // object has nothing to flush -- the block cache is write-through,
+    // which is what the syscall answered for every fd before block nodes.
+    int (*fsync)(struct file_descriptor *f);
 };
 
 // The default: an fd whose ops pointer is null is vnode-backed. Every

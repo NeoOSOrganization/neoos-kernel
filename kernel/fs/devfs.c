@@ -395,7 +395,7 @@ static int devfs_read_inode(struct vfs_mount *m, uint64_t inode_id, struct vnode
     if (inode_id >= DEVFS_DYN_BASE) {
         int slot = (int)(inode_id - DEVFS_DYN_BASE);
         if (slot < 0 || slot >= DEVFS_DYN_MAX || !dyn[slot].used) { return -ENOENT; }
-        out->type = VNODE_DEVICE;
+        out->type = dyn[slot].dev.type;
         out->size = 0;
         out->fs_private = (void *)&dyn[slot].dev;
         return 0;
@@ -476,6 +476,18 @@ static int devfs_lookup(struct vnode *dir, const char *name, uint64_t *out_inode
             return 0;
         }
     }
+    // Root-level dynamic entries: block devices ("sda", "sda1").
+    if (dyn_lock_ready) {
+        uint64_t fl = spin_lock_irqsave(&dyn_lock);
+        for (int i = 0; i < DEVFS_DYN_MAX; i++) {
+            if (dyn[i].used && !devfs_dir_len(dyn[i].path) && name_eq(dyn[i].path, name)) {
+                *out_inode_id = DEVFS_DYN_BASE + (uint64_t)i;
+                spin_unlock_irqrestore(&dyn_lock, fl);
+                return 0;
+            }
+        }
+        spin_unlock_irqrestore(&dyn_lock, fl);
+    }
     return -ENOENT;
 }
 
@@ -555,6 +567,22 @@ static int devfs_readdir(struct vnode *dir, uint32_t index, struct vfs_dirent *o
             return 0;
         }
         count++;
+    }
+    // Then the root-level dynamic entries (block devices).
+    if (dyn_lock_ready) {
+        uint64_t fl = spin_lock_irqsave(&dyn_lock);
+        for (int i = 0; i < DEVFS_DYN_MAX; i++) {
+            if (!dyn[i].used || devfs_dir_len(dyn[i].path)) { continue; }
+            if (count == index) {
+                devfs_copy_name(out, dyn[i].path);
+                out->type = dyn[i].dev.type == VNODE_BLOCK ? DT_BLK : DT_CHR;
+                out->ino  = DEVFS_DYN_BASE + (uint64_t)i;
+                spin_unlock_irqrestore(&dyn_lock, fl);
+                return 0;
+            }
+            count++;
+        }
+        spin_unlock_irqrestore(&dyn_lock, fl);
     }
     return -ENOENT;
 }
