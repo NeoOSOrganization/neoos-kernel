@@ -791,7 +791,10 @@ int64_t sys_readv(struct syscall_args *a)  { return rw_vectored(a, 0); }
 int64_t sys_ioctl(struct syscall_args *a) {
     struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
     if (!f) { return -EBADF; }
-    return file_ioctl(f, (uint64_t)a->a2, (void *)(uintptr_t)a->a3);
+    // Linux's ioctl cmd is an unsigned int. musl passes it as int, so a
+    // request with bit 31 set (every _IOR, e.g. BLKGETSIZE64 =
+    // 0x80081272) arrives sign-extended; truncating is what Linux does.
+    return file_ioctl(f, (uint32_t)a->a2, (void *)(uintptr_t)a->a3);
 }
 
 // ---- fsync / fdatasync / fallocate / access (MSC-3) ------------------
