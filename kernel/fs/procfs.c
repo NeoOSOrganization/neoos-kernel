@@ -20,6 +20,7 @@
 // not missing so much as unasked-for -- the same rule that produced this
 // file in the first place.
 
+#include "block/blockdev.h"
 #include "fs/vfs.h"
 #include "fs/procfs.h"
 #include "drivers/char/timer.h"
@@ -42,6 +43,7 @@
 #define PROC_INO_SYSSTAT  1
 #define PROC_INO_MEMINFO  2
 #define PROC_INO_UPTIME   3
+#define PROC_INO_PARTITIONS 4
 #define PROC_INO_BASE     16
 #define PROC_PER_PID      4
 #define PROC_KIND_DIR     0
@@ -61,11 +63,47 @@ static int ino_kind(uint64_t ino) {
     return (int)((ino - PROC_INO_BASE) % PROC_PER_PID);
 }
 
+
 // ---- rendering ------------------------------------------------------
 
 static int put_str(char *out, int cap, int at, const char *s) {
     while (*s && at < cap - 1) { out[at++] = *s++; }
     return at;
+}
+
+// Right-aligns `v` in a field of `width`, as printf("%*u") would.
+static int put_padded(char *out, int cap, int at, uint64_t v, int width) {
+    char d[21];
+    int n = 0;
+    do { d[n++] = (char)('0' + v % 10); v /= 10; } while (v);
+    for (int i = n; i < width && at < cap - 1; i++) { out[at++] = ' '; }
+    while (n && at < cap - 1) { out[at++] = d[--n]; }
+    return at;
+}
+
+struct part_ctx { char *out; int cap; int at; };
+
+static void part_line(struct blockdev *d, void *arg) {
+    struct part_ctx *c = (struct part_ctx *)arg;
+    if (d->flags & BLOCKDEV_HIDDEN) { return; }
+    // Linux: "%4d  %7d %10llu %s\n", #blocks in 1 KiB units.
+    c->at = put_padded(c->out, c->cap, c->at, d->major, 4);
+    c->at = put_str(c->out, c->cap, c->at, "  ");
+    c->at = put_padded(c->out, c->cap, c->at, d->minor, 7);
+    c->at = put_str(c->out, c->cap, c->at, " ");
+    c->at = put_padded(c->out, c->cap, c->at, d->sector_count * d->sector_size / 1024, 10);
+    c->at = put_str(c->out, c->cap, c->at, " ");
+    c->at = put_str(c->out, c->cap, c->at, d->name);
+    c->at = put_str(c->out, c->cap, c->at, "\n");
+}
+
+// /proc/partitions, in Linux's format: what fdisk -l and blkid read.
+static int render_partitions(char *out, int cap) {
+    struct part_ctx c = { out, cap, 0 };
+    c.at = put_str(out, cap, 0, "major minor  #blocks  name\n\n");
+    blockdev_foreach(part_line, &c);
+    out[c.at] = 0;
+    return c.at;
 }
 
 static int put_int(char *out, int cap, int at, long v) {
@@ -245,7 +283,8 @@ static int procfs_read_inode(struct vfs_mount *m, uint64_t inode_id,
         out->size = 0;
         return 0;
     }
-    if (inode_id == PROC_INO_SYSSTAT || inode_id == PROC_INO_MEMINFO || inode_id == PROC_INO_UPTIME) {
+    if (inode_id == PROC_INO_SYSSTAT || inode_id == PROC_INO_MEMINFO || inode_id == PROC_INO_UPTIME ||
+        inode_id == PROC_INO_PARTITIONS) {
         out->type = VNODE_FILE;
         out->size = 0;
         return 0;
@@ -293,6 +332,7 @@ static int procfs_lookup(struct vnode *dir, const char *name,
         if (streq(name, "stat"))    { *out_inode_id = PROC_INO_SYSSTAT; return 0; }
         if (streq(name, "meminfo")) { *out_inode_id = PROC_INO_MEMINFO; return 0; }
         if (streq(name, "uptime"))  { *out_inode_id = PROC_INO_UPTIME;  return 0; }
+        if (streq(name, "partitions")) { *out_inode_id = PROC_INO_PARTITIONS; return 0; }
         // /proc/self: the CALLER's directory. A directory alias rather
         // than Linux's symlink -- NeoOS's VFS has no symlinks -- which
         // is invisible to anything that just opens /proc/self/<file>.
@@ -391,11 +431,13 @@ static int render_uptime(char *out, int cap) {
 static int64_t procfs_read(struct vnode *vn, uint64_t pos, void *buf,
                            uint32_t len) {
     if (vn->inode_id == PROC_INO_SYSSTAT || vn->inode_id == PROC_INO_MEMINFO ||
-        vn->inode_id == PROC_INO_UPTIME) {
-        char tmp[1024];
-        int n = vn->inode_id == PROC_INO_SYSSTAT ? render_sysstat(tmp, (int)sizeof tmp)
-              : vn->inode_id == PROC_INO_MEMINFO ? render_meminfo(tmp, (int)sizeof tmp)
-              :                                    render_uptime(tmp, (int)sizeof tmp);
+        vn->inode_id == PROC_INO_UPTIME || vn->inode_id == PROC_INO_PARTITIONS) {
+        // 2 KiB: /proc/partitions at BLOCKDEV_MAX devices outgrows 1 KiB.
+        char tmp[2048];
+        int n = vn->inode_id == PROC_INO_SYSSTAT    ? render_sysstat(tmp, (int)sizeof tmp)
+              : vn->inode_id == PROC_INO_MEMINFO    ? render_meminfo(tmp, (int)sizeof tmp)
+              : vn->inode_id == PROC_INO_PARTITIONS ? render_partitions(tmp, (int)sizeof tmp)
+              :                                       render_uptime(tmp, (int)sizeof tmp);
         if (pos >= (uint64_t)n) { return 0; }
         uint32_t k = (uint32_t)((uint64_t)n - pos);
         if (k > len) { k = len; }
@@ -453,12 +495,13 @@ static void name_from_int(char *out, int v) {
 
 static int procfs_readdir(struct vnode *dir, uint32_t index,
                           struct vfs_dirent *out) {
-    static const char *const root_files[] = { "stat", "meminfo", "uptime", "self" };
-    static const uint64_t root_inos[] = { PROC_INO_SYSSTAT, PROC_INO_MEMINFO, PROC_INO_UPTIME, 0 };
+    static const char *const root_files[] = { "stat", "meminfo", "uptime", "partitions", "self" };
+    static const uint64_t root_inos[] = { PROC_INO_SYSSTAT, PROC_INO_MEMINFO, PROC_INO_UPTIME,
+                                          PROC_INO_PARTITIONS, 0 };
     if (dir->inode_id == PROC_INO_ROOT) {
-        if (index < 4) {
+        if (index < 5) {
             name_copy_short(out->name, root_files[index]);
-            if (index == 3) {
+            if (index == 4) {
                 if (!current_proc()) { return -ENOENT; }
                 out->ino = ino_for(current_proc()->pid, PROC_KIND_DIR);
                 out->type = VNODE_DIR;
@@ -468,7 +511,7 @@ static int procfs_readdir(struct vnode *dir, uint32_t index,
             }
             return 0;
         }
-        index -= 4;
+        index -= 5;
         struct pid_list l = { .n = 0 };
         proc_table_for_each_ref(collect_pid, &l);
         if (index >= (uint32_t)l.n) { return -ENOENT; }

@@ -791,5 +791,18 @@ void vfs_selftest(void) {
         return;
     }
 
+    // /proc/partitions exists and starts with Linux's header line.
+    {
+        int perr = 0;
+        struct vnode *pp = vfs_resolve("/proc/partitions", &perr);
+        char pb[16] = {0};
+        if (!pp || pp->mount->ops->read(pp, 0, pb, 11) != 11 || pb[0] != 'm' || pb[6] != 'm') {
+            serial_write_string("[vfs] selftest FAILED: /proc/partitions\n");
+            if (pp) { vnode_put(pp); }
+            return;
+        }
+        vnode_put(pp);
+    }
+
     serial_write_string("[vfs] selftest passed\n");
 }
