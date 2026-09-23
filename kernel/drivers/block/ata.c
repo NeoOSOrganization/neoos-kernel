@@ -2,6 +2,13 @@
 #include "arch/io.h"
 #include "drivers/char/serial.h"
 #include "time/ktime.h"
+#include "block/blockdev.h"
+#include "sync/lock.h"
+#include "errno.h"
+
+struct ata_identify_info {
+    uint32_t sector_count;
+};
 
 #define ATA_DATA        0x1F0
 #define ATA_ERROR       0x1F1
@@ -93,9 +100,11 @@ static int ata_identify_locked(uint8_t drive, struct ata_identify_info *info) {
     outb(ATA_COMMAND, ATA_CMD_IDENTIFY);
 
     if (inb(ATA_STATUS) == 0) {
-        serial_write_string("[ata] identify FAILED: no drive present, drive=");
+        // An empty slot is normal (the disks may be on AHCI or NVMe), so
+        // this is not a failure.
+        serial_write_string("[ata] drive ");
         serial_write_hex64(drive);
-        serial_write_string("\n");
+        serial_write_string(" not present\n");
         return 0;
     }
     if (!ata_wait_status(ATA_STATUS_BSY, 0)) {
@@ -211,29 +220,79 @@ static int ata_write_sectors_locked(uint8_t drive, uint32_t lba, uint8_t count, 
 // is the only correct granularity here: the hardware has one set of
 // registers.
 
-struct spinlock ata_lock;
+static struct spinlock ata_lock;
 
 void ata_init(void) {
     spin_init(&ata_lock, LOCK_RANK_DRIVER, "ata");
 }
 
-int ata_identify(uint8_t drive, struct ata_identify_info *info) {
-    uint64_t f = spin_lock_irqsave(&ata_lock);
-    int rc = ata_identify_locked(drive, info);
-    spin_unlock_irqrestore(&ata_lock, f);
-    return rc;
+// ---- block device glue -----------------------------------------------
+
+#define ATA_LBA28_LIMIT (1ULL << 28)
+
+struct ata_disk {
+    struct blockdev bdev;       // first: a blockdev * is an ata_disk *
+    uint8_t drive;
+};
+static struct ata_disk disks[2];
+
+static int ata_flush_locked(uint8_t drive) {
+    outb(ATA_DRIVE_HEAD, 0xE0 | ((drive & 1) << 4));
+    if (!ata_wait_status(ATA_STATUS_BSY, 0)) { return 0; }
+    outb(ATA_COMMAND, ATA_CMD_CACHE_FLUSH);
+    return ata_wait_status_bounded(ATA_STATUS_BSY, 0, ATA_POLL_TIMEOUT_NS_FLUSH);
 }
 
-int ata_read_sectors(uint8_t drive, uint32_t lba, uint8_t count, void *buffer) {
-    uint64_t f = spin_lock_irqsave(&ata_lock);
-    int rc = ata_read_sectors_locked(drive, lba, count, buffer);
-    spin_unlock_irqrestore(&ata_lock, f);
-    return rc;
+// The command set is LBA28 with an 8-bit sector count: split into
+// commands of at most 255 sectors, each a complete sequence under the
+// lock, releasing between them.
+static int ata_xfer(struct blockdev *d, uint64_t lba, uint32_t count, void *buf, int wr) {
+    uint8_t drive = ((struct ata_disk *)d)->drive;
+    if (lba + count > ATA_LBA28_LIMIT) { return -EIO; }
+    uint8_t *p = (uint8_t *)buf;
+    while (count) {
+        uint8_t n = count > 255 ? 255 : (uint8_t)count;
+        uint64_t f = spin_lock_irqsave(&ata_lock);
+        int ok = wr ? ata_write_sectors_locked(drive, (uint32_t)lba, n, p)
+                    : ata_read_sectors_locked(drive, (uint32_t)lba, n, p);
+        spin_unlock_irqrestore(&ata_lock, f);
+        if (!ok) { return -EIO; }
+        lba += n;
+        count -= n;
+        p += (uint32_t)n * ATA_SECTOR_SIZE;
+    }
+    return 0;
 }
 
-int ata_write_sectors(uint8_t drive, uint32_t lba, uint8_t count, const void *buffer) {
+static int ata_bread(struct blockdev *d, uint64_t lba, uint32_t c, void *b) {
+    return ata_xfer(d, lba, c, b, 0);
+}
+static int ata_bwrite(struct blockdev *d, uint64_t lba, uint32_t c, const void *b) {
+    return ata_xfer(d, lba, c, (void *)b, 1);
+}
+static int ata_bflush(struct blockdev *d) {
     uint64_t f = spin_lock_irqsave(&ata_lock);
-    int rc = ata_write_sectors_locked(drive, lba, count, buffer);
+    int ok = ata_flush_locked(((struct ata_disk *)d)->drive);
     spin_unlock_irqrestore(&ata_lock, f);
-    return rc;
+    return ok ? 0 : -EIO;
+}
+
+static const struct blockdev_ops ata_ops = { .read = ata_bread, .write = ata_bwrite, .flush = ata_bflush };
+
+void ata_probe(void) {
+    for (uint8_t drive = 0; drive < 2; drive++) {
+        struct ata_identify_info info;
+        uint64_t f = spin_lock_irqsave(&ata_lock);
+        int ok = ata_identify_locked(drive, &info);
+        spin_unlock_irqrestore(&ata_lock, f);
+        if (!ok) { continue; }
+        struct ata_disk *ad = &disks[drive];
+        ad->drive = drive;
+        if (blockdev_alloc_name("sd", ad->bdev.name) != 0) { return; }
+        ad->bdev.sector_size = ATA_SECTOR_SIZE;
+        ad->bdev.sector_count = info.sector_count;
+        ad->bdev.ops = &ata_ops;
+        ad->bdev.priv = ad;
+        blockdev_register_disk(&ad->bdev);
+    }
 }

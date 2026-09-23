@@ -616,6 +616,8 @@ CORE_REQUIRED_MARKERS := \
 	"[fpos64] selftest passed" \
 	"[blockdev] selftest passed" \
 	"[part] selftest passed" \
+	"[blkcache] selftest passed" \
+	"[blockdev] sda: sectors=" \
 	"[tty] selftest passed" \
 	"[wxorx] kernel selftest passed" \
 	"[rbtree] selftest passed" \

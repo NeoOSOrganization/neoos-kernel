@@ -139,8 +139,8 @@ void fpos64_selftest(void);   // kernel/fs/fpos64_selftest.c
 // reads exactly one per mount (each mount holds its own root).
 uint32_t vfs_vnode_in_use_count(void);
 
-// fstype is "fat", "ramfs", or "devfs". source is "hd0"/"hd1" for
-// "fat" and ignored otherwise.
+// fstype is "fat", "ramfs", "devfs", "procfs" or "embedfs". For "fat",
+// source is a block device: "/dev/sda1" or "sda1".
 int vfs_mount_fs(const char *source, const char *target, const char *fstype);
 int vfs_umount(const char *target);
 

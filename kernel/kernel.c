@@ -238,17 +238,18 @@ void kmain(void *multiboot_info) {
     pci_init();
     pci_selftest();
 
-    ata_init();   // before the first ata_* call
-    struct ata_identify_info ata_info;
-    ata_identify(0, &ata_info);
+    ata_init();   // before ata_probe
 
     // Before the first sector read of the boot: every filesystem read
     // below goes through it.
     blkcache_init();
-    blkcache_selftest();
     blockdev_init();
     blockdev_selftest();
     part_selftest();
+    blkcache_selftest();
+    // Controller probes register disks and, through the partition scan,
+    // their partitions. (AHCI and NVMe will probe before legacy ATA.)
+    ata_probe();
 
     fat16_mount();
     fat16_selftest();
@@ -256,13 +257,13 @@ void kmain(void *multiboot_info) {
 
     vfs_init();
     flock_init();          // POSIX record locks (fcntl F_SETLK)
-    vfs_mount_fs("hd0", "/",    "fat");
+    vfs_mount_fs("/dev/sda", "/",    "fat");
     vfs_mount_fs(0,     "/dev", "devfs");
     vfs_mount_fs(0,     "/tmp", "ramfs");
     // BB5: synthetic, read-only, and mounted unconditionally -- `ps`
     // looks for /proc by name and says so when it is missing.
     vfs_mount_fs(0,     "/proc", "procfs");
-    vfs_mount_fs("hd1", "/mnt", "fat");
+    vfs_mount_fs("/dev/sdb", "/mnt", "fat");
     // Boot-critical apps (init/login/term/nsh) are linked directly
     // into this kernel image and served from here, never from FAT --
     // see kernel/fs/embedfs.c and docs/superpowers/specs/

@@ -366,7 +366,8 @@ int64_t sys_fcntl(struct syscall_args *a) {
 }
 
 int64_t sys_mount(struct syscall_args *a) {
-    char source[16], target[VFS_MAX_PATH], fstype[16];
+    // 64: room for "/dev/nvme0n1p1"-style block device paths.
+    char source[64], target[VFS_MAX_PATH], fstype[16];
     copy_user_string(a->a1, source, sizeof(source));
     copy_user_string(a->a2, target, sizeof(target));
     copy_user_string(a->a3, fstype, sizeof(fstype));

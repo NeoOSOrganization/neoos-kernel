@@ -1,6 +1,6 @@
 #include "fs/fatfs.h"
 #include "fs/blkcache.h"
-#include "drivers/block/ata.h"
+#include "block/blockdev.h"
 #include "drivers/char/serial.h"
 #include "mm/heap.h"
 
@@ -89,7 +89,7 @@ _Static_assert(sizeof(struct fat16_dirent) == 32, "FAT directory entry must be 3
 // until the variant work lands, but live here from the start so that
 // change touches only the code that reads them.
 struct fat_volume {
-    uint8_t  drive;
+    struct blockdev *bdev;
     enum { FAT_16, FAT_32 } variant;
     uint16_t bytes_per_sector;
     uint8_t  sectors_per_cluster;
@@ -118,12 +118,18 @@ struct fat_volume {
 // callers.
 static struct fat_volume legacy_volume;
 
+// FAT reads and writes one 512-byte sector at a time through the block
+// cache. These keep the driver's 1-on-success convention, so moving
+// from ATA drive numbers to block devices is a rename at every call.
+static int fat_rd(struct fat_volume *v, uint32_t lba, void *buf)       { return blkcache_read(v->bdev, lba, buf) == 0; }
+static int fat_wr(struct fat_volume *v, uint32_t lba, const void *buf) { return blkcache_write(v->bdev, lba, buf) == 0; }
+
 static uint32_t cluster_to_lba(struct fat_volume *v, uint32_t cluster) {
     return v->data_start_lba + (uint32_t)(cluster - 2) * v->sectors_per_cluster;
 }
 
 // Reads and parses the boot sector into v, which must already have
-// v->drive set. Returns 1 on success. Shared by the legacy
+// v->bdev set. Returns 1 on success. Shared by the legacy
 // fat16_mount() and the VFS driver's mount op.
 static int fat_read_bpb(struct fat_volume *v) {
     // Every mount path lands here, so the allocation hint and the
@@ -131,7 +137,7 @@ static int fat_read_bpb(struct fat_volume *v) {
     v->next_free_hint = 2;
 
     uint8_t sector[SECTOR_SIZE];
-    if (!blkcache_read(v->drive, 0, sector)) {
+    if (!fat_rd(v, 0, sector)) {
         return 0;
     }
     struct fat16_bpb *bpb = (struct fat16_bpb *)sector;
@@ -181,7 +187,11 @@ static int fat_read_bpb(struct fat_volume *v) {
 
 int fat16_mount(void) {
     struct fat_volume *v = &legacy_volume;
-    v->drive = 0;
+    v->bdev = blockdev_find("sda");
+    if (!v->bdev) {
+        serial_write_string("[fat16] mount FAILED: no sda\n");
+        return 0;
+    }
     if (!fat_read_bpb(v)) {
         serial_write_string("[fat16] mount FAILED: could not read boot sector\n");
         return 0;
@@ -206,7 +216,7 @@ static uint32_t fat16_next_cluster(struct fat_volume *v, uint32_t cluster) {
     uint32_t offset_in_sector = fat_offset % v->bytes_per_sector;
 
     uint8_t sector[SECTOR_SIZE];
-    if (!blkcache_read(v->drive, fat_sector, sector)) {
+    if (!fat_rd(v, fat_sector, sector)) {
         return 0x0FFFFFFF;
     }
     if (v->variant == FAT_32) {
@@ -224,7 +234,7 @@ static void fat16_set_next_cluster(struct fat_volume *v, uint32_t cluster, uint3
     uint32_t offset_in_sector = fat_offset % v->bytes_per_sector;
 
     uint8_t sector[SECTOR_SIZE];
-    if (!blkcache_read(v->drive, fat_sector, sector)) {
+    if (!fat_rd(v, fat_sector, sector)) {
         return;
     }
     if (v->variant == FAT_32) {
@@ -238,7 +248,7 @@ static void fat16_set_next_cluster(struct fat_volume *v, uint32_t cluster, uint3
     // reported "FATs differ" on every image NeoOS had written to, and a
     // tool that trusts the second copy would see stale chains.
     for (uint32_t k = 0; k < v->num_fats; k++) {
-        blkcache_write(v->drive, fat_sector + k * v->sectors_per_fat, sector);
+        fat_wr(v, fat_sector + k * v->sectors_per_fat, sector);
     }
 
     // Any chain this entry belongs to may have just been extended,
@@ -313,7 +323,7 @@ static uint32_t fat16_alloc_cluster(struct fat_volume *v) {
         while (cluster < limit) {
             uint32_t fat_offset = cluster * entry_size;
             uint32_t fat_sector = v->fat_start_lba + fat_offset / v->bytes_per_sector;
-            if (!blkcache_read(v->drive, fat_sector, sector)) { return 0; }
+            if (!fat_rd(v, fat_sector, sector)) { return 0; }
 
             for (uint32_t index = cluster % per_sector;
                  index < per_sector && cluster < limit;
@@ -417,12 +427,12 @@ static void write_range(struct fat_volume *v, uint32_t chain_start, uint32_t wri
 
         uint8_t sector[SECTOR_SIZE];
         if (offset_in_sector != 0 || to_write != v->bytes_per_sector) {
-            blkcache_read(v->drive, lba, sector); // partial sector: preserve untouched bytes
+            fat_rd(v, lba, sector); // partial sector: preserve untouched bytes
         }
         for (uint32_t i = 0; i < to_write; i++) {
             sector[offset_in_sector + i] = zero_fill ? 0 : in[written + i];
         }
-        blkcache_write(v->drive, lba, sector);
+        fat_wr(v, lba, sector);
 
         written += to_write;
     }
@@ -438,7 +448,7 @@ uint32_t fat16_read_file(uint32_t first_cluster, uint32_t size, void *buffer) {
     while (!fat_is_eoc(v, cluster) && bytes_read < size) {
         uint32_t lba = cluster_to_lba(v, cluster);
         for (uint8_t s = 0; s < v->sectors_per_cluster && bytes_read < size; s++) {
-            blkcache_read(v->drive, lba + s, sector_buf);
+            fat_rd(v, lba + s, sector_buf);
             uint32_t to_copy = size - bytes_read;
             if (to_copy > v->bytes_per_sector) {
                 to_copy = v->bytes_per_sector;
@@ -486,7 +496,7 @@ uint32_t fat16_read_at_v(struct fat_volume *v, uint32_t first_cluster, uint32_t 
         }
 
         uint8_t sector[SECTOR_SIZE];
-        if (!blkcache_read(v->drive, lba, sector)) {
+        if (!fat_rd(v, lba, sector)) {
             // Stop here and report short. Copying on would hand the
             // caller uninitialised stack bytes as file contents.
             serial_write_string("[fat] read FAILED lba=");
@@ -662,7 +672,7 @@ static int find_in_root(struct fat_volume *v, const uint8_t *target_name, struct
     uint8_t sector[SECTOR_SIZE];
     for (uint32_t s = 0; s < v->root_dir_sector_count; s++) {
         uint32_t lba = v->root_dir_start_lba + s;
-        blkcache_read(v->drive, lba, sector);
+        fat_rd(v, lba, sector);
         int result = scan_sector_for_name(sector, lba, target_name, out, out_lba, out_offset);
         if (result != 0) {
             return result > 0;
@@ -678,7 +688,7 @@ static int find_in_directory_cluster(struct fat_volume *v, uint32_t dir_cluster,
     while (!fat_is_eoc(v, cluster)) {
         uint32_t lba = cluster_to_lba(v, cluster);
         for (uint8_t s = 0; s < v->sectors_per_cluster; s++) {
-            blkcache_read(v->drive, lba + s, sector);
+            fat_rd(v, lba + s, sector);
             int result = scan_sector_for_name(sector, lba + s, target_name, out, out_lba, out_offset);
             if (result != 0) {
                 return result > 0;
@@ -870,7 +880,7 @@ static int slots_next(struct fat_slots *it, struct fat16_dirent *out, uint32_t *
             }
             uint32_t base = it->in_root ? v->root_dir_start_lba : cluster_to_lba(v, it->cluster);
             it->lba = base + it->sector_in_unit;
-            if (!blkcache_read(v->drive, it->lba, it->sector)) { it->done = 1; return 0; }
+            if (!fat_rd(v, it->lba, it->sector)) { it->done = 1; return 0; }
             it->loaded = 1;
             it->ent = 0;
         }
@@ -1184,11 +1194,11 @@ static int write_slots_at(struct fat_volume *v, int in_root, uint32_t dir_cluste
             writing = 1;
         }
         if (dirty && lba != cur_lba) {
-            blkcache_write(v->drive, cur_lba, sector);
+            fat_wr(v, cur_lba, sector);
             dirty = 0;
         }
         if (!dirty) {
-            if (!blkcache_read(v->drive, lba, sector)) { return -EIO; }
+            if (!fat_rd(v, lba, sector)) { return -EIO; }
             cur_lba = lba;
         }
         struct fat16_dirent *entries = (struct fat16_dirent *)sector;
@@ -1196,7 +1206,7 @@ static int write_slots_at(struct fat_volume *v, int in_root, uint32_t dir_cluste
         dirty = 1;
         written++;
     }
-    if (dirty) { blkcache_write(v->drive, cur_lba, sector); }
+    if (dirty) { fat_wr(v, cur_lba, sector); }
     return written == count ? 0 : -ENOSPC;
 }
 
@@ -1239,7 +1249,7 @@ static int find_free_run(struct fat_volume *v, int in_root, uint32_t dir_cluster
         for (uint32_t i = 0; i < SECTOR_SIZE; i++) { zero[i] = 0; }
         uint32_t nlba = cluster_to_lba(v, nc);
         for (uint8_t sx = 0; sx < v->sectors_per_cluster; sx++) {
-            blkcache_write(v->drive, nlba + sx, zero);
+            fat_wr(v, nlba + sx, zero);
         }
     }
     return 0;
@@ -1392,12 +1402,12 @@ static int create_entry_in_directory(struct fat_volume *v, uint32_t dir_cluster,
     if (in_root) {
         for (uint32_t s = 0; s < v->root_dir_sector_count; s++) {
             uint32_t lba = v->root_dir_start_lba + s;
-            blkcache_read(v->drive, lba, sector);
+            fat_rd(v, lba, sector);
             struct fat16_dirent *entries = (struct fat16_dirent *)sector;
             for (uint32_t e = 0; e < DIRENTS_PER_SECTOR; e++) {
                 if (entries[e].name[0] == 0x00 || entries[e].name[0] == 0xE5) {
                     write_dirent(v, &entries[e], fat_name, attr, first_cluster, size);
-                    blkcache_write(v->drive, lba, sector);
+                    fat_wr(v, lba, sector);
                     if (out_lba) {
                         *out_lba = lba;
                     }
@@ -1416,12 +1426,12 @@ static int create_entry_in_directory(struct fat_volume *v, uint32_t dir_cluster,
     while (!fat_is_eoc(v, cluster)) {
         uint32_t lba = cluster_to_lba(v, cluster);
         for (uint8_t s = 0; s < v->sectors_per_cluster; s++) {
-            blkcache_read(v->drive, lba + s, sector);
+            fat_rd(v, lba + s, sector);
             struct fat16_dirent *entries = (struct fat16_dirent *)sector;
             for (uint32_t e = 0; e < DIRENTS_PER_SECTOR; e++) {
                 if (entries[e].name[0] == 0x00 || entries[e].name[0] == 0xE5) {
                     write_dirent(v, &entries[e], fat_name, attr, first_cluster, size);
-                    blkcache_write(v->drive, lba + s, sector);
+                    fat_wr(v, lba + s, sector);
                     if (out_lba) {
                         *out_lba = lba + s;
                     }
@@ -1448,12 +1458,12 @@ static int create_entry_in_directory(struct fat_volume *v, uint32_t dir_cluster,
     }
     uint32_t new_lba = cluster_to_lba(v, new_cluster);
     for (uint8_t s = 0; s < v->sectors_per_cluster; s++) {
-        blkcache_write(v->drive, new_lba + s, zero_sector);
+        fat_wr(v, new_lba + s, zero_sector);
     }
 
     struct fat16_dirent *entries = (struct fat16_dirent *)zero_sector;
     write_dirent(v, &entries[0], fat_name, attr, first_cluster, size);
-    blkcache_write(v->drive, new_lba, zero_sector);
+    fat_wr(v, new_lba, zero_sector);
     if (out_lba) {
         *out_lba = new_lba;
     }
@@ -1564,7 +1574,7 @@ int fat16_mkdir(const char *path) {
     }
     uint32_t lba = cluster_to_lba(v, new_cluster);
     for (uint8_t s = 0; s < v->sectors_per_cluster; s++) {
-        blkcache_write(v->drive, lba + s, zero_sector);
+        fat_wr(v, lba + s, zero_sector);
     }
 
     // "." and "..", for the same reason the vnode mkdir writes them:
@@ -1578,7 +1588,7 @@ int fat16_mkdir(const char *path) {
         struct fat16_dirent *e = (struct fat16_dirent *)zero_sector;
         write_dirent(v, &e[0], dot, FAT_ATTR_DIRECTORY, new_cluster, 0);
         write_dirent(v, &e[1], dotdot, FAT_ATTR_DIRECTORY, in_root ? 0 : dir_cluster, 0);
-        blkcache_write(v->drive, lba, zero_sector);
+        fat_wr(v, lba, zero_sector);
     }
 
     uint32_t dir_lba;
@@ -1602,7 +1612,7 @@ int fat16_delete_entry(const char *path) {
     }
 
     uint8_t sector[SECTOR_SIZE];
-    blkcache_read(v->drive, dir_lba, sector);
+    fat_rd(v, dir_lba, sector);
     struct fat16_dirent *entry = (struct fat16_dirent *)(sector + dir_offset);
     if (entry->attr & FAT_ATTR_DIRECTORY) {
         return -EISDIR;
@@ -1612,17 +1622,17 @@ int fat16_delete_entry(const char *path) {
         fat16_free_chain(v, cluster);
     }
     entry->name[0] = 0xE5;
-    blkcache_write(v->drive, dir_lba, sector);
+    fat_wr(v, dir_lba, sector);
     return 0;
 }
 
 void fat16_update_entry_size_v(struct fat_volume *v, uint32_t dir_lba, uint16_t dir_offset, uint32_t first_cluster, uint32_t size) {
     uint8_t sector[SECTOR_SIZE];
-    blkcache_read(v->drive, dir_lba, sector);
+    fat_rd(v, dir_lba, sector);
     struct fat16_dirent *entry = (struct fat16_dirent *)(sector + dir_offset);
     dirent_set_cluster(v, entry, first_cluster);
     entry->file_size = size;
-    blkcache_write(v->drive, dir_lba, sector);
+    fat_wr(v, dir_lba, sector);
 }
 
 int fat16_find(const char *path, uint32_t *out_cluster, uint32_t *out_size,
@@ -1758,13 +1768,13 @@ void fat16_write_selftest(void) {
         write_buf[i] = (uint8_t)(i & 0xFF);
     }
     uint32_t lba = cluster_to_lba(v, cluster);
-    if (!blkcache_write(v->drive, lba, write_buf)) {
+    if (!fat_wr(v, lba, write_buf)) {
         serial_write_string("[fat16] write selftest FAILED: sector write failed\n");
         return;
     }
 
     uint8_t read_buf[SECTOR_SIZE];
-    if (!blkcache_read(v->drive, lba, read_buf)) {
+    if (!fat_rd(v, lba, read_buf)) {
         serial_write_string("[fat16] write selftest FAILED: sector read failed\n");
         return;
     }
@@ -2009,22 +2019,18 @@ static void from_fat_name(const uint8_t *raw, uint8_t nt_reserved, char *out) {
 // this exposes it for the VFS path.
 static int mark_dirent_deleted(struct fat_volume *v, uint32_t lba, uint16_t offset) {
     uint8_t sector[SECTOR_SIZE];
-    if (!blkcache_read(v->drive, lba, sector)) { return -ENOSPC; }
+    if (!fat_rd(v, lba, sector)) { return -ENOSPC; }
     sector[offset] = 0xE5;
-    if (!blkcache_write(v->drive, lba, sector)) { return -ENOSPC; }
+    if (!fat_wr(v, lba, sector)) { return -ENOSPC; }
     return 0;
 }
 
 
 static int fatfs_mount_op(struct vfs_mount *m, const char *source) {
-    uint8_t drive;
-    if (source && source[0] == 'h' && source[1] == 'd' && source[2] == '1') {
-        drive = 1;
-    } else if (source && source[0] == 'h' && source[1] == 'd' && source[2] == '0') {
-        drive = 0;
-    } else {
-        return -ENODEV;
-    }
+    struct blockdev *bdev = blockdev_find_path(source);
+    if (!bdev) { return -ENODEV; }
+    // FAT's BPB allows larger sectors; this driver assumes 512 throughout.
+    if (bdev->sector_size != 512) { return -EINVAL; }
 
     int slot = -1;
     for (int i = 0; i < FATFS_MAX_VOLUMES; i++) {
@@ -2033,7 +2039,7 @@ static int fatfs_mount_op(struct vfs_mount *m, const char *source) {
     if (slot < 0) { return -ENOSPC; }
 
     struct fat_volume *v = &volumes[slot];
-    v->drive = drive;
+    v->bdev = bdev;
     if (!fat_read_bpb(v)) {
         return -ENODEV;
     }
@@ -2041,8 +2047,8 @@ static int fatfs_mount_op(struct vfs_mount *m, const char *source) {
     volume_used[slot] = 1;
     m->fs_private = v;
 
-    serial_write_string("[fatfs] mounted drive=");
-    serial_write_hex64(v->drive);
+    serial_write_string("[fatfs] mounted ");
+    serial_write_string(bdev->name);
     serial_write_string(" variant=");
     serial_write_string(v->variant == FAT_32 ? "FAT32" : "FAT16");
     serial_write_string(" sectors_per_cluster=");
@@ -2056,10 +2062,10 @@ static void fatfs_umount_op(struct vfs_mount *m) {
     for (int i = 0; i < FATFS_MAX_VOLUMES; i++) {
         if (&volumes[i] == v) { volume_used[i] = 0; }
     }
-    // Nothing else on this drive is mounted once the volume is
+    // Nothing else on this disk is mounted once the volume is
     // released, and a remount must not be handed sectors cached from
     // the image that was there before.
-    if (v) { blkcache_invalidate_drive(v->drive); }
+    if (v) { blkcache_invalidate(v->bdev); }
     m->fs_private = 0;
 }
 
@@ -2088,7 +2094,7 @@ static int fatfs_read_inode(struct vfs_mount *m, uint64_t inode_id, struct vnode
     uint16_t off = (uint16_t)(inode_id & 0xFFFF);
 
     uint8_t sector[SECTOR_SIZE];
-    if (!blkcache_read(v->drive, lba, sector)) {
+    if (!fat_rd(v, lba, sector)) {
         n->in_use = 0;
         return -ENOENT;
     }
@@ -2212,7 +2218,7 @@ static int fatfs_mkdir_op(struct vnode *dir, const char *name) {
     for (int i = 0; i < SECTOR_SIZE; i++) { zero[i] = 0; }
     uint32_t base = cluster_to_lba(v, cluster);
     for (uint32_t s = 0; s < v->sectors_per_cluster; s++) {
-        blkcache_write(v->drive, base + s, zero);
+        fat_wr(v, base + s, zero);
     }
 
     // "." and ".." MUST be the first two entries of a FAT subdirectory.
@@ -2233,7 +2239,7 @@ static int fatfs_mkdir_op(struct vnode *dir, const char *name) {
         write_dirent(v, &e[0], dot, FAT_ATTR_DIRECTORY, cluster, 0);
         uint32_t parent_cluster = in_root ? 0 : d->first_cluster;
         write_dirent(v, &e[1], dotdot, FAT_ATTR_DIRECTORY, parent_cluster, 0);
-        blkcache_write(v->drive, base, zero);
+        fat_wr(v, base, zero);
     }
 
     uint32_t lba;
@@ -2371,7 +2377,7 @@ static int fatfs_rename_op(struct vnode *odir, const char *oname,
     // rename(2) changes the name, not the file: carry the times over
     // (fat_create_named stamped "now").
     uint8_t sector[SECTOR_SIZE];
-    if (blkcache_read(v->drive, lba, sector)) {
+    if (fat_rd(v, lba, sector)) {
         struct fat16_dirent *ne = (struct fat16_dirent *)(sector + off);
         ne->create_time_tenth = src.de.create_time_tenth;
         ne->create_time = src.de.create_time;
@@ -2379,7 +2385,7 @@ static int fatfs_rename_op(struct vnode *odir, const char *oname,
         ne->access_date = src.de.access_date;
         ne->write_time  = src.de.write_time;
         ne->write_date  = src.de.write_date;
-        blkcache_write(v->drive, lba, sector);
+        fat_wr(v, lba, sector);
     }
 
     // The old run's location is stable across the create (occupied slots
@@ -2391,11 +2397,11 @@ static int fatfs_rename_op(struct vnode *odir, const char *oname,
     // (0 means "the root" on FAT, whichever variant).
     if (src_is_dir && src_cluster && odir != ndir) {
         uint32_t base = cluster_to_lba(v, src_cluster);
-        if (blkcache_read(v->drive, base, sector)) {
+        if (fat_rd(v, base, sector)) {
             struct fat16_dirent *dd = (struct fat16_dirent *)sector;
             uint32_t parent = (ndir->inode_id == FATFS_ROOT_INODE) ? 0 : nd->first_cluster;
             dirent_set_cluster(v, &dd[1], parent);
-            blkcache_write(v->drive, base, sector);
+            fat_wr(v, base, sector);
         }
     }
 

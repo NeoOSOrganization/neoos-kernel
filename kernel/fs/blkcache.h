@@ -20,33 +20,40 @@
  *
  * Not a page cache: it caches disk sectors, not file contents, and
  * knows nothing about files.
+ *
+ * Keyed by (whole-disk blockdev, whole-disk LBA): a sector read through
+ * /dev/sda1 and through /dev/sda is one entry, so the two can never
+ * disagree.
  */
 
-#define BLKCACHE_SECTOR_SIZE 512
-#define BLKCACHE_ENTRIES     128   // 128 * 512 = 64KiB
-#define BLKCACHE_BUCKETS     64
+struct blockdev;
+
+#define BLKCACHE_MAX_SECTOR 4096   // largest logical sector size (4Kn NVMe)
+#define BLKCACHE_ENTRIES    128    // 128 * 4 KiB = 512 KiB, from the PMM
+#define BLKCACHE_BUCKETS    64
 
 void blkcache_init(void);
 
-// Reads one sector, from cache if present. Returns 1 on success, 0 if
-// the underlying read failed (the cache is left untouched).
-int blkcache_read(uint8_t drive, uint32_t lba, void *out);
+// One logical sector of `d` (a disk or a partition). Return 0 or a
+// negative errno; -EIO for an LBA outside `d`. A failed write drops the
+// cached copy rather than leave it disagreeing with the disk.
+int  blkcache_read(struct blockdev *d, uint64_t lba, void *out);
+int  blkcache_write(struct blockdev *d, uint64_t lba, const void *in);
 
-// Writes one sector through to the disk and updates the cache to
-// match. Returns 1 on success; on failure the cached copy is dropped
-// rather than left disagreeing with the disk.
-int blkcache_write(uint8_t drive, uint32_t lba, const void *in);
+// Multi-sector transfers straight to the device, for bulk I/O (raw
+// device reads, ext2 blocks) that would otherwise evict the metadata
+// the cache exists for. Coherent: a multi-write updates any cached
+// sector in its range; a multi-read cannot see stale data because the
+// cache is write-through.
+int  blkcache_read_multi(struct blockdev *d, uint64_t lba, uint32_t count, void *out);
+int  blkcache_write_multi(struct blockdev *d, uint64_t lba, uint32_t count, const void *in);
 
-// Drops every cached sector for a drive. Called on umount, so a later
-// remount cannot be served stale metadata.
-void blkcache_invalidate_drive(uint8_t drive);
+// Drops every cached sector of `d`'s whole disk. Called on umount and
+// when a disk is unregistered.
+void blkcache_invalidate(struct blockdev *d);
 
 // Cumulative counters since boot, for the mount-time log line.
 void blkcache_stats(uint64_t *out_hits, uint64_t *out_misses);
-
-struct blockdev;
-// Placeholder until the cache is keyed by blockdev (storage-01 task 4).
-void blkcache_invalidate(struct blockdev *d);
 
 void blkcache_selftest(void);
 
