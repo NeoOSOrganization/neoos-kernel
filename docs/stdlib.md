@@ -84,7 +84,8 @@ alongside the library code that exposes it.
   Returns 0, or a negative `<errno.h>` code on failure.
 - `int unlink(const char *path)` — deletes the file at `path`. Returns
   0, or a negative `<errno.h>` code on failure (including `-EISDIR` if
-  `path` is a directory; there is no `rmdir`).
+  `path` is a directory). libneoos has no `rmdir` wrapper; the kernel
+  has `rmdir` since desktop M0 and musl's `rmdir()` reaches it.
 - `STDIN_FILENO`/`STDOUT_FILENO`/`STDERR_FILENO` (0/1/2) and
   `SEEK_SET`/`SEEK_CUR`/`SEEK_END` (0/1/2) constants. The three
   standard streams are ordinary file descriptors open on
@@ -914,10 +915,11 @@ composites from it.
   `AT_FDCWD` for the `*at` forms.
 
 **Deferred (need FS-layer work, a future milestone — not syscall
-plumbing):** `renameat2`, `utimensat`, `linkat`/`symlinkat`,
-`fchmodat`/`fchownat`, arbitrary-length `ftruncate`, OFD `fcntl`
-locks. NeoOS's VFS currently has no rename, no set-attribute, no
-link, and no symlink operation for any mounted filesystem.
+plumbing):** `utimensat`, `linkat`/`symlinkat`, `fchmodat`/`fchownat`,
+arbitrary-length `ftruncate`, OFD `fcntl` locks. NeoOS's VFS has no
+set-attribute, link or symlink operation yet. (`rename*`, `rmdir` and
+POSIX record locks arrived with desktop M0 — see "Files: desktop M0
+additions".)
 
 **Deferred to a later MSC pass:** `timerfd_*` and `signalfd4` — both
 need an fd-object plus a tick-driven expiry/pending-signal poke that
@@ -2241,19 +2243,27 @@ its number to the next one), and after ~1M process creations they begin
 to repeat. The old allocator did neither — it reused the most recently
 freed pid *first*, and stopped allocating entirely at 2^20.
 
-**`/proc` is synthetic, read-only, and minimal.** It provides
-`/proc/<pid>/stat` and `/proc/<pid>/cmdline` and nothing else — no
-`/proc/self`, no `meminfo`, no `mounts`. That is not an oversight: `ps`
-is the only thing that has asked for `/proc`, and it asked by name, so
-this provides what `ps` reads and stops. Divergences worth knowing:
+**`/proc` is synthetic and read-only.** It provides
+`/proc/<pid>/{stat,status,cmdline}`, `/proc/stat` (aggregate and
+per-CPU `cpuN` lines), `/proc/meminfo`, `/proc/uptime` and `/proc/self`
+(desktop M0, for Task Manager and `top`) — no `mounts`, `maps`, `fd/`.
+Divergences worth knowing:
 
 - **`stat` reports `st_size` 0** for every `/proc` file, as Linux does.
   The content is rendered at *read* time.
 - **Fields NeoOS does not track are `0`, not omitted.** `stat`'s format
   is positional, so a missing field would silently shift every later
-  field into the wrong slot. `tty_nr`, the time and fault counters and
-  the priority fields are all 0; `pid`, `comm`, state, `ppid`, `pgrp`
-  and `session` are real.
+  field into the wrong slot. Real: `pid`, `comm`, `state` (R/S/T/Z from
+  the thread states), `ppid`, `pgrp`, `session`, `utime`, `priority`,
+  `nice`, `num_threads`, `starttime`, `vsize`, `rss` (fields 1–6,
+  14, 18–20, 22–24). **DIVERGENCE:** `utime` is user *and* kernel time
+  (the scheduler does not split them) and `stime` is 0; `tty_nr` and
+  the fault counters are 0; `stat` stops at field 24.
+- **`/proc/self` is a directory alias, not a symlink** — NeoOS's VFS has
+  no symlinks. `open("/proc/self/status")` behaves as on Linux;
+  `readlink("/proc/self")` does not.
+- **`/proc/meminfo`**: no page cache and no swap, so `MemAvailable` ==
+  `MemFree` and the cache/swap lines read 0.
 - **Writes return `-EPERM`** rather than succeeding silently.
 - **A process that exits between `open` and `read` reads as empty**
   (EOF) rather than erroring.
@@ -2407,7 +2417,15 @@ ordinary process cannot kill init" true, with no special case naming PID
 1 — init runs as god. The check covers `sig == 0` too, so a caller that
 may not signal a process cannot use the existence probe to learn whether
 it exists. A broadcast (`kill(-1)`) *skips* what it may not signal
-rather than failing, which is what that call means.
+rather than failing, which is what that call means — and, as on Linux,
+it never signals init or the caller.
+
+**init shuts down on signals**, BusyBox init's convention: `SIGUSR2` →
+power off, `SIGTERM` → reboot. It stops respawning, sends `SIGTERM` to
+everything, waits up to 5 s for processes to exit, `SIGKILL`s the rest,
+reaps, and calls `reboot(2)`. This is how an unprivileged desktop asks
+for Shut down / Restart (`kill(1, SIGUSR2)`), and BusyBox's `poweroff`
+/ `reboot` applets work the same way.
 
 **`reboot` is god's**, not PID 1's. Linux gates it on privilege rather
 than on being init, and the old rule is why nothing but init could power
@@ -2503,12 +2521,12 @@ The environment itself originates in **init**, which is the only place
 it can: nothing above PID 1 has one to pass down. It supplies `PATH`,
 `HOME`, `TERM` and `PS1`, and every process inherits from there.
 
-`fcntl` implements `F_GETFL`, `F_SETFL`, `F_DUPFD` and
-`F_DUPFD_CLOEXEC`. `F_GETFD`/`F_SETFD` are accepted and ignored, and so
-is `F_DUPFD_CLOEXEC`'s close-on-exec half, since nothing walks the
-descriptor table at `exec` yet. The locking commands still return
-`-EINVAL` rather than a silent success, because a caller that asked for
-a lock and got one would act on a guarantee it never received.
+`fcntl` implements `F_GETFL`, `F_SETFL`, `F_DUPFD`, `F_DUPFD_CLOEXEC`
+and the POSIX record locks `F_GETLK`/`F_SETLK`/`F_SETLKW` (see "Files:
+desktop M0 additions"). `F_GETFD`/`F_SETFD` are accepted and ignored,
+and so is `F_DUPFD_CLOEXEC`'s close-on-exec half, since nothing walks
+the descriptor table at `exec` yet. OFD locks (`F_OFD_*`) and
+`flock(2)` return `-EINVAL` rather than a silent success.
 
 `F_DUPFD` is not optional for a shell: BusyBox's `ash` moves the
 terminal out of a script's way with `fcntl(fd, F_DUPFD_CLOEXEC, 10)`,
@@ -2871,3 +2889,51 @@ existing `open`/`write`/`ioctl` syscalls — no new syscall numbers.
 - **QEMU-emulated hardware only.** This driver has never been run
   against real AC97 silicon — only QEMU's `-device AC97` emulation,
   the same validation story as every other NeoOS driver.
+
+## Files: desktop M0 additions (2026-09-23)
+
+Kernel primitives the desktop (SQLite, Notepad, Task Manager, the shell)
+needs, all Linux-shaped. Plan:
+`docs/superpowers/plans/2026-09-23-desktop-m0-kernel-prereqs.md`.
+
+- **`open(O_CREAT | O_EXCL)`** on an existing path is `-EEXIST`; the
+  check and the create happen under the filesystem lock, so of two
+  racing creators exactly one wins.
+- **`open(O_DIRECTORY)`** on a non-directory is `-ENOTDIR` (musl's
+  `opendir` relies on it).
+- **`pwrite`** (`pwrite64`) writes at an offset without moving the file
+  position, like `pread`.
+- **`rename`, `renameat`, `renameat2`**: same-directory and
+  cross-directory, replacing an existing file or an **empty** directory,
+  `-EXDEV` across mounts, `-EINVAL` for a directory into its own
+  subtree, `-ENOTEMPTY`, `-EISDIR`/`-ENOTDIR` for mismatched types. A
+  descriptor open on the renamed file keeps working. **DIVERGENCES:**
+  only `AT_FDCWD` is accepted as a directory fd (as for `faccessat`);
+  no `RENAME_*` flags yet (`-EINVAL`); on FAT the rename is not atomic
+  against a power cut — the new entry is written before the old one is
+  erased, so the worst case is both names, never neither; and a file
+  replaced by a rename loses its data immediately even if still open
+  (the same FAT divergence `unlink` has).
+- **`rmdir`**: an empty directory; `-ENOTEMPTY`, `-ENOTDIR`, `-EBUSY`
+  for a mount point.
+- **POSIX record locks** — `fcntl(F_GETLK / F_SETLK / F_SETLKW)` with
+  Linux's x86_64 `struct flock`. Locks belong to the **process**;
+  ranges split and merge; `F_SETLK` on a conflict is `-EAGAIN`;
+  `F_SETLKW` sleeps (interruptibly) until the range is free, or returns
+  `-EDEADLK` if waiting would close a cycle; `F_GETLK` reports the
+  first conflicting lock with its holder's pid. POSIX's close rule is
+  reproduced exactly, because SQLite is written around it: **closing
+  ANY descriptor for a file releases every lock the process holds on
+  that file**; exit releases everything. A write lock needs a writable
+  descriptor (`-EBADF`). **DIVERGENCE:** at most 512 lock ranges and 64
+  `F_SETLKW` sleepers system-wide — beyond that `-ENOLCK`, Linux's code
+  for the same condition.
+- **FAT long file names are UTF-8** at the API and real **UTF-16** on
+  disk (Persian names read back correctly on any OS). Invalid UTF-8 is
+  `-EINVAL`, as Linux's vfat with `utf8=1`; a name is at most 255 UTF-16
+  units on disk and 255 bytes of UTF-8 through the VFS (Linux's
+  `NAME_MAX`), so a long Persian name hits the byte limit first.
+- **Durability:** the block cache writes through and every ATA write
+  ends with a drive cache flush, so data is on the medium when
+  `write()` returns; `fsync` therefore has nothing left to do and
+  returns 0.

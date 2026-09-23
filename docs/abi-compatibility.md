@@ -1364,3 +1364,36 @@ Measured with `make hrtest` (userland/hrtest.c):
 - **The TSC is assumed invariant and synchronised across CPUs** — true
   under QEMU and KVM on the reference host; a machine without an
   invariant TSC would see clock drift across frequency changes.
+
+## Refresh — desktop M0 kernel prerequisites (2026-09-23)
+
+Plan: `docs/superpowers/plans/2026-09-23-desktop-m0-kernel-prereqs.md`;
+details in `docs/stdlib.md` "Files: desktop M0 additions".
+
+### Implemented
+
+| Linux facility | state on NeoOS |
+|---|---|
+| `open(O_EXCL)` | honoured with `O_CREAT` (`EEXIST`), race-free |
+| `open(O_DIRECTORY)` | `ENOTDIR` on a non-directory (musl `opendir`) |
+| `pwrite64` | new (NeoOS 138) |
+| `rename`/`renameat`/`renameat2` | new (NeoOS 139); `AT_FDCWD` only, flags 0 only |
+| `rmdir` | new (NeoOS 140) |
+| `fcntl(F_GETLK/F_SETLK/F_SETLKW)` | POSIX record locks, Linux `struct flock`, POSIX close semantics, `EDEADLK`; pool of 512 (`ENOLCK`) |
+| VFAT long names | UTF-8 ⇄ UTF-16 (were byte-per-unit, non-ASCII read back as `_`); invalid UTF-8 → `EINVAL`; all FAT copies now written |
+| `/proc/<pid>/stat` | real state, `utime`, `priority`, `nice`, `num_threads`, `starttime`, `vsize`, `rss` |
+| `/proc/<pid>/status`, `/proc/meminfo`, `/proc/uptime`, `/proc/self`, per-CPU `/proc/stat` | new |
+| `kill(-1, sig)` | excludes init and the caller, as Linux |
+| init shutdown | `SIGUSR2` power off, `SIGTERM` reboot (BusyBox convention) |
+
+### What a ported application would still hit
+
+- `*at` calls with a real directory fd (only `AT_FDCWD`); no `openat`
+  family with dirfds at all.
+- OFD locks (`F_OFD_*`) and `flock(2)`: `EINVAL`.
+- `RENAME_NOREPLACE` / `RENAME_EXCHANGE`: `EINVAL`.
+- No symlinks: `/proc/self` is a directory alias; `readlink` on it fails.
+- `stime` is 0 everywhere; `utime` includes kernel time.
+- FAT: unlinking or replacing an open file frees its data at once (Linux
+  keeps it until the last close); renames are not atomic against power
+  loss (both names may survive, never neither).
