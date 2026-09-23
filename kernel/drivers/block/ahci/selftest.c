@@ -39,6 +39,12 @@ static const char *fis_checks(void) {
     if (f[2] != 0x61 || f[7] != 0xC0)                           { return "ncq write fua"; }
     if (f[3] != 0 || f[11] != 1 || f[12] != (31 << 3))          { return "ncq count 256 / tag 31"; }
     if (f[1] != 0x83)                                           { return "pmp field"; }
+    ahci_fis_pmp_read(f, 2, 0);
+    if (f[0] != 0x27 || f[1] != 0x8F || f[2] != ATA_READ_PM)  { return "pmp read header"; }
+    if (f[3] != 0 || f[11] != 0 || (f[7] & 0xF) != 2)          { return "pmp read register/port"; }
+    ahci_fis_pmp_write(f, 15, 33, 0xA1B2C3D4u);
+    if (f[2] != ATA_WRITE_PM || f[3] != 33 || (f[7] & 0xF) != 15) { return "pmp write header"; }
+    if (f[12] != 0xD4 || f[4] != 0xC3 || f[5] != 0xB2 || f[6] != 0xA1) { return "pmp write value"; }
     ahci_fis_rw(f, ATA_READ_DMA, 0x0ABCDEF1, 8, 0);
     if (f[7] != (0x40 | 0x0A) || f[8] != 0)                     { return "lba28 device bits"; }
     return 0;

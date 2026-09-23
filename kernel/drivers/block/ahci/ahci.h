@@ -227,6 +227,12 @@ struct ahci_link *ahci_disk_link(struct blockdev *d);
 void ahci_disk_build(struct blockdev *d, struct ahci_req *r, uint64_t lba, uint32_t n, void *buf, int wr);
 int  ahci_atapi_attach(struct ahci_link *l);
 int  ahci_pmp_attach(struct ahci_port *p);
+// READ / WRITE PORT MULTIPLIER, addressed to the multiplier's control
+// port (PMP 15): FEATURES carries the register number, DEVICE[3:0] the
+// fan-out port (15 for the multiplier's own GSCR registers), and the
+// 32-bit value travels in COUNT, LBA low, LBA mid, LBA high.
+void ahci_fis_pmp_read(uint8_t fis[20], uint8_t port, uint16_t reg);
+void ahci_fis_pmp_write(uint8_t fis[20], uint8_t port, uint16_t reg, uint32_t value);
 
 // ---- hba.c ------------------------------------------------------------
 
