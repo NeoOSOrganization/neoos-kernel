@@ -39,7 +39,7 @@ Found by reading the kernel (2026-09-23), not assumed:
 | # | sub-project | delivers | depends on |
 |---|---|---|---|
 | 00 | this roadmap | order, shared decisions | — |
-| 01 | Block layer + partitions | `struct blockdev` registry (name, sector size, sector count, read/write/flush ops); legacy ATA PIO re-homed as a blockdev driver; MBR + GPT scanner registering child partition blockdevs; `blkcache` keyed by blockdev and sector-size-aware; `/dev/<name>` block nodes in devfs; FAT driver moved onto blockdevs (still whole-disk) | — |
+| 01 | Block layer + partitions | 64-bit file positions/sizes throughout; `struct blockdev` registry (name, sector size, sector count, read/write/flush ops); legacy ATA PIO re-homed as a blockdev driver; MBR + GPT scanner registering child partition blockdevs; `blkcache` keyed by blockdev and sector-size-aware; `/dev/<name>` block nodes in devfs; FAT driver moved onto blockdevs (still whole-disk) | — |
 | 02 | AHCI (SATA) | PCI class 01:06 discovery, BAR5 ABAR, per-port command list / FIS / command tables, READ/WRITE DMA EXT (LBA48) + FLUSH CACHE EXT, polled completion; ports register as `sdX` | 01 |
 | 03 | NVMe | PCI class 01:08:02, BAR0, admin queue + one I/O queue pair, Identify controller/namespace, Read/Write/Flush, polled completion; namespaces register as `nvmeXnY` | 01 |
 | 04 | FS registry + mount policy | `register_filesystem()` with per-driver `probe(blockdev)`; `mount(2)` accepts `"auto"`; pseudo filesystems register too; the `vfs.c` name chain disappears; Multiboot2 cmdline parsed for `root=` / `rootfstype=` (default: probe for root); `/etc/fstab` mounted by init; `kernel.c` mounts only root + pseudo filesystems | 01 |
@@ -113,13 +113,11 @@ the same sub-project as the kernel's (02, 03, 05), per the
 
 ## Known constraints carried forward (not fixed by this series)
 
-- VFS file positions and `vnode.size` are 32-bit (`vfs.h:72`); ext2
-  files above 4 GiB are out of reach until that widens.
 - No sleeping I/O (D4); the global `fs_lock` serialises all filesystem
   work.
-- `blkcache` is 64 KiB of 512-byte entries, write-through; 01 makes it
-  sector-size-aware (NVMe namespaces may be 4 KiB-formatted) but does
-  not grow it into a page cache.
+- `blkcache` stays a small write-through sector cache (01 makes it
+  128 × 4 KiB entries, sector-size-aware for 4Kn NVMe namespaces); it
+  does not become a page cache.
 
 ## Follow-ups after this series
 
