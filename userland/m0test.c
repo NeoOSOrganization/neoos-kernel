@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <dirent.h>
 
 static int fails;
 #define CHECK(name, cond, ...) do { if (cond) printf("m0test: ok %s\n", name); \
@@ -105,12 +106,33 @@ static void test_rename(void) {
     CHECK("rename_enoent", rename(DIR0 "/nope", DIR0 "/nope2") == -1 && errno == ENOENT, "no ENOENT");
 }
 
+// Persian, with a ZWNJ (U+200C) the way Persian is actually written.
+#define FA_NAME "\xd9\x81\xd8\xa7\xdb\x8c\xd9\x84\xe2\x80\x8c\xd9\x87\xd8\xa7.txt"   /* فایل‌ها.txt */
+
+static void test_utf8_names(void) {
+    char path[256], buf[32];
+    snprintf(path, sizeof path, DIR0 "/%s", FA_NAME);
+    unlink(path);
+    int w = write_file(path, "salam");
+    int found = 0;
+    DIR *d = opendir(DIR0);
+    struct dirent *e;
+    while (d && (e = readdir(d))) { if (!strcmp(e->d_name, FA_NAME)) { found = 1; } }
+    if (d) { closedir(d); }
+    CHECK("utf8_name", w == 5 && found && read_file(path, buf, sizeof buf) == 5, "w=%d found=%d", w, found);
+    errno = 0;
+    int bad = open(DIR0 "/bad\xff\xfe.txt", O_CREAT | O_WRONLY, 0644);
+    CHECK("utf8_invalid", bad < 0 && errno == EINVAL, "fd=%d", bad);
+    if (bad >= 0) { close(bad); }
+}
+
 int main(void) {
     mkdir("/root", 0755);
     mkdir(DIR0, 0755);
     test_excl();
     test_pwrite();
     test_rename();
+    test_utf8_names();
     if (fails == 0) { printf("PASS m0test\n"); } else { printf("m0test: %d FAILED\n", fails); }
     return fails ? 1 : 0;
 }

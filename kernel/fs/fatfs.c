@@ -96,6 +96,7 @@ struct fat_volume {
     uint32_t fat_start_lba;
     uint32_t data_start_lba;
     uint32_t sectors_per_fat;
+    uint8_t  num_fats;              // copies of the FAT; every write goes to all
     uint32_t root_dir_start_lba;    // FAT16 only
     uint32_t root_dir_sector_count; // FAT16 only
     uint16_t root_entry_count;      // FAT16 only
@@ -149,6 +150,7 @@ static int fat_read_bpb(struct fat_volume *v) {
         return 0;
     }
 
+    v->num_fats = bpb->num_fats ? bpb->num_fats : 1;
     v->root_dir_start_lba = v->fat_start_lba + (uint32_t)bpb->num_fats * v->sectors_per_fat;
     v->root_dir_sector_count = ((uint32_t)v->root_entry_count * sizeof(struct fat16_dirent)
                                  + v->bytes_per_sector - 1) / v->bytes_per_sector;
@@ -232,7 +234,12 @@ static void fat16_set_next_cluster(struct fat_volume *v, uint32_t cluster, uint3
     } else {
         *(uint16_t *)(sector + offset_in_sector) = (uint16_t)value;
     }
-    blkcache_write(v->drive, fat_sector, sector);
+    // Every copy of the FAT, as other drivers keep them: fsck.fat
+    // reported "FATs differ" on every image NeoOS had written to, and a
+    // tool that trusts the second copy would see stale chains.
+    for (uint32_t k = 0; k < v->num_fats; k++) {
+        blkcache_write(v->drive, fat_sector + k * v->sectors_per_fat, sector);
+    }
 
     // Any chain this entry belongs to may have just been extended,
     // truncated or freed, and the cursor caches a position inside one.
@@ -899,6 +906,68 @@ struct fat_entry {
     int      run_slots;
 };
 
+// ---- UTF-8 <-> UTF-16 for long names --------------------------------------
+
+// UTF-8 -> UTF-16 (surrogate pairs above U+FFFF). Returns the unit
+// count, -EINVAL for malformed UTF-8 (overlong, surrogate, truncated --
+// what Linux's vfat returns with utf8=1), -ENAMETOOLONG past `cap`.
+static int utf8_to_utf16(const char *s, uint16_t *out, int cap) {
+    int n = 0;
+    const uint8_t *p = (const uint8_t *)s;
+    while (*p) {
+        uint32_t cp; int len;
+        if (p[0] < 0x80)                { cp = p[0]; len = 1; }
+        else if ((p[0] & 0xE0) == 0xC0) { cp = p[0] & 0x1F; len = 2; }
+        else if ((p[0] & 0xF0) == 0xE0) { cp = p[0] & 0x0F; len = 3; }
+        else if ((p[0] & 0xF8) == 0xF0) { cp = p[0] & 0x07; len = 4; }
+        else { return -EINVAL; }
+        for (int k = 1; k < len; k++) {
+            if ((p[k] & 0xC0) != 0x80) { return -EINVAL; }
+            cp = (cp << 6) | (p[k] & 0x3F);
+        }
+        static const uint32_t min_for_len[5] = { 0, 0, 0x80, 0x800, 0x10000 };
+        if (cp < min_for_len[len] || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) { return -EINVAL; }
+        if (cp >= 0x10000) {
+            if (n + 2 > cap) { return -ENAMETOOLONG; }
+            cp -= 0x10000;
+            out[n++] = (uint16_t)(0xD800 | (cp >> 10));
+            out[n++] = (uint16_t)(0xDC00 | (cp & 0x3FF));
+        } else {
+            if (n + 1 > cap) { return -ENAMETOOLONG; }
+            out[n++] = (uint16_t)cp;
+        }
+        p += len;
+    }
+    return n;
+}
+
+// UTF-16 (up to a 0x0000 or 0xFFFF terminator) -> UTF-8, at most cap-1
+// bytes, never splitting a character. Unpaired surrogates -- not valid
+// UTF-16, but they exist on disks other systems wrote -- become U+FFFD.
+// Returns the byte count written (the caller terminates).
+static int utf16_to_utf8(const uint16_t *in, int n_in, char *out, int cap) {
+    int n = 0;
+    for (int i = 0; i < n_in; i++) {
+        uint32_t cp = in[i];
+        if (cp == 0x0000 || cp == 0xFFFF) { break; }
+        if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < n_in && in[i + 1] >= 0xDC00 && in[i + 1] <= 0xDFFF) {
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (in[i + 1] - 0xDC00);
+            i++;
+        } else if (cp >= 0xD800 && cp <= 0xDFFF) {
+            cp = 0xFFFD;
+        }
+        int len = cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+        if (n + len > cap - 1) { break; }
+        if (len == 1) { out[n++] = (char)cp; continue; }
+        if (len == 2) { out[n++] = (char)(0xC0 | (cp >> 6)); }
+        else if (len == 3) { out[n++] = (char)(0xE0 | (cp >> 12)); out[n++] = (char)(0x80 | ((cp >> 6) & 0x3F)); }
+        else { out[n++] = (char)(0xF0 | (cp >> 18)); out[n++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+               out[n++] = (char)(0x80 | ((cp >> 6) & 0x3F)); }
+        out[n++] = (char)(0x80 | (cp & 0x3F));
+    }
+    return n;
+}
+
 static int fat_dir_next(struct fat_slots *it, struct fat_entry *out) {
     uint16_t chars[LFN_MAX_SLOTS * LFN_CHARS];
     int      have_lfn = 0;
@@ -948,12 +1017,8 @@ static int fat_dir_next(struct fat_slots *it, struct fat_entry *out) {
         int usable = have_lfn && slots_seen == highest &&
                      lfn_checksum(de.name) == want_sum;
         if (usable) {
-            int n = 0;
-            for (int i = 0; i < highest * LFN_CHARS && n < VFS_NAME_MAX - 1; i++) {
-                uint16_t c = chars[i];
-                if (c == 0x0000 || c == 0xFFFF) { break; }
-                out->name[n++] = (c < 0x80) ? (char)c : '_';
-            }
+            // Long names are UTF-16 on disk; the VFS speaks UTF-8.
+            int n = utf16_to_utf8(chars, highest * LFN_CHARS, out->name, VFS_NAME_MAX);
             out->name[n] = '\0';
             out->run_lba   = run_lba;
             out->run_off   = run_off;
@@ -1189,6 +1254,12 @@ static int fat_create_named(struct fat_volume *v, int in_root, uint32_t dir_clus
     uint64_t namelen = 0;
     while (name[namelen]) { namelen++; }
     if (namelen == 0 || namelen > VFS_NAME_MAX - 1) { return -ENAMETOOLONG; }
+    // The long name as UTF-16, what VFAT stores (and what every other OS
+    // reads): Persian "فایل.txt" is 8 units, not its 12 UTF-8 bytes.
+    uint16_t u16[LFN_MAX_SLOTS * LFN_CHARS];
+    int ulen = utf8_to_utf16(name, u16, LFN_MAX_SLOTS * LFN_CHARS);
+    if (ulen == -EINVAL) { return -EINVAL; }              // not UTF-8
+    if (ulen < 0 || ulen > 255) { return -ENAMETOOLONG; } // VFAT's limit
 
     uint8_t short_name[11];
     int need_lfn = !fits_83(name);
@@ -1198,7 +1269,7 @@ static int fat_create_named(struct fat_volume *v, int in_root, uint32_t dir_clus
         to_fat_name(name, short_name);
     }
 
-    int lfn_slots = need_lfn ? (int)((namelen + LFN_CHARS - 1) / LFN_CHARS) : 0;
+    int lfn_slots = need_lfn ? (ulen + LFN_CHARS - 1) / LFN_CHARS : 0;
     if (lfn_slots > LFN_MAX_SLOTS) { return -ENAMETOOLONG; }
     int total = lfn_slots + 1;
 
@@ -1224,8 +1295,8 @@ static int fat_create_named(struct fat_volume *v, int in_root, uint32_t dir_clus
         uint16_t chars[LFN_CHARS];
         for (int k = 0; k < LFN_CHARS; k++) {
             uint64_t idx = (uint64_t)(ord - 1) * LFN_CHARS + k;
-            if (idx < namelen)       { chars[k] = (uint16_t)(uint8_t)name[idx]; }
-            else if (idx == namelen) { chars[k] = 0x0000; }   // the terminator
+            if (idx < (uint64_t)ulen)       { chars[k] = u16[idx]; }
+            else if (idx == (uint64_t)ulen) { chars[k] = 0x0000; }   // the terminator
             else                     { chars[k] = 0xFFFF; }   // unused padding
         }
         lfn_slot_set_chars(sl, chars);
