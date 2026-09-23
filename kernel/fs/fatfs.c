@@ -2046,6 +2046,7 @@ static int fatfs_mount_op(struct vfs_mount *m, const char *source) {
 
     volume_used[slot] = 1;
     m->fs_private = v;
+    blockdev_claim(bdev);
 
     serial_write_string("[fatfs] mounted ");
     serial_write_string(bdev->name);
@@ -2065,7 +2066,7 @@ static void fatfs_umount_op(struct vfs_mount *m) {
     // Nothing else on this disk is mounted once the volume is
     // released, and a remount must not be handed sectors cached from
     // the image that was there before.
-    if (v) { blkcache_invalidate(v->bdev); }
+    if (v) { blkcache_invalidate(v->bdev); blockdev_release(v->bdev); }
     m->fs_private = 0;
 }
 

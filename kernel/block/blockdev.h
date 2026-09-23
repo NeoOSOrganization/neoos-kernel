@@ -36,6 +36,7 @@ struct blockdev {
     uint8_t  part_uuid[16];             // GPT partition GUID; else zero
     uint32_t flags;                     // BLOCKDEV_HIDDEN
     uint32_t partno;                    // 0 for a whole disk
+    uint32_t claims;                    // mounted filesystems using it
 };
 
 void blockdev_init(void);
@@ -66,6 +67,14 @@ uint64_t blockdev_disk_lba(struct blockdev *d, uint64_t lba);
 int  blockdev_read(struct blockdev *d, uint64_t lba, uint32_t count, void *buf);
 int  blockdev_write(struct blockdev *d, uint64_t lba, uint32_t count, const void *buf);
 int  blockdev_flush(struct blockdev *d);
+
+// A mounted filesystem claims its device for as long as it is mounted.
+// busy() is true if `d`, its whole disk, or any partition on that disk
+// is claimed -- what Linux's open(O_EXCL) on a block device refuses with
+// EBUSY, so mkfs/fdisk cannot rewrite a live filesystem underneath it.
+void blockdev_claim(struct blockdev *d);
+void blockdev_release(struct blockdev *d);
+int  blockdev_busy(struct blockdev *d);
 
 // Linux's dev_t encoding (sys/sysmacros.h makedev).
 uint64_t blockdev_makedev(uint32_t major, uint32_t minor);

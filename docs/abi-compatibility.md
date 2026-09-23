@@ -1417,6 +1417,7 @@ details in `docs/stdlib.md` "Block devices (storage-01)".
 | `statx` `stx_rdev_major`/`stx_rdev_minor` | filled (were 0) |
 | file positions and sizes | 64-bit throughout (were 32-bit in the fd and the vnode); FAT caps files at 4 GiB − 1 and ramfs at 16 KiB with `EFBIG`, as Linux |
 | `ioctl` request | truncated to 32 bits, as Linux's `unsigned int cmd` — every `_IOR` request (bit 31 set) used to arrive sign-extended from musl and match nothing |
+| `open(O_EXCL)` on a block node | `EBUSY` while a filesystem on the device (or its disk/partitions) is mounted |
 | `mount(2)` source | block device path (`/dev/sda`), up to 63 bytes; `hd0`/`hd1` removed |
 
 ### Stubbed / diverging

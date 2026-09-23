@@ -233,6 +233,33 @@ int blockdev_write(struct blockdev *d, uint64_t lba, uint32_t count, const void 
 
 int blockdev_flush(struct blockdev *d) { return d->ops->flush(d); }
 
+void blockdev_claim(struct blockdev *d) {
+    uint64_t fl = spin_lock_irqsave(&reg_lock);
+    d->claims++;
+    spin_unlock_irqrestore(&reg_lock, fl);
+}
+
+void blockdev_release(struct blockdev *d) {
+    uint64_t fl = spin_lock_irqsave(&reg_lock);
+    if (d->claims) { d->claims--; }
+    spin_unlock_irqrestore(&reg_lock, fl);
+}
+
+int blockdev_busy(struct blockdev *d) {
+    struct blockdev *w = blockdev_whole(d);
+    int busy = 0;
+    uint64_t fl = spin_lock_irqsave(&reg_lock);
+    for (int i = 0; i < BLOCKDEV_MAX && !busy; i++) {
+        struct blockdev *e = table[i];
+        if (!e || !e->claims) { continue; }
+        // The same device, or anything on the same disk when one side is
+        // the whole disk. Two different partitions do not conflict.
+        if (e == d || (blockdev_whole(e) == w && (e == w || d == w))) { busy = 1; }
+    }
+    spin_unlock_irqrestore(&reg_lock, fl);
+    return busy;
+}
+
 void blockdev_selftest(void) {
     const char *why = 0;
     struct blockdev *a = ramblk_create("tsta", 512, 256);   // name ends in a letter

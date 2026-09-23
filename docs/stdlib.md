@@ -922,9 +922,14 @@ they do on Linux.
   sector size, `int`), `BLKGETSIZE` (512-byte units, `unsigned long`).
   Anything else is `-ENOTTY`.
 - **`fsync`** flushes the drive's write cache.
+- **`open(O_EXCL)`** without `O_CREAT` is `-EBUSY` while a filesystem
+  on that device, on its whole disk, or on one of its partitions is
+  mounted — as on Linux, so `mkfs` and `fdisk` refuse a live volume.
 - **Partitions** are found by reading the disk once, when it is
-  registered at boot: a GPT (the backup header is used if the primary
-  is damaged), else an MBR's four primary entries. Entries that are
+  registered at boot: a GPT when the MBR has a protective `0xEE` entry
+  or LBA 1 carries the GPT signature (the backup header is used if the
+  primary is damaged), else an MBR's four primary entries — Linux's
+  rule, so a stale backup GPT left on a re-imaged disk is ignored. Entries that are
   empty, run past the disk, or overlap an earlier one are skipped and
   logged.
 - **`/proc/partitions`** lists every disk and partition in Linux's

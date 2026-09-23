@@ -44,6 +44,13 @@ int main(void) {
     CHECK(lseek(fd, (off_t)sz + 1, SEEK_SET) == -1 && errno == EINVAL, "seek past end not EINVAL");
     close(fd);
 
+    // O_EXCL without O_CREAT on a mounted block device is EBUSY, as on
+    // Linux -- mkfs and fdisk use it to refuse a live filesystem.
+    errno = 0;
+    fd = open("/dev/sda", O_RDONLY | O_EXCL);
+    CHECK(fd < 0 && errno == EBUSY, "O_EXCL on mounted /dev/sda: fd=%d errno=%d", fd, errno);
+    if (fd >= 0) { close(fd); }
+
     // Non-destructive unaligned round trips near the end of sdb: one
     // crossing a sector boundary, one large enough to take the aligned
     // multi-sector path in the middle.

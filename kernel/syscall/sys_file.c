@@ -4,6 +4,7 @@
 // unchanged; only the dispatch table, the MSR setup and the shared
 // user-copy helpers stayed behind in syscall.c.
 
+#include "block/blockdev.h"
 #include "syscall/syscall_internal.h"
 #include "drivers/char/serial.h"
 #include "sched/proc.h"
@@ -176,6 +177,14 @@ int64_t sys_open(struct syscall_args *a) {
         vnode_put(vn);
         fd_close(task, slot);
         return brc;
+    }
+    // O_EXCL without O_CREAT on a block device: exclusive use, refused
+    // with EBUSY while a filesystem on it is mounted (Linux's rule).
+    if ((flags & O_EXCL) && !(flags & O_CREAT) && vn->type == VNODE_BLOCK &&
+        blockdev_busy((struct blockdev *)f->priv)) {
+        vnode_put(vn);
+        fd_close(task, slot);
+        return -EBUSY;
     }
 
     return slot;
