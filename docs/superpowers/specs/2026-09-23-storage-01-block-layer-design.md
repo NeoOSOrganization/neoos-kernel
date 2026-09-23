@@ -46,6 +46,8 @@ struct blockdev {
     uint32_t major, minor;      // Linux numbering, see §4
     uint8_t  part_type[16];     // GPT type GUID; MBR type in [0]; else zero
     uint8_t  part_uuid[16];     // GPT partition GUID; else zero
+    uint32_t flags;             // BLOCKDEV_HIDDEN: selftest RAM disks --
+                                // no /dev node, not in /proc/partitions
 };
 ```
 
@@ -170,7 +172,8 @@ known-answer check in `part_selftest`.
     Reads at or past the end return 0; writes past the end return
     `-ENOSPC` (Linux), a write that crosses the end is short.
   - `lseek`: `SEEK_SET`/`SEEK_CUR`/`SEEK_END` (end = device size in
-    bytes). Negative results → `-EINVAL`.
+    bytes). A result below 0 or above the device size → `-EINVAL`, as
+    Linux's `blkdev_llseek` (`fixed_size_llseek`) does.
   - `ioctl`: `BLKGETSIZE64` (`0x80081272`, `uint64_t` bytes),
     `BLKSSZGET` (`0x1268`, `int` sector size), `BLKGETSIZE` (`0x1260`,
     `unsigned long` count of 512-byte units). Anything else `-ENOTTY`.
@@ -266,8 +269,8 @@ Userland `make blkdevtest` (`userland/blkdevtest.c`, solo boot in the
   `pwrite` a pattern there, `fsync` (returns 0), `pread` it back and
   compare; `pwrite` the saved bytes back. The FAT32 volume is unchanged
   afterwards wherever that offset lands.
-- `lseek(fd, 0, SEEK_END)` equals the size; `lseek` to `size + 1`
-  followed by `read` returns 0.
+- `lseek(fd, 0, SEEK_END)` equals the size and a `read` there returns
+  0; `lseek` to `size + 1` fails with `EINVAL`.
 - `/proc/partitions` lists `sda` and `sdb`.
 - prints `PASS blkdevtest`.
 
