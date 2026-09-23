@@ -154,6 +154,9 @@ void     wxorx_selftest(void);
 // frame hands it to the allocator, which immediately writes free-list
 // links over pml4[0] (see the note in paging.c).
 void free_address_space(uint64_t pml4_phys);
+// Present user pages in an address space (its RSS), walking only the
+// page tables that exist. Caller holds the owner's mm_lock.
+uint64_t paging_count_present_user(uint64_t pml4_phys);
 
 // Handles a write fault on a copy-on-write page (see fork()).
 // Returns 1 if handled, 0 if this wasn't a recognized COW fault.

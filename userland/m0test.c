@@ -13,6 +13,10 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <sys/wait.h>
+#include <signal.h>
+#include <pthread.h>
+#include <time.h>
+#include <stdlib.h>
 
 static int fails;
 #define CHECK(name, cond, ...) do { if (cond) printf("m0test: ok %s\n", name); \
@@ -307,6 +311,83 @@ static void test_rmdir(void) {
     CHECK("rmdir", ne && ok && nd && busy, "notempty=%d ok=%d notdir=%d busy=%d", ne, ok, nd, busy);
 }
 
+// ---- procfs (K2) ---------------------------------------------------------
+
+// Field n (1-based) of /proc/<pid>/stat, skipping past "(comm)".
+static long stat_field(int pid, int n) {
+    char path[64], buf[512];
+    snprintf(path, sizeof path, "/proc/%d/stat", pid);
+    if (read_file(path, buf, sizeof buf) <= 0) { return -1; }
+    char *p = strrchr(buf, ')');
+    if (!p) { return -1; }
+    p += 2;                                   // now at field 3
+    for (int f = 3; f < n; f++) { p = strchr(p, ' '); if (!p) { return -1; } p++; }
+    return *p >= '0' && *p <= '9' ? strtol(p, 0, 10) : (long)*p;   // a letter comes back as its code
+}
+
+static void *parked(void *arg) { int fd = (int)(intptr_t)arg; char c; read(fd, &c, 1); return 0; }
+
+static void test_procfs(void) {
+    // A spinner accumulates utime; a sleeper sleeps.
+    pid_t spin = fork();
+    if (spin == 0) { for (volatile unsigned long i = 0;; i++) { } }
+    int hold[2];
+    pipe(hold);
+    pid_t sleeper = fork();
+    if (sleeper == 0) { char c; read(hold[0], &c, 1); _exit(0); }
+
+    // Wait for the spinner's CPU time to show -- a real condition, polled,
+    // with a generous hang bound.
+    long ut = 0;
+    for (int i = 0; i < 1000 && ut <= 0; i++) {
+        struct timespec d = { 0, 10000000 };
+        nanosleep(&d, 0);
+        ut = stat_field(spin, 14);
+    }
+    long sleeper_state = stat_field(sleeper, 3);
+    CHECK("proc_utime", ut > 0, "spinner utime=%ld", ut);
+    CHECK("proc_state", sleeper_state == 'S' && stat_field(spin, 3) == 'R',
+          "sleeper=%c spinner=%c", (int)sleeper_state, (int)stat_field(spin, 3));
+    CHECK("proc_vsize_rss", stat_field(spin, 23) > 0 && stat_field(spin, 24) > 0,
+          "vsize=%ld rss=%ld", stat_field(spin, 23), stat_field(spin, 24));
+    kill(spin, SIGKILL);
+    printf("m0test: step killed\n");
+    write(hold[1], "x", 1);
+    waitpid(spin, 0, 0);
+    printf("m0test: step spinner reaped\n");
+    waitpid(sleeper, 0, 0);
+    printf("m0test: step sleeper reaped\n");
+
+    // Threads: this process + two parked pthreads.
+    int park[2];
+    pipe(park);
+    pthread_t a, b;
+    pthread_create(&a, 0, parked, (void *)(intptr_t)park[0]);
+    pthread_create(&b, 0, parked, (void *)(intptr_t)park[0]);
+    char buf[1024];
+    read_file("/proc/self/status", buf, sizeof buf);
+    char want_pid[32];
+    snprintf(want_pid, sizeof want_pid, "Pid:\t%d\n", (int)getpid());
+    CHECK("proc_self_status", strstr(buf, want_pid) && strstr(buf, "Threads:\t3\n") && strstr(buf, "VmRSS:"),
+          "status: %.120s", buf);
+    write(park[1], "xx", 2);
+    pthread_join(a, 0);
+    pthread_join(b, 0);
+
+    read_file("/proc/meminfo", buf, sizeof buf);
+    long total = 0, fre = 0;
+    char *t = strstr(buf, "MemTotal:"), *f = strstr(buf, "MemFree:");
+    if (t) { total = strtol(t + 9, 0, 10); }
+    if (f) { fre = strtol(f + 8, 0, 10); }
+    CHECK("proc_meminfo", total > 0 && fre > 0 && fre < total, "total=%ld free=%ld", total, fre);
+
+    read_file("/proc/uptime", buf, sizeof buf);
+    CHECK("proc_uptime", strtod(buf, 0) > 0.0 && strchr(buf, ' '), "uptime: %s", buf);
+
+    read_file("/proc/stat", buf, sizeof buf);
+    CHECK("proc_stat_percpu", strstr(buf, "cpu  ") && strstr(buf, "\ncpu0 "), "stat: %.80s", buf);
+}
+
 int main(void) {
     mkdir("/root", 0755);
     rm_rf(DIR0);
@@ -317,6 +398,7 @@ int main(void) {
     test_utf8_names();
     test_locks();
     test_rmdir();
+    test_procfs();
     if (fails == 0) { printf("PASS m0test\n"); } else { printf("m0test: %d FAILED\n", fails); }
     return fails ? 1 : 0;
 }

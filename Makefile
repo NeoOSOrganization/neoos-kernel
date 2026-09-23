@@ -1375,7 +1375,7 @@ dyntest: iso disk-image $(BUILD_DIR)/dyntest.elf $(BUILD_DIR)/dynlib.so
 # locks, O_EXCL, pwrite, rename, UTF-8 FAT names, procfs. Booted alone.
 $(BUILD_DIR)/m0test.elf: $(USERLAND_DIR)/m0test.c
 	@mkdir -p $(BUILD_DIR)
-	$(NEOOS_HOSTED)gcc -O2 -static -o $@ $(USERLAND_DIR)/m0test.c
+	$(NEOOS_HOSTED)gcc -O2 -static -pthread -o $@ $(USERLAND_DIR)/m0test.c
 
 .PHONY: m0test
 m0test: iso disk-image $(BUILD_DIR)/m0test.elf

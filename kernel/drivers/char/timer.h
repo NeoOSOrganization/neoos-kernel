@@ -13,6 +13,8 @@ uint64_t timer_ticks(void);
 // samples twice and takes the ratio of the differences -- the same
 // shape as reading /proc/stat.
 void cpu_usage_ticks(uint64_t *busy, uint64_t *idle);
+// The same for one CPU (the /proc/stat cpuN lines).
+void cpu_usage_ticks_one(int cpu, uint64_t *busy, uint64_t *idle);
 
 // Monotonic nanoseconds since boot, from a calibrated rdtsc. Much finer
 // than timer_ticks() -- the scheduler's virtual-time clock. Safe to

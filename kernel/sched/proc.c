@@ -2,6 +2,7 @@
 // teardown and reaping. Split out of the former kernel/process.c; the
 // code is unchanged, only relocated.
 
+#include "time/ktime.h"
 #include "fs/flock.h"
 #include "kernel.h"
 #include "sched/sched.h"
@@ -48,6 +49,7 @@ static struct process *proc_alloc(void) {
     if (!p) { return 0; }
     for (unsigned i = 0; i < sizeof(struct process); i++) { ((uint8_t *)p)[i] = 0; }
     p->ref = 1;   // the proc_table's reference; dropped by proc_reap
+    p->start_ns = ktime_get_ns();
 
     // Allocate per-process file descriptor table
     struct fd_table *ft = (struct fd_table *)kmalloc(sizeof(struct fd_table));

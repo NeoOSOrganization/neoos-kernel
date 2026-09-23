@@ -466,6 +466,27 @@ uint64_t paging_leaf_entry(uint64_t virt) {
 // there. The frames come back to pmm at the next full shootdown
 // (tlb_shootdown(0)), which proc_reap performs once the process is
 // completely gone.
+uint64_t paging_count_present_user(uint64_t pml4_phys) {
+    if (!pml4_phys) { return 0; }
+    uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
+    uint64_t n = 0;
+    for (unsigned i4 = 0; i4 < 512; i4++) {
+        if (i4 == PHYSMAP_PML4_INDEX || i4 == 511) { continue; }   // the kernel's, shared
+        if (!(pml4[i4] & PAGE_PRESENT)) { continue; }
+        uint64_t *pdpt = (uint64_t *)phys_to_virt(pml4[i4] & PAGE_ADDR_MASK);
+        for (unsigned i3 = 0; i3 < 512; i3++) {
+            if (!(pdpt[i3] & PAGE_PRESENT)) { continue; }
+            uint64_t *pd = (uint64_t *)phys_to_virt(pdpt[i3] & PAGE_ADDR_MASK);
+            for (unsigned i2 = 0; i2 < 512; i2++) {
+                if (!(pd[i2] & PAGE_PRESENT)) { continue; }
+                uint64_t *pt = (uint64_t *)phys_to_virt(pd[i2] & PAGE_ADDR_MASK);
+                for (unsigned i1 = 0; i1 < 512; i1++) { if (pt[i1] & PAGE_PRESENT) { n++; } }
+            }
+        }
+    }
+    return n;
+}
+
 void free_address_space(uint64_t pml4_phys) {
     uint64_t *pml4 = (uint64_t *)phys_to_virt(pml4_phys);
 

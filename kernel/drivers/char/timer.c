@@ -33,9 +33,20 @@ uint64_t sched_clock_ns(void) { return ktime_get_ns(); }
 // reports that minute. The idle thread is the marker -- a CPU running
 // it had nothing else to do.
 void cpu_usage_ticks(uint64_t *busy, uint64_t *idle) {
-    uint64_t now = ktime_get_ns(), b = 0, i = 0;
+    uint64_t b = 0, i = 0;
     int online = smp_online_count();
     for (int k = 0; k < online; k++) {
+        uint64_t bk, ik;
+        cpu_usage_ticks_one(k, &bk, &ik);
+        b += bk; i += ik;
+    }
+    if (busy) { *busy = b; }
+    if (idle) { *idle = i; }
+}
+
+void cpu_usage_ticks_one(int cpu, uint64_t *busy, uint64_t *idle) {
+    uint64_t now = ktime_get_ns(), b = 0, i = 0;
+    for (int k = cpu; k == cpu; k++) {
         struct cpu *c = &cpus[k];
         b += __atomic_load_n(&c->busy_ns, __ATOMIC_RELAXED);
         i += __atomic_load_n(&c->idle_ns, __ATOMIC_RELAXED);
