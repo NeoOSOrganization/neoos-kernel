@@ -361,7 +361,10 @@
 // 1 ns (kernel/syscall/sys_misc.c).
 #define SYS_CLOCK_GETRES    137
 
+// Desktop M0 (docs/superpowers/plans/2026-09-23-desktop-m0-kernel-prereqs.md).
+#define SYS_PWRITE          138
+
 // One past the highest number in use. The dispatch table is this long.
-#define SYS_MAX              138
+#define SYS_MAX              139
 
 #endif

@@ -145,6 +145,7 @@
 #define NEO_MEMFD_CREATE       135
 #define NEO_PREAD              136
 #define NEO_CLOCK_GETRES       137
+#define NEO_PWRITE             138
 #define NEO_ACCESS             132
 #define NEO_FACCESSAT          133
 
@@ -273,6 +274,7 @@
 #define LX_MEMFD_CREATE    319
 #define LX_PREAD64          17
 #define LX_CLOCK_GETRES    229
+#define LX_PWRITE64         18
 #define LX_ACCESS           21
 #define LX_FACCESSAT       269
 #define LX_FACCESSAT2      439
@@ -528,6 +530,7 @@ long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a
     case LX_FTRUNCATE:        return neo(NEO_FTRUNCATE, a1, a2, 0, 0, 0, 0);
     case LX_PREAD64:          return neo(NEO_PREAD, a1, a2, a3, a4, 0, 0);
     case LX_CLOCK_GETRES:     return neo(NEO_CLOCK_GETRES, a1, a2, 0, 0, 0, 0);
+    case LX_PWRITE64:         return neo(NEO_PWRITE, a1, a2, a3, a4, 0, 0);
     // memfd_create takes a NAME -> measure it and shift, the same
     // systematic path reshape statx and access use.
     case LX_MEMFD_CREATE:

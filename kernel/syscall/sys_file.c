@@ -115,6 +115,13 @@ int64_t sys_open(struct syscall_args *a) {
 
     int err = 0;
     struct vnode *vn = vfs_resolve(path_buf, &err);
+    // O_CREAT|O_EXCL: "create it, and fail if it exists" -- the check and
+    // the create both happen under fs_lock, so of two racing creators
+    // exactly one wins. Lock files and SQLite depend on it. (O_EXCL
+    // without O_CREAT is undefined by POSIX and ignored, as on Linux.)
+    if (vn && (flags & O_CREAT) && (flags & O_EXCL)) {
+        vnode_put(vn); fs_lock_release(); fd_close(task, slot); return -EEXIST;
+    }
     if (!vn && (flags & O_CREAT)) {
         char name[VFS_NAME_MAX];
         struct vnode *dir = vfs_resolve_parent(path_buf, name, &err);
@@ -791,6 +798,22 @@ int64_t sys_pread(struct syscall_args *a) {
     uint32_t saved = f->position;
     f->position = (uint32_t)a->a4;
     int64_t rc = file_read(f, (void *)(uintptr_t)a->a2, a->a3);
+    f->position = saved;
+    return rc;
+}
+
+// pwrite(fd, buf, count, offset): pread's twin -- writes at `offset`
+// without moving the file position.
+int64_t sys_pwrite(struct syscall_args *a) {
+    struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
+    if (!f) { return -EBADF; }
+    if ((int64_t)a->a4 < 0) { return -EINVAL; }
+    if (!f->vn) { return -ESPIPE; }          // pipe, socket, tty: no position
+    if (f->vn->type == VNODE_DIR) { return -EISDIR; }
+
+    uint32_t saved = f->position;
+    f->position = (uint32_t)a->a4;
+    int64_t rc = file_write(f, (const void *)(uintptr_t)a->a2, a->a3);
     f->position = saved;
     return rc;
 }
