@@ -105,6 +105,12 @@ struct vfs_ops {
     // which is why fallocate still answers -EOPNOTSUPP.
     int     (*truncate_to)(struct vnode *vn, uint64_t len);
     int     (*readdir)(struct vnode *dir, uint32_t index, struct vfs_dirent *out);
+    // Move olddir/oldname to newdir/newname, both on this mount. An
+    // existing target is replaced (file over file; an EMPTY directory
+    // over a directory), as rename(2) does. Filesystems that cannot
+    // rename return -EPERM / -EROFS.
+    int     (*rename)(struct vnode *olddir, const char *oldname,
+                      struct vnode *newdir, const char *newname);
 };
 
 struct vfs_mount {
@@ -141,6 +147,15 @@ struct vnode *vnode_get(struct vfs_mount *m, uint64_t inode_id);
 void vnode_put(struct vnode *vn);
 // Take another reference on a vnode already held; returns vn.
 struct vnode *vnode_ref(struct vnode *vn);
+// A filesystem whose inode ids encode an on-disk location (fatfs: the
+// directory entry) calls this when rename moves that location: a live
+// vnode for old_id -- an fd open on the renamed file -- becomes new_id,
+// and `fix` updates its driver state, under the hash lock. No-op if
+// nothing has the file open.
+void vfs_vnode_rekey(struct vfs_mount *m, uint64_t old_id, uint64_t new_id,
+                     void (*fix)(struct vnode *vn, void *ud), void *ud);
+// rename(2) on canonical paths. Caller holds fs_lock.
+int vfs_rename(const char *oldpath, const char *newpath);
 
 // Resolves an absolute path to a vnode whose refcount is already
 // taken -- caller must vnode_put it. On failure returns 0 and sets

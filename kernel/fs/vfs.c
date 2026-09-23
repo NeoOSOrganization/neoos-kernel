@@ -146,6 +146,29 @@ struct vnode *vnode_get(struct vfs_mount *m, uint64_t inode_id) {
     return slot;
 }
 
+void vfs_vnode_rekey(struct vfs_mount *m, uint64_t old_id, uint64_t new_id,
+                     void (*fix)(struct vnode *vn, void *ud), void *ud) {
+    // Two steps, never two bucket locks at once (same rank). Callers hold
+    // fs_lock, which every path that could look the file up also takes,
+    // so nothing can install a second vnode for new_id in between.
+    unsigned ob = bucket_of(m, old_id);
+    uint64_t f = spin_lock_irqsave(&vnode_hash_locks[ob]);
+    struct vnode **link = &buckets[ob];
+    while (*link && !((*link)->mount == m && (*link)->inode_id == old_id)) { link = &(*link)->next; }
+    struct vnode *vn = *link;
+    if (vn) { *link = vn->next; vn->next = 0; }
+    spin_unlock_irqrestore(&vnode_hash_locks[ob], f);
+    if (!vn) { return; }
+
+    unsigned nb = bucket_of(m, new_id);
+    f = spin_lock_irqsave(&vnode_hash_locks[nb]);
+    vn->inode_id = new_id;
+    if (fix) { fix(vn, ud); }
+    vn->next = buckets[nb];
+    buckets[nb] = vn;
+    spin_unlock_irqrestore(&vnode_hash_locks[nb], f);
+}
+
 void vnode_put(struct vnode *vn) {
     if (!vn || vn->refcount == 0) {
         return;
@@ -524,6 +547,41 @@ struct vnode *vfs_resolve(const char *path, int *out_err) {
 
 struct vnode *vfs_resolve_parent(const char *path, char *out_name, int *out_err) {
     return resolve_walk(path, 1, out_name, out_err);
+}
+
+int vfs_rename(const char *oldpath, const char *newpath) {
+    // A directory cannot move into itself or its own subtree: with
+    // canonical paths that is exactly "newpath starts with oldpath/".
+    uint64_t ol = 0;
+    while (oldpath[ol]) { ol++; }
+    int prefix = 1;
+    for (uint64_t i = 0; i < ol; i++) { if (newpath[i] != oldpath[i]) { prefix = 0; break; } }
+    if (prefix && newpath[ol] == '/') { return -EINVAL; }
+    if (str_eq(oldpath, newpath)) {
+        int err = 0;
+        struct vnode *vn = vfs_resolve(oldpath, &err);
+        if (!vn) { return err; }
+        vnode_put(vn);
+        return 0;                                   // rename(x, x) succeeds, changing nothing
+    }
+
+    char oname[VFS_NAME_MAX], nname[VFS_NAME_MAX];
+    int err = 0;
+    struct vnode *odir = vfs_resolve_parent(oldpath, oname, &err);
+    if (!odir) { return err; }
+    struct vnode *ndir = vfs_resolve_parent(newpath, nname, &err);
+    if (!ndir) { vnode_put(odir); return err; }
+    int rc;
+    if (odir->mount != ndir->mount) {
+        rc = -EXDEV;                               // across mounts: Linux's answer too
+    } else if (ndir->type != VNODE_DIR || odir->type != VNODE_DIR) {
+        rc = -ENOTDIR;
+    } else {
+        rc = odir->mount->ops->rename(odir, oname, ndir, nname);
+    }
+    vnode_put(ndir);
+    vnode_put(odir);
+    return rc;
 }
 
 int vfs_open_into(const char *path, struct process *p, int fd, int writable) {

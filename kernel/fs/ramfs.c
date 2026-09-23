@@ -233,6 +233,34 @@ static int ramfs_unlink(struct vnode *dir, const char *name) {
     return 0;
 }
 
+// Node ids are pool indices, untouched by a rename: only the name and
+// the parent change, so open fds need nothing done to them.
+static int ramfs_rename(struct vnode *olddir, const char *oldname,
+                        struct vnode *newdir, const char *newname) {
+    uint64_t id;
+    int rc = ramfs_lookup(olddir, oldname, &id);
+    if (rc != 0) { return rc; }
+    uint32_t np = (uint32_t)((struct ramfs_node *)newdir->fs_private - nodes);
+    uint64_t victim;
+    if (ramfs_lookup(newdir, newname, &victim) == 0 && victim != id) {
+        int src_dir = nodes[id].type == VNODE_DIR, dst_dir = nodes[victim].type == VNODE_DIR;
+        if (src_dir && !dst_dir) { return -ENOTDIR; }
+        if (!src_dir && dst_dir) { return -EISDIR; }
+        if (dst_dir) {
+            for (int i = 0; i < RAMFS_MAX_NODES; i++) {
+                if (nodes[i].in_use && nodes[i].parent == (uint32_t)victim && (uint64_t)i != victim) { return -ENOTEMPTY; }
+            }
+        }
+        for (int p = 0; p < RAMFS_MAX_PAGES; p++) {
+            if (nodes[victim].pages[p]) { pmm_free(nodes[victim].pages[p], 0); nodes[victim].pages[p] = 0; }
+        }
+        nodes[victim].in_use = 0;
+    }
+    nodes[id].parent = np;
+    name_copy(nodes[id].name, newname);
+    return 0;
+}
+
 // Enumerates the dir's children by ordinal. `index` counts only
 // matching children, so callers can walk 0,1,2,... until -ENOENT
 // without knowing anything about the pool's internal layout.
@@ -270,4 +298,5 @@ const struct vfs_ops ramfs_ops = {
     .truncate   = ramfs_truncate,
     .truncate_to = ramfs_truncate_to,
     .readdir    = ramfs_readdir,
+    .rename     = ramfs_rename,
 };

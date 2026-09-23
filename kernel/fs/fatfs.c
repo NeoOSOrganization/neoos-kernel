@@ -2225,6 +2225,112 @@ static int fatfs_truncate_to(struct vnode *vn, uint64_t len) {
     (void)vn; (void)len; return -EINVAL;   // no size-setting on this fs
 }
 
+// ---- rename --------------------------------------------------------------
+
+// True if a subdirectory holds nothing but "." and "..".
+static int fat_dir_is_empty(struct fat_volume *v, uint32_t dir_cluster) {
+    struct fat_slots it;
+    struct fat_entry e;
+    slots_begin(&it, v, 0, dir_cluster);
+    while (fat_dir_next(&it, &e)) {
+        if (fat_name_eq(e.name, ".") || fat_name_eq(e.name, "..")) { continue; }
+        return 0;
+    }
+    return 1;
+}
+
+struct fat_rekey { uint32_t lba; uint16_t off; };
+static void fat_rekey_fix(struct vnode *vn, void *ud) {
+    struct fat_rekey *k = (struct fat_rekey *)ud;
+    struct fatfs_inode *n = (struct fatfs_inode *)vn->fs_private;
+    if (n) { n->dir_entry_lba = k->lba; n->dir_entry_offset = k->off; }
+}
+
+// A new directory entry (long name and all) carrying the old one's
+// cluster, size, attributes and times, then the old run erased with its
+// clusters kept. Not atomic against a power cut -- FAT has no journal --
+// but the window leaves BOTH names pointing at the data (the new entry
+// is written first), never neither.
+//
+// Inode ids are the short entry's location, so the renamed file's id
+// changes: vfs_vnode_rekey moves any open fd's vnode to the new id and
+// points it at the new entry, so writes through it keep updating the
+// right size field.
+static int fatfs_rename_op(struct vnode *odir, const char *oname,
+                           struct vnode *ndir, const char *nname) {
+    struct fat_volume *v = (struct fat_volume *)odir->mount->fs_private;
+    struct fatfs_inode *od = (struct fatfs_inode *)odir->fs_private;
+    struct fatfs_inode *nd = (struct fatfs_inode *)ndir->fs_private;
+    int o_in_root = (odir->inode_id == FATFS_ROOT_INODE) && (v->variant == FAT_16);
+    int n_in_root = (ndir->inode_id == FATFS_ROOT_INODE) && (v->variant == FAT_16);
+
+    struct fat_entry src;
+    if (!fat_dir_find(v, o_in_root, od->first_cluster, oname, &src)) { return -ENOENT; }
+    int src_is_dir = (src.de.attr & FAT_ATTR_DIRECTORY) != 0;
+    uint32_t src_cluster = dirent_cluster(v, &src.de);
+
+    struct fat_entry dst;
+    if (fat_dir_find(v, n_in_root, nd->first_cluster, nname, &dst)) {
+        if (dst.lba == src.lba && dst.off == src.off) { return 0; }   // same entry
+        int dst_is_dir = (dst.de.attr & FAT_ATTR_DIRECTORY) != 0;
+        if (src_is_dir && !dst_is_dir) { return -ENOTDIR; }
+        if (!src_is_dir && dst_is_dir) { return -EISDIR; }
+        uint32_t victim = dirent_cluster(v, &dst.de);
+        if (dst_is_dir && victim && !fat_dir_is_empty(v, victim)) { return -ENOTEMPTY; }
+        // The replaced file's data goes now. An fd still open on it sees
+        // freed clusters, the same divergence unlink already has on FAT
+        // (Linux keeps an unlinked-but-open file alive).
+        if (victim) { fat16_free_chain(v, victim); }
+        int rc = fat_erase_run(v, n_in_root, nd->first_cluster, &dst);
+        if (rc != 0) { return rc; }
+        // Erasing may have freed slots BEFORE the source's run in the same
+        // directory; its location is unchanged, but re-find to be sure.
+        if (!fat_dir_find(v, o_in_root, od->first_cluster, oname, &src)) { return -EIO; }
+    }
+
+    uint32_t lba;
+    uint16_t off;
+    int rc = fat_create_named(v, n_in_root, nd->first_cluster, nname, src.de.attr,
+                              src_cluster, src.de.file_size, &lba, &off);
+    if (rc != 0) { return rc; }
+
+    // rename(2) changes the name, not the file: carry the times over
+    // (fat_create_named stamped "now").
+    uint8_t sector[SECTOR_SIZE];
+    if (blkcache_read(v->drive, lba, sector)) {
+        struct fat16_dirent *ne = (struct fat16_dirent *)(sector + off);
+        ne->create_time_tenth = src.de.create_time_tenth;
+        ne->create_time = src.de.create_time;
+        ne->create_date = src.de.create_date;
+        ne->access_date = src.de.access_date;
+        ne->write_time  = src.de.write_time;
+        ne->write_date  = src.de.write_date;
+        blkcache_write(v->drive, lba, sector);
+    }
+
+    // The old run's location is stable across the create (occupied slots
+    // are never reused), so erase exactly what was found.
+    rc = fat_erase_run(v, o_in_root, od->first_cluster, &src);
+    if (rc != 0) { return rc; }
+
+    // A directory that changed parent must point its ".." at the new one
+    // (0 means "the root" on FAT, whichever variant).
+    if (src_is_dir && src_cluster && odir != ndir) {
+        uint32_t base = cluster_to_lba(v, src_cluster);
+        if (blkcache_read(v->drive, base, sector)) {
+            struct fat16_dirent *dd = (struct fat16_dirent *)sector;
+            uint32_t parent = (ndir->inode_id == FATFS_ROOT_INODE) ? 0 : nd->first_cluster;
+            dirent_set_cluster(v, &dd[1], parent);
+            blkcache_write(v->drive, base, sector);
+        }
+    }
+
+    struct fat_rekey k = { lba, off };
+    vfs_vnode_rekey(odir->mount, inode_id_of(src.lba, src.off), inode_id_of(lba, off),
+                    fat_rekey_fix, &k);
+    return 0;
+}
+
 const struct vfs_ops fatfs_ops = {
     .mount      = fatfs_mount_op,
     .umount     = fatfs_umount_op,
@@ -2239,4 +2345,5 @@ const struct vfs_ops fatfs_ops = {
     .truncate   = fatfs_truncate_op,
     .truncate_to = fatfs_truncate_to,
     .readdir    = fatfs_readdir_op,
+    .rename     = fatfs_rename_op,
 };

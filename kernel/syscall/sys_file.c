@@ -818,6 +818,31 @@ int64_t sys_pwrite(struct syscall_args *a) {
     return rc;
 }
 
+// renameat2(olddirfd, oldpath, oldlen, newdirfd, newpath, newlen|flags<<32).
+// NeoOS paths travel as ptr+len, which makes Linux's five arguments
+// seven; `flags` rides in the high half of the last one (NeoOS-internal
+// numbering -- the shim builds it). rename and renameat arrive here
+// with AT_FDCWD and flags 0.
+//
+// DIVERGENCES (docs/stdlib.md): only AT_FDCWD is accepted as a dirfd,
+// as for faccessat; no RENAME_* flags yet (-EINVAL).
+int64_t sys_renameat2(struct syscall_args *a) {
+    if ((int)a->a1 != AT_FDCWD || (int)a->a4 != AT_FDCWD) { return -EBADF; }
+    uint64_t a5 = (uint64_t)a->frame->r8, a6 = (uint64_t)a->frame->r9;   // args 5, 6
+    uint64_t newlen = a6 & 0xFFFFFFFFULL;
+    uint32_t flags  = (uint32_t)(a6 >> 32);
+    if (flags != 0) { return -EINVAL; }
+    char oldp[VFS_MAX_PATH], newp[VFS_MAX_PATH];
+    int rc = copy_user_path_at(a->a2, a->a3, oldp);
+    if (rc != 0) { return rc; }
+    rc = copy_user_path_at((int64_t)a5, (int64_t)newlen, newp);
+    if (rc != 0) { return rc; }
+    fs_lock_acquire();
+    rc = vfs_rename(oldp, newp);
+    fs_lock_release();
+    return rc;
+}
+
 int64_t sys_fsync(struct syscall_args *a) {
     struct file_descriptor *f = fd_get(current_proc(), (int)a->a1);
     if (!f) { return -EBADF; }

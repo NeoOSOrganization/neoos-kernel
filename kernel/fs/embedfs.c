@@ -122,6 +122,10 @@ static int embedfs_truncate_to(struct vnode *vn, uint64_t len) {
     (void)vn; (void)len; return -EINVAL;   // no size-setting on this fs
 }
 
+static int embedfs_rename(struct vnode *od, const char *on, struct vnode *nd, const char *nn) {
+    (void)od; (void)on; (void)nd; (void)nn; return -EROFS;
+}
+
 const struct vfs_ops embedfs_ops = {
     .mount      = embedfs_mount_op,
     .umount     = embedfs_umount_op,
@@ -136,4 +140,5 @@ const struct vfs_ops embedfs_ops = {
     .truncate   = embedfs_truncate,
     .truncate_to = embedfs_truncate_to,
     .readdir    = embedfs_readdir,
+    .rename     = embedfs_rename,
 };

@@ -146,6 +146,7 @@
 #define NEO_PREAD              136
 #define NEO_CLOCK_GETRES       137
 #define NEO_PWRITE             138
+#define NEO_RENAMEAT2          139
 #define NEO_ACCESS             132
 #define NEO_FACCESSAT          133
 
@@ -275,6 +276,9 @@
 #define LX_PREAD64          17
 #define LX_CLOCK_GETRES    229
 #define LX_PWRITE64         18
+#define LX_RENAME           82
+#define LX_RENAMEAT        264
+#define LX_RENAMEAT2       316
 #define LX_ACCESS           21
 #define LX_FACCESSAT       269
 #define LX_FACCESSAT2      439
@@ -539,6 +543,17 @@ long __neoos_syscall(long n, long a1, long a2, long a3, long a4, long a5, long a
         return neo(NEO_ACCESS, a1, neo_strlen((const char *)a1), a2, 0, 0, 0);
     case LX_FACCESSAT:
         return neo(NEO_FACCESSAT, a1, a2, neo_strlen((const char *)a2), a3, 0, 0);
+    // rename family -> renameat2(olddirfd, old, oldlen, newdirfd, new,
+    // newlen | flags << 32): seven Linux-side values in NeoOS's six.
+    case LX_RENAME:
+        return neo(NEO_RENAMEAT2, -100, a1, neo_strlen((const char *)a1),
+                   -100, a2, neo_strlen((const char *)a2));
+    case LX_RENAMEAT:
+        return neo(NEO_RENAMEAT2, a1, a2, neo_strlen((const char *)a2),
+                   a3, a4, neo_strlen((const char *)a4));
+    case LX_RENAMEAT2:
+        return neo(NEO_RENAMEAT2, a1, a2, neo_strlen((const char *)a2),
+                   a3, a4, neo_strlen((const char *)a4) | ((long)(unsigned)a5 << 32));
     case LX_FACCESSAT2:
         return neo(NEO_FACCESSAT, a1, a2, neo_strlen((const char *)a2), a3, a4, 0);
 

@@ -296,6 +296,7 @@ static const struct syscall_desc syscall_table[SYS_MAX] = {
     [SYS_PREAD]          = { sys_pread,           "pread" },
     [SYS_CLOCK_GETRES]   = { sys_clock_getres,    "clock_getres" },
     [SYS_PWRITE]         = { sys_pwrite,          "pwrite" },
+    [SYS_RENAMEAT2]      = { sys_renameat2,       "renameat2" },
     [SYS_MEMFD_CREATE]   = { sys_memfd_create,    "memfd_create" },
     [SYS_ACCESS]         = { sys_access,          "access" },
     [SYS_FACCESSAT]      = { sys_faccessat,       "faccessat" },
