@@ -14,6 +14,7 @@
 // Linux's values (<linux/fs.h>).
 #define BLKGETSIZE    0x1260
 #define BLKSSZGET     0x1268
+#define BLKROGET      0x125E   // int: 1 for a read-only device
 #define BLKGETSIZE64  0x80081272
 
 // Most sectors moved by one multi-sector command.
@@ -100,6 +101,10 @@ static int64_t b_ioctl(struct file_descriptor *f, uint64_t req, void *arg) {
     }
     if (req == BLKSSZGET) {
         int v = (int)d->sector_size;
+        return copy_to_user(arg, &v, sizeof v) ? -EFAULT : 0;
+    }
+    if (req == BLKROGET) {
+        int v = (d->flags & BLOCKDEV_RO) ? 1 : 0;
         return copy_to_user(arg, &v, sizeof v) ? -EFAULT : 0;
     }
     if (req == BLKGETSIZE) {

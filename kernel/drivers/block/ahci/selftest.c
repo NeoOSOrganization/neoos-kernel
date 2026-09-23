@@ -170,6 +170,22 @@ static const char *scratch_checks(struct ahci_link *l, struct blockdev *d) {
     return why;
 }
 
+// sr0 is the boot ISO: block 16 is the ISO 9660 primary volume
+// descriptor, and the medium refuses writes.
+static const char *atapi_checks(struct blockdev *d) {
+    uint64_t pa = pmm_alloc(0);
+    if (!pa) { return "pmm"; }
+    uint8_t *b = (uint8_t *)phys_to_virt(pa);
+    static const uint8_t pvd[6] = { 1, 'C', 'D', '0', '0', '1' };
+    const char *why = 0;
+    if (d->sector_size != 2048)                                  { why = "sr0 block size"; }
+    else if (blockdev_read(d, 16, 1, b) != 0)                    { why = "sr0 read"; }
+    else if (!bytes_eq(b, pvd, 6))                               { why = "sr0 block 16 is not an ISO 9660 descriptor"; }
+    else if (blockdev_write(d, 16, 1, b) != -EROFS)              { why = "sr0 write not EROFS"; }
+    pmm_free(pa, 0);
+    return why;
+}
+
 static struct blockdev *first_ahci_disk;
 static void find_disk(struct blockdev *d, void *arg) {
     (void)arg;
@@ -183,6 +199,12 @@ void ahci_selftest(void) {
     if (!why) {
         blockdev_foreach(find_disk, 0);
         if (first_ahci_disk) { why = ncq_checks(first_ahci_disk); }
+    }
+    if (!why) {
+        struct blockdev *sr = blockdev_find("sr0");
+        // An empty drive (no disc) has nothing to read; the boot layout
+        // always has the ISO in it.
+        if (sr && sr->driver && sr->driver[0] == 'a' && sr->sector_count > 16) { why = atapi_checks(sr); }
     }
     if (why) {
         serial_write_string("[ahci] selftest FAILED: ");

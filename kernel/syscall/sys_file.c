@@ -186,6 +186,14 @@ int64_t sys_open(struct syscall_args *a) {
         fd_close(task, slot);
         return -EBUSY;
     }
+    // A read-only medium (sr) refuses to be opened for writing at all,
+    // as Linux's sr/cdrom open does -- not just at the first write.
+    if (vn->type == VNODE_BLOCK && (((struct blockdev *)f->priv)->flags & BLOCKDEV_RO) &&
+        (flags & (O_WRONLY | O_RDWR))) {
+        vnode_put(vn);
+        fd_close(task, slot);
+        return -EROFS;
+    }
 
     return slot;
 }

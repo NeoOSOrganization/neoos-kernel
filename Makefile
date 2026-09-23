@@ -634,6 +634,7 @@ CORE_REQUIRED_MARKERS := \
 	"[mmio] selftest passed" \
 	"[ata_id] selftest passed" \
 	"[ahci] port 0: sda " \
+	"[ahci] port 1: sr0 " \
 	"[boot] root: sda via ahci" \
 	"[ahci] selftest passed" \
 	"[blockdev] sda: sectors=" \

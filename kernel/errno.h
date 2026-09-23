@@ -19,6 +19,7 @@
 #define ENOMEM  12
 #define ECHILD  10
 #define ETIMEDOUT 110
+#define ENOMEDIUM 123   // no medium in an optical drive (Linux value)
 #define ENOSYS  38
 #define ENOENT  2
 #define EBADF   9

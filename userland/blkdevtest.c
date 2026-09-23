@@ -15,6 +15,7 @@
 #define BLKGETSIZE    0x1260
 #define BLKSSZGET     0x1268
 #define BLKGETSIZE64  0x80081272UL
+#define BLKROGET      0x125E
 
 static int fails;
 #define CHECK(c, ...) do { if (!(c)) { printf("blkdevtest: FAILED: " __VA_ARGS__); printf("\n"); fails++; } \
@@ -73,6 +74,31 @@ int main(void) {
     }
     close(fd);
 
+    // sr0: the boot ISO on the second AHCI port, read-only (storage-02).
+    CHECK(stat("/dev/sr0", &st) == 0 && S_ISBLK(st.st_mode), "stat /dev/sr0 errno=%d", errno);
+    CHECK(major(st.st_rdev) == 11 && minor(st.st_rdev) == 0, "sr0 rdev %u:%u", major(st.st_rdev), minor(st.st_rdev));
+    errno = 0;
+    fd = open("/dev/sr0", O_RDWR);
+    CHECK(fd < 0 && errno == EROFS, "sr0 O_RDWR: fd=%d errno=%d", fd, errno);
+    if (fd >= 0) { close(fd); }
+    errno = 0;
+    fd = open("/dev/sr0", O_WRONLY);
+    CHECK(fd < 0 && errno == EROFS, "sr0 O_WRONLY: fd=%d errno=%d", fd, errno);
+    if (fd >= 0) { close(fd); }
+    fd = open("/dev/sr0", O_RDONLY);
+    CHECK(fd >= 0, "open /dev/sr0 errno=%d", errno);
+    int ro = -1;
+    CHECK(ioctl(fd, BLKROGET, &ro) == 0 && ro == 1, "sr0 BLKROGET %d", ro);
+    CHECK(ioctl(fd, BLKSSZGET, &ss) == 0 && ss == 2048, "sr0 BLKSSZGET %d", ss);
+    unsigned char pvd[6];
+    CHECK(pread(fd, pvd, 6, 32768) == 6 && memcmp(pvd, "\x01" "CD001", 6) == 0, "sr0 ISO 9660 descriptor");
+    CHECK(write(fd, pvd, 6) < 0 && errno == EBADF, "write on O_RDONLY sr0 errno=%d", errno);
+    close(fd);
+    fd = open("/dev/sda", O_RDONLY);
+    ro = -1;
+    CHECK(fd >= 0 && ioctl(fd, BLKROGET, &ro) == 0 && ro == 0, "sda BLKROGET %d", ro);
+    if (fd >= 0) { close(fd); }
+
     // /proc/partitions lists both disks.
     char pb[2048] = {0};
     fd = open("/proc/partitions", O_RDONLY);
@@ -80,6 +106,7 @@ int main(void) {
     if (fd >= 0) { close(fd); }
     CHECK(strncmp(pb, "major minor  #blocks  name", 26) == 0, "partitions header");
     CHECK(strstr(pb, " sda\n") && strstr(pb, " sdb\n"), "partitions list:\n%s", pb);
+    CHECK(strstr(pb, " sr0\n") != 0, "sr0 missing from /proc/partitions:\n%s", pb);
 
     // A 64-bit offset through musl and the shim, not truncated to 32 bits.
     fd = open("/tmp/blkdevtest.big", O_CREAT | O_RDWR, 0644);
