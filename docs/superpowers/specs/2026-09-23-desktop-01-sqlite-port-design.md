@@ -49,17 +49,17 @@ instead; changed on your review to match the other ports.)
 
 ## Build
 
-`build.sh`, same shape as `neoos-zlib/build.sh`:
+A `Makefile` (the port contract: os-builder runs `make MUSL_DIR=...`):
 
-```sh
-NEOOS_TOOLCHAIN="${NEOOS_TOOLCHAIN:-$HOME/opt/cross-x86_64-neoos}"
-CC=x86_64-neoos-linux-musl-gcc
-CFLAGS="-O2 -fPIC $SQLITE_OPTS"
-$CC $CFLAGS -c upstream/sqlite3.c -o build/sqlite3.o
-x86_64-neoos-linux-musl-ar rcs build-output/lib/libsqlite3.a build/sqlite3.o
-$CC $CFLAGS -static upstream/shell.c build/sqlite3.o -o build-output/bin/sqlite3
-cp upstream/sqlite3.h upstream/sqlite3ext.h build-output/include/
 ```
+make            # submodule-init -> generate build/amal/sqlite3.c -> build-output/lib/{libsqlite3.a,libnsql.a},
+                # build-output/include/{sqlite3.h,sqlite3ext.h,nsql.h}, build/sqlite3.nex (the CLI)
+make test-host  # nsql's tests, built and run natively
+```
+
+The libraries are compiled with the hosted toolchain
+(`x86_64-neoos-linux-musl-gcc`) and `-fPIC`, so they link into both
+stock-address and large-code-model executables.
 
 Compile-time options (`SQLITE_OPTS`), each with its reason:
 
@@ -89,7 +89,7 @@ Checked against the kernel and the shim on 2026-09-23:
 |---|---|---|
 | `open`/`close`/`read`/`write`/`lseek` | yes | — |
 | `pread`/`pwrite` (only with `USE_PREAD`) | `pread` yes, `pwrite` **no** | K1 adds `pwrite64`; build keeps SQLite's default lseek+read/write path anyway |
-| `fsync`/`fdatasync` | yes (MSC-3) | verify `fsync` actually flushes the FAT volume's block cache to the ATA device, not just the vnode — **assumption to verify** |
+| `fsync`/`fdatasync` | yes (MSC-3) | verified 2026-09-23: the block cache is write-through and every ATA write ends with a drive cache flush, so data is durable when `write()` returns |
 | `ftruncate` | yes | — |
 | `fstat`/`stat`/`access`/`getcwd`/`unlink`/`mkdir`/`rmdir`/`readlink` | yes | — |
 | `fcntl(F_SETLK/F_SETLKW/F_GETLK)` POSIX record locks | **no** | **K1** — the one real kernel feature this port needs |
