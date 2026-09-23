@@ -34,7 +34,7 @@ decisions in context; this is the review list. IDs are `D-<spec>-<n>`.
 | D-02-3 | Generated files committed; `make check-tokens` | generate at build | no Python needed to build |
 | D-02-4 | `nui_app` owns WM↔LVGL glue and a poll-based loop | every app hand-rolls it | correct once; no sleep loops; multi-window |
 | D-02-5 | Stay on LVGL 9.2; XML (9.3+) not used | upgrade now | XML licence restricts tooling; not needed |
-| D-02-6 | Latin-1 glyphs in v1 | full Unicode fonts | size; open question for you |
+| D-02-6 | **Persian in v1** (revised 2026-09-23 on your instruction): LVGL's table shaper + BiDi, Noto Sans Arabic UI as Montserrat's fallback, DejaVu Sans Mono for monospace, TTFs via `tiny_ttf`, `fa` keyboard layout | HarfBuzz + FreeType; bitmap fonts via `lv_font_conv` | everything is already in LVGL 9.2 and on the host (no download); presentation-form shaping is correct for Persian |
 
 ## Window management (spec 05)
 
@@ -127,6 +127,4 @@ brief's Windows vocabulary.
 4. **Kernel prerequisites K1–K3** — record locks, `rename`, `pwrite`,
    `O_EXCL`, procfs, init power signals: kernel ABI work that comes
    before any desktop code.
-5. **Fonts / scripts** (D-02-6) — Latin-1 only in v1 keeps things small;
-   if you need Persian or other scripts in Notepad/Terminal from day one,
-   that changes the UI kit's font pipeline and LVGL config (BiDi).
+5. **Fonts / scripts** (D-02-6) — resolved: Persian is in v1.

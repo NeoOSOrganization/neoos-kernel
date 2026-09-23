@@ -60,6 +60,15 @@ exactly that, and it is already the one BusyBox has been tested against.
      lines, keep the cursor inside) — what xterm does without reflow.
   4. Wide characters (East Asian Wide) occupy two cells — only if the
      font gains wide glyphs; stubbed to one cell in v1.
+  5. **Persian**: cells stay in *logical* order (as every terminal
+     emulator and the programs writing to it assume); the renderer shapes
+     each run of Arabic-script cells with LVGL's presentation-form shaper
+     (joining across adjacent cells) and draws that run right-to-left
+     within its cells — the "implicit BiDi per line" approach of mlterm /
+     Konsole's BiDi mode, which makes Persian file names and `echo`
+     output readable. Full terminal BiDi (ECMA-48 BiDi modes, cursor in
+     visual order) is not attempted — no terminal does it consistently.
+     Typing uses the UI kit's `fa` layout (Alt+Shift).
 - A C API header `vt.h` is what the C# `NeoOS.Vt` binding wraps (spec 07).
 
 ## ANSI/VT scope for v1

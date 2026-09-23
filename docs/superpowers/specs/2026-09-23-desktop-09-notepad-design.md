@@ -57,8 +57,14 @@ Model and view are separate so the model is host-testable:
   is detected, hidden and preserved on save.
 - Line endings: detect LF vs CRLF on open (majority), preserve on save,
   show in the status bar.
-- Fonts: the UI kit's monospace font (Spleen) — Latin-1 coverage in v1
-  (spec 02 open question); unsupported glyphs render as a box.
+- Fonts and Persian: the UI kit's monospace font (DejaVu Sans Mono) with
+  LVGL shaping + BiDi (spec 02 "Persian support"): Persian text is shaped
+  and displayed right-to-left, mixed Persian/Latin lines are reordered by
+  the BiDi algorithm, and the Persian keyboard layout (Alt+Shift) types
+  it. The *model* stays in logical order (what is saved is what was
+  typed); caret movement follows logical order in v1 — visual-order
+  cursor movement in mixed lines is a known v1 limitation, recorded.
+  Glyphs outside Latin + Persian render as a box.
 
 ## Files
 

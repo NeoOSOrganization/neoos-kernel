@@ -32,8 +32,9 @@ build-vs-reuse choices: `2026-09-23-desktop-03-lvgl-ui-libraries-survey.md`.
 - Accessibility APIs (screen readers). NeoOS has none to talk to. The
   kit commits to keyboard operability and contrast targets instead (see
   "Accessibility").
-- Internationalisation beyond UTF-8 text in Latin scripts: fonts are
-  limited to the glyph ranges baked in (open question).
+- Scripts beyond Latin and **Persian** (Arabic script) in v1 — CJK,
+  Indic and complex scripts needing a full shaping engine (HarfBuzz)
+  are out of scope; see "Persian support".
 - Animations beyond LVGL's defaults for pressed/checked transitions.
 
 ## Repository
@@ -147,13 +148,63 @@ and a `make check-tokens` target fails CI if they are stale.
 
 - Body/UI font: **Montserrat** (already compiled into `neoos-lvgl` at 14
   and 28) extended with 12 and 18 via `LV_FONT_MONTSERRAT_12/18` —
-  built-in LVGL fonts, no download.
-- Monospace (Terminal, Notepad): **Spleen 12×24** — already in the tree
-  (`third_party/spleen`, used by the kernel terminal and `neoos-wm`'s
-  font), converted once to an LVGL font with `lv_font_conv` on the host
-  (a small npm tool; if unavailable, a ~100-line converter from the
-  existing `tools/bdf2c.py` output — the BDF is already parsed there).
-- Glyph range: ASCII + Latin-1 in v1. See open questions.
+  built-in LVGL fonts, no download — with **Noto Sans Arabic UI** as its
+  LVGL *fallback* font for Persian (next section).
+- Monospace (Terminal, Notepad): **DejaVu Sans Mono**, rendered at runtime
+  from its TTF by LVGL's `tiny_ttf` — it covers Latin *and* the Arabic
+  presentation forms Persian needs, in one monospace face (Spleen, the
+  kernel terminal's font, has no Arabic glyphs, so it is not used here).
+
+## Persian support (required in v1)
+
+Decided 2026-09-23 on your instruction ("I do need Persian support").
+Everything below is already in the vendored LVGL 9.2 or on the build
+host — **nothing is downloaded**.
+
+- **Shaping**: `LV_USE_ARABIC_PERSIAN_CHARS 1` — LVGL's `lv_text_ap.c`
+  maps each Arabic-script letter to its isolated/initial/medial/final
+  **presentation form** (U+FE70–FEFF, and U+FB50–FDFF for the Persian
+  letters پ چ ژ ک گ ی, which its table includes), plus lam-alef
+  ligatures. It is a table-driven shaper, not HarfBuzz: correct for
+  Persian and Arabic text without diacritic stacking; fonts must
+  therefore contain the presentation-form glyphs.
+- **Bidirectional text**: `LV_USE_BIDI 1`, base direction per object
+  `LV_BASE_DIR_AUTO` (detected from the first strong character), so a
+  Persian label reads right-to-left and a mixed "فایل.txt" orders
+  correctly. `nui_set_rtl(obj, bool)` mirrors a container's layout
+  (flex/grid direction, text alignment) for a whole-Persian UI.
+- **Fonts** (checked with fontTools against the host's files, OFL /
+  Bitstream-Vera licensed, so redistributable):
+
+  | role | font | covers |
+  |---|---|---|
+  | UI, Latin | Montserrat (LVGL built-in bitmap) | Latin |
+  | UI, Persian | Noto Sans Arabic UI Regular/Bold (TTF, ~260 KB each) | every Persian presentation form, Persian digits ۰–۹ |
+  | monospace | DejaVu Sans Mono (TTF, 335 KB) | Latin + Arabic presentation forms |
+
+  The TTFs are installed to `/usr/share/fonts/neoos/` and loaded at
+  runtime with `LV_USE_TINY_TTF 1` (stb_truetype, in LVGL, glyph cache
+  on), so any size is available without generating bitmap fonts. Each
+  Montserrat size gets a fallback `lv_font_t` from Noto Sans Arabic UI at
+  the same pixel size (`font->fallback`); LVGL tries the fallback for
+  any glyph the primary lacks.
+- **ZWNJ** (U+200C, zero-width non-joiner) is everywhere in Persian
+  ("می‌خواهم") and DejaVu Sans Mono has no glyph for it. The kit treats
+  ZWNJ/ZWJ as zero-width in every font (a glyph-lookup hook returns an
+  empty 0-advance glyph) and the shaper must treat ZWNJ as breaking the
+  join — **verify** `lv_text_ap.c` does; if not, a small patch to it in
+  `neoos-lvgl` (the only upstream patch this spec allows).
+- **Digits**: Persian digits (U+06F0–06F9) render when present in text;
+  whether numbers *display* in Persian digits (clock, lists) is a
+  setting (`locale.digits = latin | persian`), default latin.
+- **Typing Persian**: the kit's keypad input maps WM evdev key codes to
+  characters through a **layout table**; v1 ships `us` and `fa`
+  (the standard Persian layout, ISIRI 9147), switched with Alt+Shift, and
+  the shell's taskbar shows the active layout ("EN"/"FA"). The layout is
+  per-app state today (the WM has no input-method concept); a
+  system-wide layout is an open question for spec 05.
+- **Not in v1**: kashida justification, Arabic diacritic (harakat)
+  positioning beyond what the presentation forms give, vertical text.
 
 ## Public C API
 
@@ -294,13 +345,13 @@ states it styles, events it emits, keyboard behaviour.
 |---|---|
 | LVGL's `default` theme leaks Material look into places we did not override | the gallery shows every widget class; anything not restyled is visible there |
 | Two sources of chrome styling (WM, kit) drift | one `tokens.json`, both generated, `make check-tokens` |
-| Font coverage (non-Latin text in Notepad) | open question; fallback glyph shown, never a crash |
+| Font coverage outside Latin + Persian | a box glyph, never a crash |
+| LVGL's table shaper gets a Persian edge case wrong (ZWNJ, lam-alef) | golden-screenshot tests of fixed Persian strings in the gallery; patch `lv_text_ap.c` in `neoos-lvgl` if needed |
 
 ## Open questions
 
-- Which extra scripts must Notepad/Terminal render in v1 (e.g.
-  Persian/Arabic, CJK)? Each adds font size and, for RTL, LVGL's BiDi
-  support (`LV_USE_BIDI`). Draft: Latin-1 only in v1.
+- Should the keyboard layout be system-wide (WM-level) rather than per
+  app? Draft: per app in M2, revisit with spec 05's protocol v2.
 - Should the accent colour be user-configurable (a token override stored
   by the shell)? Draft: yes in M11, fixed in M2.
 
