@@ -65,8 +65,8 @@ _Static_assert(__builtin_offsetof(struct stat, st_ctime_sec) == 104, "st_ctime_s
 
 struct vnode;
 // Fills `out` from `vn`. See docs/stdlib.md for which fields are real
-// and which are synthesized -- FAT stores neither owners nor
-// timestamps NeoOS can read yet.
+// and which are synthesized -- FAT stores no owners, modes or link
+// counts; its timestamps and a block node's st_rdev are real.
 void vfs_stat_vnode(struct vnode *vn, struct stat *out);
 
 #endif

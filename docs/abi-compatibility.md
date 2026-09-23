@@ -143,7 +143,7 @@ that is fine -- musl's mallocng falls back to `mmap`. See
 | `struct timespec` | **Matches** — two 64-bit signed fields. Defined; nothing consumes it from userland yet except futex timeouts. |
 | The auxv | **Matches** — pairs of `unsigned long`, `AT_NULL`-terminated, at the documented place on the entry stack. |
 | `struct dirent` | **Matches** — Linux's `getdents64` record: d_ino/d_off/d_reclen/d_type and a variable-length d_name at offset 19, 8-byte aligned. `DT_*` are Linux's values. Names carry the full VFAT long name (up to 255 characters). |
-| `struct stat` | **Matches** — Linux's x86-64 144-byte layout, asserted at compile time and from userland. Field *values* diverge: mode bits, owner and link count are synthesized, and all three timestamps are 0, because FAT stores none of them (`CLOCK_REALTIME` now exists but nothing records file times with it). See `docs/stdlib.md`. |
+| `struct stat` | **Matches** — Linux's x86-64 144-byte layout, asserted at compile time and from userland. Field *values* diverge: mode bits, owner and link count are synthesized because FAT stores none of them. Timestamps are FAT's own (real since desktop M0); `st_rdev` is real for block device nodes (storage-01). See `docs/stdlib.md`. |
 | `struct termios` | **Matches** Linux's 36-byte kernel `termios` (NCCS 19), a prefix of musl's larger userland struct — the TTY writes only that prefix. `struct winsize` matches. c_cc indices, `I*`/`O*`/`C*`/`L*` flags and the `TC*`/`TIOC*` ioctl numbers are Linux's. |
 | `struct input_event` | **Matches** — 24 bytes: two `int64_t` timestamps, two `uint16_t` type/code, one `int32_t` value. Linux x86-64 layout. Asserted in userland and kernel. |
 | `struct input_id` | **Matches** — 8 bytes: four `uint16_t` (bustype, vendor, product, version). |
@@ -1397,3 +1397,41 @@ details in `docs/stdlib.md` "Files: desktop M0 additions".
 - FAT: unlinking or replacing an open file frees its data at once (Linux
   keeps it until the last close); renames are not atomic against power
   loss (both names may survive, never neither).
+
+## Refresh — storage-01: block devices, partitions, 64-bit offsets (2026-09-23)
+
+Spec: `docs/superpowers/specs/2026-09-23-storage-01-block-layer-design.md`;
+details in `docs/stdlib.md` "Block devices (storage-01)".
+
+### Implemented
+
+| Linux facility | state on NeoOS |
+|---|---|
+| `/dev/sdX`, `/dev/sdXN` | block nodes, `S_IFBLK`, Linux majors/minors (8, `16×disk+part`; 259 beyond partition 15) |
+| `read`/`write`/`pread`/`pwrite` on a block node | any byte offset/length; partial sectors read-modify-written |
+| `lseek` on a block node | bounded by the device size, `EINVAL` beyond (`fixed_size_llseek`) |
+| `BLKGETSIZE64`, `BLKSSZGET`, `BLKGETSIZE` | Linux numbers and types |
+| `fsync`/`fdatasync` on a block node | flushes the drive cache |
+| GPT, MBR primaries | scanned once at registration; backup GPT header used if the primary is damaged; Linux's boot-indicator rule keeps a FAT boot sector from being read as an MBR |
+| `/proc/partitions` | Linux's format |
+| `statx` `stx_rdev_major`/`stx_rdev_minor` | filled (were 0) |
+| file positions and sizes | 64-bit throughout (were 32-bit in the fd and the vnode); FAT caps files at 4 GiB − 1 and ramfs at 16 KiB with `EFBIG`, as Linux |
+| `ioctl` request | truncated to 32 bits, as Linux's `unsigned int cmd` — every `_IOR` request (bit 31 set) used to arrive sign-extended from musl and match nothing |
+| `mount(2)` source | block device path (`/dev/sda`), up to 63 bytes; `hd0`/`hd1` removed |
+
+### Stubbed / diverging
+
+- `BLKRRPART`: `ENOTTY` — a table written by `fdisk` takes effect at the
+  next boot.
+- Extended/logical MBR partitions: ignored.
+- `O_DIRECT` on a block node: no effect (the cache is write-through).
+- Block node mode `0660`: reported, not enforced.
+
+### What a ported application would still hit
+
+- `fdisk` can read and write partition tables, but the kernel will not
+  rescan until reboot.
+- `mkfs.*` and `e2fsck` can run against raw nodes, but there is no
+  filesystem other than FAT to mount yet (ext2 is storage-05).
+- Disks are still on legacy IDE only (AHCI and NVMe: storage-02/03);
+  mounts are still fixed in the kernel (`root=` and fstab: storage-04).

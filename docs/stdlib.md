@@ -72,10 +72,15 @@ alongside the library code that exposes it.
   the process; every sibling is terminated and waited for before the
   old address space is released.
 - `int mount(const char *source, const char *target, const char *fstype)`
-  — mounts a filesystem at `target`. `fstype` is `"fat"`, `"ramfs"`, or
-  `"devfs"`; `source` is `"hd0"` or `"hd1"` for `"fat"` and ignored
-  otherwise. FAT16 versus FAT32 is auto-detected from the volume's
-  cluster count. Returns 0, or `-ENODEV`, `-EEXIST`, or `-ENOSPC`.
+  — mounts a filesystem at `target`. `fstype` is `"fat"`, `"ramfs"`,
+  `"devfs"`, `"procfs"` or `"embedfs"`. For `"fat"`, `source` is a block
+  device — `"/dev/sda"`, `"/dev/sdb1"`, or the bare name `"sda"` (see
+  *Block devices*); it is ignored otherwise. Sources may be up to 63
+  bytes. FAT16 versus FAT32 is auto-detected from the volume's cluster
+  count. Returns 0, or `-ENODEV` (no such device, or not FAT),
+  `-EINVAL` (a device whose sector size is not 512), `-EEXIST`, or
+  `-ENOSPC`. The old `"hd0"`/`"hd1"` sources are gone, with no alias:
+  nothing used them.
 - `int umount(const char *target)` — unmounts the filesystem at
   `target`. Returns 0, `-ENOENT` if nothing is mounted there, or
   `-EBUSY` if any file on it is still open. The mount is left
@@ -891,6 +896,66 @@ composites from it.
 - **`MFD_CLOEXEC` is accepted and inert**, like `pipe2`'s `O_CLOEXEC` —
   NeoOS has no close-on-exec machinery.
 
+## Block devices (storage-01)
+
+Disks and partitions appear in `/dev` with Linux's names and numbers,
+and programs such as `fdisk`, `dd` and `mkfs.*` can use them the way
+they do on Linux.
+
+- **Names.** Disks on the IDE or SATA controllers are `sda`, `sdb`, …
+  (libata's naming); NVMe namespaces will be `nvme<c>n<n>`.
+  Partitions append their number — `sda1` — with a `p` first when the
+  disk name ends in a digit — `nvme0n1p1`.
+- **Numbers.** `sd` disks are major 8, minor `16 × disk index +
+  partition`. Partitions above 15, and NVMe, use major 259 with minors
+  handed out in registration order, as Linux's `blkext` does.
+- **`stat`** reports `S_IFBLK | 0660`, `st_size` 0 (Linux's answer; the
+  size comes from the ioctl below), and `st_rdev = makedev(major,
+  minor)`; `statx` fills `stx_rdev_major`/`stx_rdev_minor`.
+- **`read`/`write`** work at any byte offset and length. Whole aligned
+  sectors go straight to the device; a partial first or last sector is
+  read, patched and written back. A read at the end returns 0; a write
+  at the end is `-ENOSPC`; a write that crosses the end is short.
+- **`lseek`** is bounded by the device size, as Linux's
+  `fixed_size_llseek` is: a position beyond it is `-EINVAL`.
+- **`ioctl`**: `BLKGETSIZE64` (bytes, `uint64_t`), `BLKSSZGET` (logical
+  sector size, `int`), `BLKGETSIZE` (512-byte units, `unsigned long`).
+  Anything else is `-ENOTTY`.
+- **`fsync`** flushes the drive's write cache.
+- **Partitions** are found by reading the disk once, when it is
+  registered at boot: a GPT (the backup header is used if the primary
+  is damaged), else an MBR's four primary entries. Entries that are
+  empty, run past the disk, or overlap an earlier one are skipped and
+  logged.
+- **`/proc/partitions`** lists every disk and partition in Linux's
+  format (`major minor  #blocks  name`, sizes in KiB).
+- **`ioctl` requests are 32-bit**, as Linux's `unsigned int cmd`:
+  musl passes the request as `int`, and the kernel ignores the
+  sign-extended upper half.
+
+### DIVERGENCES
+
+- **No `BLKRRPART`** (`-ENOTTY`): partitions are scanned once, when the
+  disk registers. A table written by `fdisk` takes effect at the next
+  boot.
+- **Extended and logical MBR partitions are ignored** (logged). No
+  NeoOS image uses them.
+- **FAT refuses devices whose sector size is not 512** (`-EINVAL` from
+  `mount`); its driver assumes 512-byte sectors throughout.
+- **No `O_DIRECT`**: the flag has no effect on a block node. All I/O
+  goes through the write-through sector cache, which already makes a
+  completed `write` durable.
+- **`0660` is reported, not enforced**: NeoOS has no permission model
+  yet (storage-06).
+
+### File sizes and positions are 64-bit
+
+File positions, `lseek` results, `pread`/`pwrite` offsets and file
+sizes are 64-bit everywhere. Each filesystem keeps its own ceiling and
+reports it the way Linux does: **FAT caps a file at 4 GiB − 1** and
+**ramfs at 16 KiB**; a write past either is `-EFBIG` (seeking there is
+allowed, as on Linux).
+
 ## `statx`, `fsync`/`fdatasync`, `fallocate`, `access`/`faccessat` (MSC-3)
 
 - **`statx`** fills `STATX_BASIC_STATS` from the same vnode data as
@@ -900,11 +965,11 @@ composites from it.
   with a real fd is the fstat form; only `AT_FDCWD` is accepted for a
   path (no `openat` family yet). Layout is Linux's 256-byte
   `struct statx`.
-- **`fsync` / `fdatasync`** validate the fd and return 0. NeoOS's block
-  cache writes through — there is no dirty-writeback list — so the
-  data a successful `write()` returned from is already on the device.
-  Not a lie, but not a barrier either: there is no host-side `fsync`
-  behind it.
+- **`fsync` / `fdatasync`** validate the fd and return 0, except on a
+  block device node, where they flush the drive's write cache. NeoOS's
+  block cache writes through — there is no dirty-writeback list — so
+  the data a successful `write()` returned from is already on the
+  device.
 - **`fallocate` returns `-EOPNOTSUPP`.** NeoOS's filesystems cannot
   preallocate, and the vnode layer has no size-set operation beyond
   truncate-to-zero. SQLite / .NET `FileStream` fall back to writing
@@ -1879,19 +1944,21 @@ every caller and no shim can correct a wrong offset.
 
 ### DIVERGENCE: most of `struct stat` is synthesized
 
-Real: `st_ino`, `st_size`, the file type in `st_mode`, and `st_dev`
-(the mount's slot index, +1 so no valid device is 0).
+Real: `st_ino`, `st_size`, the file type in `st_mode`, `st_dev` (the
+mount's slot index, +1 so no valid device is 0), `st_rdev` of a block
+device node (Linux's major/minor, see *Block devices*), and FAT's
+timestamps (`st_mtime` from the entry's write time, `st_atime` from its
+access date, `st_ctime` from its creation time; ramfs and devfs keep
+none and report 0).
 
-Synthesized, because FAT does not store them and NeoOS has no clock
-syscall to have recorded them with:
+Synthesized, because FAT does not store them:
 
 | Field | Value | Why |
 |---|---|---|
-| permission bits of `st_mode` | `0755` dirs, `0644` files, `0666` devices | zero would read as "nobody may touch this"; these are what a FAT driver reports on Linux too |
+| permission bits of `st_mode` | `0755` dirs, `0644` files, `0666` character devices, `0660` block devices | zero would read as "nobody may touch this"; these are what a FAT driver reports on Linux too. Reported, not enforced: there is no permission model yet |
 | `st_uid`, `st_gid` | 0 | single-user system, no credentials exist |
 | `st_nlink` | 2 for directories, 1 otherwise | FAT has no link count; 2 is the conventional `.`/`..` answer |
-| `st_rdev` | 0 | device nodes are not numbered |
-| `st_atime`/`st_mtime`/`st_ctime` | 0 (the epoch) | **no clock syscall yet.** Every file looks equally old, so `make` and anything else comparing timestamps will misbehave |
+| `st_rdev` | 0 for character devices | only block nodes are numbered so far |
 
 `st_blksize` is 512 and `st_blocks` is the size rounded **up**, as on
 Linux.
@@ -2013,9 +2080,8 @@ calibrated against the PIT at boot (`kernel/time/ktime.c`).
 
 If the RTC cannot be read at boot, `CLOCK_REALTIME` silently falls back
 to a boot epoch and formats as January 1970 (`rtc_is_real()` reports
-which). Either way `stat`'s timestamps are all zero — nothing records
-file times yet — so anything comparing a file's mtime against the
-clock, `make` above all, will misbehave.
+which). FAT records file times from that clock, so on a boot-epoch
+fallback new files are stamped 1970 and `make` will misjudge them.
 
 ### DIVERGENCE: `set_tid_address`'s pointer is recorded, not acted on
 
